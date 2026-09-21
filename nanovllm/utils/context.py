@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+
 import torch
 
 
@@ -12,8 +13,7 @@ class Context:
     slot_mapping: torch.Tensor | None = None
     context_lens: torch.Tensor | None = None
     block_tables: torch.Tensor | None = None
-    seq_ids: tuple[int, ...] = ()
-    seq_lens: tuple[int, ...] = ()
+    state_slots: torch.Tensor | None = None
 
 
 _CONTEXT = Context()
@@ -32,21 +32,19 @@ def set_context(
     slot_mapping=None,
     context_lens=None,
     block_tables=None,
-    seq_ids=(),
-    seq_lens=(),
+    state_slots=None,
 ):
     global _CONTEXT
     _CONTEXT = Context(
-        is_prefill=is_prefill,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_k=cu_seqlens_k,
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_k=max_seqlen_k,
-        slot_mapping=slot_mapping,
-        context_lens=context_lens,
-        block_tables=block_tables,
-        seq_ids=tuple(seq_ids),
-        seq_lens=tuple(seq_lens),
+        is_prefill,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        slot_mapping,
+        context_lens,
+        block_tables,
+        state_slots,
     )
 
 
