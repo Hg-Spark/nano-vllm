@@ -182,6 +182,20 @@ class Scheduler:
             raise RuntimeError("scheduler could not make progress")
         return output
 
+    def recover_failed_step(self, seqs: list[Sequence]) -> None:
+        """Discard possibly mutated physical state and recompute from history."""
+        for seq in reversed(seqs):
+            self._validate_committed_prefix(seq)
+            if seq in self.running:
+                self.running.remove(seq)
+            if seq in self.waiting:
+                self.waiting.remove(seq)
+            seq.num_scheduled_tokens = 0
+            seq.status = SequenceStatus.WAITING
+            self.block_manager.deallocate(seq)
+            self.state_manager.deallocate(seq)
+            self.waiting.appendleft(seq)
+
     def preempt(self, seq: Sequence):
         self._validate_committed_prefix(seq)
         seq.status = SequenceStatus.WAITING
