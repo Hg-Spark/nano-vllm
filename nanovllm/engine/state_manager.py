@@ -6,10 +6,9 @@ from nanovllm.engine.sequence import Sequence
 class StateSlotManager:
     """Manage stable logical slots for per-request recurrent state.
 
-    Hybrid models can keep one physical Conv/Recurrent state pool per layer and
-    index every pool with the same request-level slot id. Prefix snapshots are
-    intentionally separate from active slots and will be added at the cache
-    layer.
+    Hybrid models keep one physical Conv/Recurrent state pool per layer and
+    index every pool with the same request-level slot id. This manager owns only
+    active-request slot allocation; prefix snapshots are outside its scope.
     """
 
     def __init__(self, num_slots: int):
