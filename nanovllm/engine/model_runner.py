@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import warnings
 
 import torch
 
@@ -161,6 +162,19 @@ def _resolve_dtype(config) -> torch.dtype:
     return dtype or torch.bfloat16
 
 
+def _resolve_kv_cache_dtype(
+    config: Config,
+    model_dtype: torch.dtype,
+) -> torch.dtype:
+    if config.kv_cache_dtype == "auto":
+        return model_dtype
+    if config.kv_cache_dtype == "fp8_e4m3":
+        return torch.float8_e4m3fn
+    raise ValueError(
+        f"unsupported KV cache dtype: {config.kv_cache_dtype}"
+    )
+
+
 class ModelRunner:
 
     def __init__(self, config: Config):
@@ -228,13 +242,22 @@ class ModelRunner:
             for module in state_modules
         )
         model_param = next(self.model.parameters())
+        cache_dtype = _resolve_kv_cache_dtype(
+            config,
+            model_param.dtype,
+        )
+        cache_element_size = (
+            1
+            if cache_dtype == torch.float8_e4m3fn
+            else model_param.element_size()
+        )
         block_bytes = (
             2
             * len(kv_modules)
             * self.block_size
             * hf_config.num_key_value_heads
             * hf_config.head_dim
-            * model_param.element_size()
+            * cache_element_size
         )
         cache_budget = int(
             total * config.gpu_memory_utilization
@@ -260,11 +283,25 @@ class ModelRunner:
             hf_config.num_key_value_heads,
             hf_config.head_dim,
             device="cuda",
-            dtype=model_param.dtype,
+            dtype=cache_dtype,
         )
         for layer_id, module in enumerate(kv_modules):
             module.k_cache = self.kv_cache[0, layer_id]
             module.v_cache = self.kv_cache[1, layer_id]
+            module.k_scale = config.kv_cache_k_scale
+            module.v_scale = config.kv_cache_v_scale
+
+        if (
+            cache_dtype == torch.float8_e4m3fn
+            and config.kv_cache_k_scale == 1.0
+            and config.kv_cache_v_scale == 1.0
+        ):
+            warnings.warn(
+                "FP8 KV cache is using uncalibrated K/V scales of 1.0; "
+                "validate logits/generation accuracy for the target model.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
         for module in state_modules:
             module.allocate_state_cache(
