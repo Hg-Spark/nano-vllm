@@ -155,7 +155,6 @@ class GatedDeltaNetStateTest(unittest.TestCase):
             state_slots=(0,),
             state_prefix_lens=(0,),
             prefill_q_offsets=(0, 5),
-            prefill_k_offsets=(0, 5),
         )
         actual = self.layer(hidden_states)
 
@@ -187,7 +186,6 @@ class GatedDeltaNetStateTest(unittest.TestCase):
             state_slots=(0,),
             state_prefix_lens=(0,),
             prefill_q_offsets=(0, 3),
-            prefill_k_offsets=(0, 3),
         )
         first = self.layer(hidden_states[:3])
 
@@ -196,7 +194,6 @@ class GatedDeltaNetStateTest(unittest.TestCase):
             state_slots=(0,),
             state_prefix_lens=(3,),
             prefill_q_offsets=(0, 4),
-            prefill_k_offsets=(0, 7),
         )
         second = self.layer(hidden_states[3:])
 
@@ -237,7 +234,6 @@ class GatedDeltaNetStateTest(unittest.TestCase):
             state_slots=(0,),
             state_prefix_lens=(0,),
             prefill_q_offsets=(0, 2),
-            prefill_k_offsets=(0, 2),
         )
         first_chunk = self.layer(first_seq[:2])
 
@@ -250,7 +246,6 @@ class GatedDeltaNetStateTest(unittest.TestCase):
             state_slots=(0, 1),
             state_prefix_lens=(2, 0),
             prefill_q_offsets=(0, 4, 7),
-            prefill_k_offsets=(0, 6, 9),
         )
         mixed_chunk = self.layer(packed)
 
@@ -300,7 +295,7 @@ class GatedDeltaNetStateTest(unittest.TestCase):
         self.assertEqual(snapshot[0].device.type, "cpu")
         self.assertEqual(snapshot[1].device.type, "cpu")
 
-    def test_state_prefix_mismatch_is_rejected(self):
+    def test_negative_state_prefix_is_rejected(self):
         self.layer.allocate_state_cache(1)
         hidden_states = torch.randn(
             2,
@@ -309,14 +304,13 @@ class GatedDeltaNetStateTest(unittest.TestCase):
         set_context(
             True,
             state_slots=(0,),
-            state_prefix_lens=(2,),
+            state_prefix_lens=(-1,),
             prefill_q_offsets=(0, 2),
-            prefill_k_offsets=(0, 3),
         )
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "GDN state prefix mismatch",
+            "invalid GDN state prefix",
         ):
             self.layer(hidden_states)
 
