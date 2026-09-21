@@ -179,6 +179,8 @@ class SchedulerTest(unittest.TestCase):
 
         scheduler.preempt(seq)
 
+        self.assertNotIn(seq, scheduler.running)
+        self.assertEqual(list(scheduler.waiting), [seq])
         self.assertEqual(seq.state_slot, -1)
         self.assertEqual(seq.num_state_tokens, 0)
         self.assertFalse(seq.block_table)
@@ -392,7 +394,7 @@ class SchedulerTest(unittest.TestCase):
         first = scheduler.schedule()
         self.assertEqual(first.prefill_tokens, 4)
         cached_block = original.block_table[0]
-        snapshot = object()
+        snapshot = SimpleNamespace(num_tokens=4)
         scheduler.postprocess(
             first.prefill_seqs,
             [None],
@@ -431,6 +433,67 @@ class SchedulerTest(unittest.TestCase):
             scheduler.block_manager.block_refcounts[cached_block],
             2,
         )
+
+    def test_joint_prefix_rejects_snapshot_without_boundary_metadata(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=4,
+            max_num_seqs=2,
+            num_blocks=8,
+            block_size=4,
+        )
+        seq = Sequence([0, 1, 2, 3, 4, 5])
+        scheduler.add(seq)
+
+        scheduled = scheduler.schedule()
+        self.assertEqual(scheduled.prefill_tokens, 4)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "missing prefix-boundary metadata",
+        ):
+            scheduler.postprocess(
+                scheduled.prefill_seqs,
+                [None],
+                True,
+                {seq.seq_id: object()},
+            )
+
+        self.assertEqual(seq.num_cached_tokens, 0)
+        self.assertEqual(seq.num_state_tokens, 0)
+        self.assertEqual(seq.num_scheduled_tokens, 4)
+        self.assertEqual(len(scheduler.prefix_cache), 0)
+
+    def test_joint_prefix_rejects_mismatched_snapshot_boundary(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=4,
+            max_num_seqs=2,
+            num_blocks=8,
+            block_size=4,
+        )
+        seq = Sequence([0, 1, 2, 3, 4, 5])
+        scheduler.add(seq)
+
+        scheduled = scheduler.schedule()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "does not match scheduled prefix",
+        ):
+            scheduler.postprocess(
+                scheduled.prefill_seqs,
+                [None],
+                True,
+                {
+                    seq.seq_id: SimpleNamespace(
+                        num_tokens=3
+                    )
+                },
+            )
+
+        self.assertEqual(seq.num_cached_tokens, 0)
+        self.assertEqual(seq.num_state_tokens, 0)
+        self.assertEqual(seq.num_scheduled_tokens, 4)
+        self.assertEqual(len(scheduler.prefix_cache), 0)
 
     def test_scheduler_rejects_kv_state_progress_divergence(self):
         scheduler = make_scheduler()
