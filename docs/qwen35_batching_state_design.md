@@ -178,19 +178,18 @@ Both requests would mutate the same Conv/Recurrent state.
 
 ### 4.2 Explicit ownership
 
-`StateSlotManager` now keeps:
+`StateSlotManager` keeps:
 
 ```text
 free_slot_ids
-used_slot_ids
 slot_owners[slot] -> seq_id | None
 ```
 
-A request with an existing slot is valid only when:
+`slot_owners` is the single occupancy source of truth. A request with an
+existing slot is valid only when:
 
 ```text
-slot is allocated
-AND slot_owners[slot] == seq.seq_id
+slot_owners[slot] == seq.seq_id
 ```
 
 Allocation, reuse and release therefore form a small state machine:
@@ -241,7 +240,9 @@ token budget
 
 Decode and prefill are executed as separate model batches, but they share the
 same scheduler ownership table. New requests are admitted only when both KV
-capacity and a recurrent-state slot are available.
+capacity for the current scheduled range and a recurrent-state slot are
+available. KV blocks grow incrementally with committed/scheduled progress; the
+unscheduled tail of a long prompt does not consume blocks.
 
 ---
 
@@ -257,7 +258,9 @@ step 2: [3, 6) -> committed state length 6
 step 3: [6, 8) -> committed state length 8
 ```
 
-The slot is not released between these chunks.
+The state slot is not released between these chunks. The KV block table also
+grows only when a new chunk crosses a block boundary, so chunked prefill is
+state-aware and resource-aware rather than merely splitting compute.
 
 For every later chunk:
 
