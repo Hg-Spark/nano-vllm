@@ -19,7 +19,10 @@ Sparse MoE -> dynamic Top-K expert routing
 - gated Full Attention + partial RoPE
 - Gated DeltaNet with persistent per-request state
 - sparse routed experts + gated shared expert
-- chunked prefill and token-by-token decode
+- variable-length packed prefill across heterogeneous requests
+- continuous batching with explicit request-to-GDN-state ownership
+- state-aware chunked prefill across scheduler steps
+- token-by-token decode
 - deterministic greedy decoding (`temperature=0`)
 - multiple EOS token ids from `generation_config.json`
 
@@ -54,7 +57,9 @@ See:
 
 - `docs/qwen35_moe_eager_design.md` — current implementation and invariants;
 - `docs/qwen35_moe_decisions.md` — design choices, rejected abstractions and
-  lessons taken from Transformers/vLLM/SGLang.
+  lessons taken from Transformers/vLLM/SGLang;
+- `docs/qwen35_batching_state_design.md` — variable-length prefill, continuous
+  batching, recurrent-state ownership, chunk continuity and interview notes.
 
 ## Installation
 
