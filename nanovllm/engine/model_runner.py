@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import warnings
 
 import torch
+from torch.profiler import record_function
 
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
@@ -566,10 +567,16 @@ class ModelRunner:
             else:
                 input_ids, positions = self.prepare_decode(seqs)
 
-            hidden_states = self.run_model(
-                input_ids,
-                positions,
+            profile_range = (
+                "nanovllm::prefill_model"
+                if is_prefill
+                else "nanovllm::decode_model"
             )
+            with record_function(profile_range):
+                hidden_states = self.run_model(
+                    input_ids,
+                    positions,
+                )
             sample_indices = self._sample_indices(
                 seqs,
                 is_prefill,
