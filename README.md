@@ -24,7 +24,7 @@ Sparse MoE -> dynamic Top-K expert routing
 - state-aware chunked prefill across scheduler steps with incremental KV block growth
 - decode-first token budgeting with round-robin decode fairness
 - hybrid preemption that invalidates KV + GDN state together
-- bounded joint prefix caching with ref-counted KV blocks + GDN snapshots
+- bounded joint prefix caching with ref-counted KV blocks + BF16 GDN snapshots
 - token-by-token decode
 - deterministic greedy decoding (`temperature=0`)
 - multiple EOS token ids from `generation_config.json`
@@ -33,6 +33,7 @@ Deliberately out of scope:
 
 - Qwen3 / dense Qwen3.5
 - vision tower and MTP
+- multimodal packed prefill and 3-axis mRoPE
 - quantized checkpoints
 - tensor/expert parallelism
 - CUDA Graph
