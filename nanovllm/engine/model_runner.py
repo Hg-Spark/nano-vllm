@@ -400,7 +400,6 @@ class ModelRunner:
             state_slots=layout.state_slots,
             state_prefix_lens=layout.state_prefix_lens,
             prefill_q_offsets=layout.q_offsets,
-            prefill_k_offsets=layout.k_offsets,
         )
 
         return (
