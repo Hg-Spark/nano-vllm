@@ -15,7 +15,6 @@ def make_scheduler():
         num_kvcache_blocks=16,
         max_num_state_slots=2,
     )
-    Sequence.block_size = config.kvcache_block_size
     return Scheduler(config)
 
 
@@ -23,8 +22,7 @@ def make_running_sequence(scheduler, token_ids):
     seq = Sequence(token_ids)
     scheduler.block_manager.ensure_capacity(seq, len(seq))
     scheduler.state_manager.allocate(seq)
-    seq.num_cached_tokens = len(seq)
-    seq.num_state_tokens = len(seq)
+    seq.committed_tokens = len(seq)
     seq.status = SequenceStatus.RUNNING
     scheduler.running.append(seq)
     return seq
@@ -70,8 +68,7 @@ class LLMEngineStepTest(unittest.TestCase):
         for seq in (decode_seq, prefill_seq):
             self.assertEqual(seq.status, SequenceStatus.WAITING)
             self.assertEqual(seq.num_scheduled_tokens, 0)
-            self.assertEqual(seq.num_cached_tokens, 0)
-            self.assertEqual(seq.num_state_tokens, 0)
+            self.assertEqual(seq.committed_tokens, 0)
             self.assertEqual(seq.state_slot, -1)
             self.assertFalse(seq.block_table)
 
