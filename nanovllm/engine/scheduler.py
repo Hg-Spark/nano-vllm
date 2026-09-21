@@ -229,7 +229,9 @@ class Scheduler:
             seq = self.running.popleft()
             self._validate_committed_prefix(seq)
 
-            while not self.block_manager.can_append(seq):
+            while (
+                self.block_manager.max_schedulable_tokens(seq, 1) == 0
+            ):
                 # Reclaim idle cached prefixes before retracting live work.
                 if self._evict_one_cached_prefix():
                     continue
@@ -246,7 +248,7 @@ class Scheduler:
                 break
 
             seq.num_scheduled_tokens = 1
-            self.block_manager.may_append(seq)
+            self.block_manager.ensure_capacity(seq, len(seq))
             output.decode_seqs.append(seq)
             num_batched_tokens += 1
 
@@ -314,14 +316,6 @@ class Scheduler:
             target_tokens = (
                 seq.committed_tokens + scheduled_tokens
             )
-            if not self.block_manager.can_ensure_capacity(
-                seq,
-                target_tokens,
-            ):
-                raise RuntimeError(
-                    "KV capacity calculation diverged from reservation"
-                )
-
             if seq.state_slot < 0:
                 self.state_manager.allocate(seq)
             self.block_manager.ensure_capacity(
