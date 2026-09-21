@@ -8,8 +8,9 @@ baseline:
 3. state-aware chunked prefill across scheduler steps.
 
 The implementation stays intentionally narrow: one Qwen3.5-MoE text runtime,
-single GPU, eager execution. The goal is to make the invariants explicit before
-introducing fused GDN kernels, CUDA Graph, prefix-state checkpoints, TP or EP.
+single GPU, eager execution. These stages establish the invariants that the
+later scheduler/preemption/joint-prefix work relies on; optimized GDN kernels,
+CUDA Graph and TP/EP remain separate work.
 
 ---
 
