@@ -103,15 +103,32 @@ class LLMEngine:
             return [], 0.0
 
         start = perf_counter()
+        prefix_snapshots: dict[int, object] = {}
         try:
             token_ids = self.model_runner.run(
                 seqs,
                 is_prefill,
             )
+            if is_prefill:
+                for seq in seqs:
+                    if not self.scheduler.should_snapshot_prefix_after_step(
+                        seq
+                    ):
+                        continue
+                    target_tokens = (
+                        seq.num_cached_tokens
+                        + seq.num_scheduled_tokens
+                    )
+                    prefix_snapshots[seq.seq_id] = (
+                        self.model_runner.capture_gdn_state(
+                            seq,
+                            target_tokens,
+                        )
+                    )
         except Exception:
-            # KV/GDN tensors may have been mutated before the failure. Drop
-            # both physical histories and replay this request from token
-            # history on the next step instead of reusing uncertain state.
+            # KV/GDN tensors may have been mutated before logical commit.
+            # Drop both request-owned histories; any previously published
+            # joint-prefix entry remains independently pinned and valid.
             self.scheduler.recover_failed_step(seqs)
             raise
         elapsed = perf_counter() - start
@@ -119,6 +136,7 @@ class LLMEngine:
             seqs,
             token_ids,
             is_prefill,
+            prefix_snapshots,
         )
         outputs = [
             (seq.seq_id, seq.completion_token_ids)
