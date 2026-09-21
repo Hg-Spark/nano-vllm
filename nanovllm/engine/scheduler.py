@@ -71,8 +71,8 @@ class Scheduler:
         num_batched_tokens = 0
         preempted_this_step = False
 
-        # Decode first. Qwen3.5-MoE decode mutates both KV and recurrent state,
-        # so scheduled requests remain in the running queue until postprocess.
+        # Decode first. Decode mutates paged KV and GDN state together, so
+        # requests stay logically running until postprocess commits progress.
         while (
             self.running
             and len(output.decode_seqs) < self.max_num_seqs
@@ -113,47 +113,69 @@ class Scheduler:
                 break
 
             seq = self.waiting[0]
-            if not seq.block_table:
-                if seq.state_slot >= 0:
-                    raise RuntimeError(
-                        f"sequence {seq.seq_id} has state slot "
-                        "without KV allocation"
-                    )
-                if (
-                    not self.block_manager.can_allocate(seq)
-                    or not self.state_manager.can_allocate(seq)
-                ):
-                    break
-                self.block_manager.allocate(seq)
-                self.state_manager.allocate(seq)
-
             self._validate_committed_prefix(seq)
-            num_tokens = (
+
+            num_remaining = (
                 seq.num_tokens - seq.num_cached_tokens
             )
-            if num_tokens <= 0:
+            if num_remaining <= 0:
                 raise RuntimeError(
                     f"sequence {seq.seq_id} has no remaining prefill tokens"
                 )
 
-            seq.num_scheduled_tokens = min(
-                num_tokens,
+            requested_tokens = min(
+                num_remaining,
                 remaining_tokens,
             )
-            num_batched_tokens += seq.num_scheduled_tokens
-            output.prefill_seqs.append(seq)
+            scheduled_tokens = (
+                self.block_manager.max_schedulable_tokens(
+                    seq,
+                    requested_tokens,
+                )
+            )
+            if scheduled_tokens == 0:
+                break
 
             if (
-                seq.num_cached_tokens
-                + seq.num_scheduled_tokens
-                == seq.num_tokens
+                seq.state_slot < 0
+                and not self.state_manager.can_allocate(seq)
             ):
+                break
+
+            target_tokens = (
+                seq.num_cached_tokens + scheduled_tokens
+            )
+            if not self.block_manager.can_ensure_capacity(
+                seq,
+                target_tokens,
+            ):
+                raise RuntimeError(
+                    "KV capacity calculation diverged from reservation"
+                )
+
+            # Admission is intentionally narrow: one recurrent slot plus only
+            # the KV blocks needed by this scheduled range. A long prompt no
+            # longer reserves its unscheduled tail.
+            if seq.state_slot < 0:
+                self.state_manager.allocate(seq)
+            self.block_manager.ensure_capacity(
+                seq,
+                target_tokens,
+            )
+
+            seq.num_scheduled_tokens = scheduled_tokens
+            num_batched_tokens += scheduled_tokens
+            output.prefill_seqs.append(seq)
+
+            if target_tokens == seq.num_tokens:
                 seq.status = SequenceStatus.RUNNING
                 self.waiting.popleft()
                 self.running.append(seq)
             else:
-                # A partial prefill remains at the waiting front and keeps both
-                # its KV blocks and recurrent-state slot for the next step.
+                # A partial prefill keeps its KV prefix and recurrent slot.
+                # Partial scheduling means the current token/KV budget is
+                # exhausted, so no later waiting request can make useful
+                # progress in this step.
                 break
 
         if output.is_empty:
