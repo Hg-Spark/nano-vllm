@@ -216,7 +216,8 @@ routed_expert_output + shared_expert_output
 
 ## 6. Checkpoint loading
 
-The loader is model-specific because the runtime supports only one model family.
+Checkpoint-format knowledge lives on the Qwen3.5-MoE adapter. The loader itself
+only applies declarative mapping rules and performs strict validation.
 
 Wrapper checkpoints store text weights under:
 
@@ -230,15 +231,18 @@ The local model tree uses:
 model.*
 ```
 
-The loader therefore:
+`Qwen3_5MoeForCausalLM` therefore declares:
 
-1. skips `model.visual.*`;
-2. skips `mtp.*`;
-3. strips `model.language_model.` to `model.`;
-4. requires exact parameter names and shapes;
-5. fails on unexpected or missing text weights.
+1. skip `model.visual.*`;
+2. skip `mtp.*`;
+3. map `model.language_model.*` to `model.*`.
 
-There is no model registry and no generic packed-module mapping.
+The generic loader then requires exact parameter names and shapes and fails on
+unexpected or missing text weights.
+
+A one-entry model registry selects only `Qwen3_5MoeForCausalLM`. It exists to
+keep `ModelRunner` independent of model implementation details, not to create
+a general plugin system.
 
 The routed expert tensors are already packed in the official checkpoint, so the
 loader does not repack per-expert tensors.
