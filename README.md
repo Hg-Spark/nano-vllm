@@ -22,6 +22,9 @@ Sparse MoE -> dynamic Top-K expert routing
 - variable-length packed prefill across heterogeneous requests
 - continuous batching with explicit request-to-GDN-state ownership
 - state-aware chunked prefill across scheduler steps with incremental KV block growth
+- decode-first token budgeting with round-robin decode fairness
+- hybrid preemption that invalidates KV + GDN state together
+- bounded joint prefix caching with ref-counted KV blocks + GDN snapshots
 - token-by-token decode
 - deterministic greedy decoding (`temperature=0`)
 - multiple EOS token ids from `generation_config.json`
@@ -32,7 +35,6 @@ Deliberately out of scope:
 - vision tower and MTP
 - quantized checkpoints
 - tensor/expert parallelism
-- cross-request prefix caching
 - CUDA Graph
 - fused GDN or fused/grouped MoE kernels
 
@@ -59,7 +61,9 @@ See:
 - `docs/qwen35_moe_decisions.md` — design choices, rejected abstractions and
   lessons taken from Transformers/vLLM/SGLang;
 - `docs/qwen35_batching_state_design.md` — variable-length prefill, continuous
-  batching, recurrent-state ownership, chunk continuity and interview notes.
+  batching, recurrent-state ownership and chunk continuity;
+- `docs/qwen35_scheduler_preemption_prefix_design.md` — decode-first scheduling,
+  hybrid preemption, joint KV/GDN prefix reuse and interview reasoning.
 
 ## Installation
 
