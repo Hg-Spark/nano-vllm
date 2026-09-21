@@ -97,6 +97,8 @@ def run_benchmark(
 
     while not llm.is_finished():
         scheduled = llm.scheduler.schedule()
+        step_decode_tokens = scheduled.decode_tokens
+        step_prefill_tokens = scheduled.prefill_tokens
         steps += 1
 
         if scheduled.decode_seqs:
@@ -115,7 +117,7 @@ def run_benchmark(
                 raise
             torch.cuda.synchronize()
             phase_end = time.perf_counter()
-            decode_tokens += scheduled.decode_tokens
+            decode_tokens += step_decode_tokens
             decode_seconds += phase_end - phase_start
             record_request_times(phase_end)
 
@@ -128,7 +130,7 @@ def run_benchmark(
             )
             torch.cuda.synchronize()
             phase_end = time.perf_counter()
-            prefill_tokens += scheduled.prefill_tokens
+            prefill_tokens += step_prefill_tokens
             prefill_seconds += phase_end - phase_start
             record_request_times(phase_end)
 
@@ -287,6 +289,10 @@ def main() -> None:
         raise ValueError("max-input-len must be >= min-input-len")
     if args.output_len <= 0:
         raise ValueError("output-len must be positive")
+    if args.max_input_len + args.output_len > args.max_model_len:
+        raise ValueError(
+            "max-input-len + output-len must not exceed max-model-len"
+        )
 
     model_path = os.path.expanduser(args.model)
     llm = LLM(
