@@ -26,7 +26,6 @@ flowchart LR
     C[Decode-first Scheduler]
     D[Hybrid Preemption]
     E[Joint Prefix Cache]
-    F[BF16 GDN Snapshot]
 
     A --> C
     B --> C
@@ -34,7 +33,6 @@ flowchart LR
     A --> D
     D --> E
     B --> E
-    E --> F
 ```
 
 The stages are coupled by one invariant:
@@ -317,8 +315,8 @@ at a full-block boundary.
 Reason:
 
 - forced splitting increases scheduler/model invocations;
-- GDN snapshots are currently large;
-- stage 10 will optimize snapshot representation;
+- GDN snapshots are still large even with BF16 host storage;
+- snapshot compression is part of the joint-prefix implementation, not a new runtime stage;
 - the educational value comes from correct joint ownership, not maximizing hit
   rate at any cost.
 
@@ -497,10 +495,12 @@ No forced checkpoint interval.
 The scheduler does not change chunk sizes only to manufacture more cache
 entries.
 
-No compressed snapshot format yet.
+BF16 snapshot representation.
 
-The recurrent matrix remains FP32 in cached snapshots. Stage 10 can measure the
-accuracy/memory trade-off of BF16 snapshots separately.
+Active recurrent matrices remain FP32 for execution, while immutable host
+snapshots store both Conv and recurrent tensors in BF16. Restore converts the
+checkpoint back into the active slot dtype. This keeps the numerical trade-off
+local to prefix reuse instead of creating another runtime state mode.
 
 No async snapshot stream.
 
@@ -618,7 +618,7 @@ The fix is round-robin rotation of selected decode requests.
 
 `tests/test_gated_delta_net.py`
 
-- state-slot snapshot/restore round trip;
+- BF16 state-slot snapshot/restore round trip against the quantized reference;
 - existing chunk/decode continuity coverage;
 - prefix-length mismatch rejection.
 
@@ -651,15 +651,19 @@ token.
 **Why host snapshots?**
 
 They do not consume the GPU state-slot pool and make cached state ownership
-obvious. They are intentionally synchronous and uncompressed at this stage.
+obvious. They remain synchronous, while their immutable tensors are stored in
+BF16 to reduce host checkpoint footprint.
 
 **Why not cache every recurrent boundary?**
 
-State snapshots are large and forced chunking would add forwards. This stage
-proves correctness first. Snapshot density and compression are separate
-optimization questions.
+State snapshots are large and forced chunking would add forwards. The cache
+therefore keeps natural full-block boundaries and BF16 host checkpoints rather
+than manufacturing more snapshot points.
 
-**Why is stage 10 separate?**
+**Why keep active recurrent state FP32 while cached snapshots are BF16?**
 
-Changing the recurrent snapshot from FP32 to BF16 changes numerical behavior.
-It should be benchmarked and validated independently from cache ownership logic.
+The recurrent update is numerically sensitive and executes repeatedly, so its
+active accumulator stays FP32. A cached snapshot is an immutable boundary
+checkpoint restored only on a prefix hit; quantization error is introduced once
+at that boundary and can be validated independently without adding another
+scheduler or cache abstraction.
