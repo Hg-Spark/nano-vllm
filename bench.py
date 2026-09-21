@@ -85,29 +85,52 @@ def run_benchmark(
     decode_seconds = 0.0
     steps = 0
 
-    while not llm.is_finished():
-        before = {
-            seq.seq_id: seq.num_completion_tokens
-            for seq in sequences
-        }
-        _outputs, stats = llm.step()
-        now = time.perf_counter()
-        steps += 1
-
-        prefill_tokens += stats.prefill_tokens
-        decode_tokens += stats.decode_tokens
-        prefill_seconds += stats.prefill_seconds
-        decode_seconds += stats.decode_seconds
-
+    def record_request_times(now: float) -> None:
         for seq in sequences:
             if (
                 seq.seq_id not in first_token_at
-                and before[seq.seq_id] == 0
                 and seq.num_completion_tokens > 0
             ):
                 first_token_at[seq.seq_id] = now
             if seq.is_finished and seq.seq_id not in finished_at:
                 finished_at[seq.seq_id] = now
+
+    while not llm.is_finished():
+        scheduled = llm.scheduler.schedule()
+        steps += 1
+
+        if scheduled.decode_seqs:
+            torch.cuda.synchronize()
+            phase_start = time.perf_counter()
+            try:
+                llm._run_batch(
+                    scheduled.decode_seqs,
+                    False,
+                )
+            except Exception:
+                if scheduled.prefill_seqs:
+                    llm.scheduler.recover_failed_step(
+                        scheduled.prefill_seqs
+                    )
+                raise
+            torch.cuda.synchronize()
+            phase_end = time.perf_counter()
+            decode_tokens += scheduled.decode_tokens
+            decode_seconds += phase_end - phase_start
+            record_request_times(phase_end)
+
+        if scheduled.prefill_seqs:
+            torch.cuda.synchronize()
+            phase_start = time.perf_counter()
+            llm._run_batch(
+                scheduled.prefill_seqs,
+                True,
+            )
+            torch.cuda.synchronize()
+            phase_end = time.perf_counter()
+            prefill_tokens += scheduled.prefill_tokens
+            prefill_seconds += phase_end - phase_start
+            record_request_times(phase_end)
 
     torch.cuda.synchronize()
     end = time.perf_counter()
