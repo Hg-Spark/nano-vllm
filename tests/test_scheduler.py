@@ -19,7 +19,6 @@ def make_scheduler(
         num_kvcache_blocks=num_blocks,
         max_num_state_slots=max_num_seqs,
     )
-    Sequence.block_size = config.kvcache_block_size
     return Scheduler(config)
 
 
@@ -27,8 +26,7 @@ def make_running_sequence(scheduler, token_ids):
     seq = Sequence(token_ids)
     scheduler.block_manager.ensure_capacity(seq, len(seq))
     scheduler.state_manager.allocate(seq)
-    seq.num_cached_tokens = len(seq)
-    seq.num_state_tokens = len(seq)
+    seq.committed_tokens = len(seq)
     seq.status = SequenceStatus.RUNNING
     scheduler.running.append(seq)
     return seq
@@ -105,8 +103,8 @@ class SchedulerTest(unittest.TestCase):
             [None],
             True,
         )
-        self.assertEqual(seq.num_cached_tokens, 3)
-        self.assertEqual(seq.num_state_tokens, 3)
+        self.assertEqual(seq.committed_tokens, 3)
+        self.assertEqual(seq.committed_tokens, 3)
         self.assertEqual(
             scheduler.state_manager.owner_of(first_slot),
             seq.seq_id,
@@ -182,16 +180,15 @@ class SchedulerTest(unittest.TestCase):
         self.assertNotIn(seq, scheduler.running)
         self.assertEqual(list(scheduler.waiting), [seq])
         self.assertEqual(seq.state_slot, -1)
-        self.assertEqual(seq.num_state_tokens, 0)
+        self.assertEqual(seq.committed_tokens, 0)
         self.assertFalse(seq.block_table)
         self.assertIsNone(
             scheduler.state_manager.owner_of(slot)
         )
-        self.assertTrue(
-            blocks.isdisjoint(
-                scheduler.block_manager.used_block_ids
-            )
-        )
+        self.assertTrue(all(
+            scheduler.block_manager.block_refcounts[block_id] == 0
+            for block_id in blocks
+        ))
 
     def test_any_configured_eos_finishes_request(self):
         scheduler = make_scheduler(
@@ -315,7 +312,7 @@ class SchedulerTest(unittest.TestCase):
             [seq.num_scheduled_tokens for seq in third.prefill_seqs],
             [2, 1],
         )
-        self.assertEqual(long_seq.num_state_tokens, 6)
+        self.assertEqual(long_seq.committed_tokens, 6)
         self.assertEqual(long_seq.state_slot, long_slot)
         self.assertNotEqual(short_seq.state_slot, long_slot)
         self.assertEqual(
@@ -342,18 +339,16 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(list(scheduler.waiting), [seq])
         self.assertNotIn(seq, scheduler.running)
         self.assertEqual(seq.num_scheduled_tokens, 0)
-        self.assertEqual(seq.num_cached_tokens, 0)
-        self.assertEqual(seq.num_state_tokens, 0)
+        self.assertEqual(seq.committed_tokens, 0)
         self.assertEqual(seq.state_slot, -1)
         self.assertFalse(seq.block_table)
         self.assertIsNone(
             scheduler.state_manager.owner_of(slot)
         )
-        self.assertTrue(
-            blocks.isdisjoint(
-                scheduler.block_manager.used_block_ids
-            )
-        )
+        self.assertTrue(all(
+            scheduler.block_manager.block_refcounts[block_id] == 0
+            for block_id in blocks
+        ))
 
     def test_decode_budget_rotates_running_requests(self):
         scheduler = make_scheduler(
@@ -424,8 +419,7 @@ class SchedulerTest(unittest.TestCase):
         resumed = scheduler.schedule()
 
         self.assertEqual(resumed.prefill_seqs, [newcomer])
-        self.assertEqual(newcomer.num_cached_tokens, 4)
-        self.assertEqual(newcomer.num_state_tokens, 4)
+        self.assertEqual(newcomer.committed_tokens, 4)
         self.assertIs(newcomer.pending_state_snapshot, snapshot)
         self.assertEqual(newcomer.block_table[0], cached_block)
         self.assertEqual(newcomer.num_scheduled_tokens, 2)
@@ -458,8 +452,7 @@ class SchedulerTest(unittest.TestCase):
                 {seq.seq_id: object()},
             )
 
-        self.assertEqual(seq.num_cached_tokens, 0)
-        self.assertEqual(seq.num_state_tokens, 0)
+        self.assertEqual(seq.committed_tokens, 0)
         self.assertEqual(seq.num_scheduled_tokens, 4)
         self.assertEqual(len(scheduler.prefix_cache), 0)
 
@@ -490,22 +483,19 @@ class SchedulerTest(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(seq.num_cached_tokens, 0)
-        self.assertEqual(seq.num_state_tokens, 0)
+        self.assertEqual(seq.committed_tokens, 0)
         self.assertEqual(seq.num_scheduled_tokens, 4)
         self.assertEqual(len(scheduler.prefix_cache), 0)
 
-    def test_scheduler_rejects_kv_state_progress_divergence(self):
+    def test_scheduler_rejects_committed_history_without_resources(self):
         scheduler = make_scheduler()
-        seq = make_running_sequence(
-            scheduler,
-            [1, 2],
-        )
-        seq.num_state_tokens -= 1
+        seq = Sequence([1, 2])
+        seq.committed_tokens = 1
+        scheduler.add(seq)
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "KV/state prefix mismatch",
+            "committed history without hybrid resources",
         ):
             scheduler.schedule()
 
