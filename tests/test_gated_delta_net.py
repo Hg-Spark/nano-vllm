@@ -280,20 +280,46 @@ class GatedDeltaNetStateTest(unittest.TestCase):
         self.layer.recurrent_state[0].copy_(expected_recurrent)
 
         snapshot = self.layer.snapshot_state_slot(0)
+        expected_conv_after_restore = expected_conv.to(
+            torch.bfloat16
+        ).to(expected_conv.dtype)
+        expected_recurrent_after_restore = expected_recurrent.to(
+            torch.bfloat16
+        ).to(expected_recurrent.dtype)
+
         self.layer.conv_state[0].zero_()
         self.layer.recurrent_state[0].zero_()
         self.layer.restore_state_slot(0, snapshot)
 
         torch.testing.assert_close(
             self.layer.conv_state[0],
-            expected_conv,
+            expected_conv_after_restore,
+            rtol=0,
+            atol=0,
         )
         torch.testing.assert_close(
             self.layer.recurrent_state[0],
-            expected_recurrent,
+            expected_recurrent_after_restore,
+            rtol=0,
+            atol=0,
         )
         self.assertEqual(snapshot[0].device.type, "cpu")
         self.assertEqual(snapshot[1].device.type, "cpu")
+        self.assertEqual(snapshot[0].dtype, torch.bfloat16)
+        self.assertEqual(snapshot[1].dtype, torch.bfloat16)
+
+    def test_state_slot_restore_rejects_non_bf16_snapshot(self):
+        self.layer.allocate_state_cache(1)
+        invalid_snapshot = (
+            torch.zeros_like(self.layer.conv_state[0]).cpu(),
+            torch.zeros_like(self.layer.recurrent_state[0]).cpu(),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "snapshot must use BF16 storage",
+        ):
+            self.layer.restore_state_slot(0, invalid_snapshot)
 
     def test_negative_state_prefix_is_rejected(self):
         self.layer.allocate_state_cache(1)
