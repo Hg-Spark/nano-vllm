@@ -8,7 +8,8 @@ def apply_rotary_emb(
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> torch.Tensor:
-    rotary_dim = cos.shape[-1]
+    half_rotary_dim = cos.shape[-1]
+    rotary_dim = half_rotary_dim * 2
     x_rot, x_pass = x[..., :rotary_dim], x[..., rotary_dim:]
     x1, x2 = torch.chunk(x_rot.float(), 2, dim=-1)
     y1 = x1 * cos - x2 * sin
