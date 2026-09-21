@@ -266,9 +266,10 @@ model.*
 The generic loader then requires exact parameter names and shapes and fails on
 unexpected or missing text weights.
 
-A one-entry model registry selects only `Qwen3_5MoeForCausalLM`. It exists to
-keep `ModelRunner` independent of model implementation details, not to create
-a general plugin system.
+The runtime supports one model family, so `ModelRunner` constructs
+`Qwen3_5MoeForCausalLM` directly after `Config` validates the checkpoint
+family. This removes a one-entry registry while keeping checkpoint-specific
+mapping rules on the model adapter.
 
 The routed expert tensors are already packed in the official checkpoint, so the
 loader does not repack per-expert tensors.
@@ -311,7 +312,7 @@ memory usage; they are not part of the cache budget.
 
 ## 8. BlockManager and prefix policy
 
-`BlockManager` is now only a physical paged-KV allocator.
+`BlockManager` is now only a physical paged-KV allocator. It grows each request's block table only through the end of the currently scheduled prefill range; unscheduled prompt tails do not reserve KV memory.
 
 Removed:
 
@@ -341,10 +342,13 @@ One scheduler step is decode-first:
 Admission requires both:
 
 ```text
-enough KV blocks
+enough KV blocks for the scheduled range
 +
 one free recurrent state slot
 ```
+
+KV admission is incremental: a long prompt can start as soon as its current
+chunk fits, without reserving blocks for the entire prompt.
 
 `StateSlotManager` validates the request owner of every retained slot.
 A partially prefetched request stays at the waiting front and keeps its KV
