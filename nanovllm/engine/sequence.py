@@ -36,6 +36,9 @@ class Sequence:
         self.num_scheduled_tokens = 0
         self.block_table: list[int] = []
         self.state_slot = -1
+        # Set only on a joint-prefix hit. ModelRunner consumes the snapshot
+        # immediately before executing the resumed prefill chunk.
+        self.pending_state_snapshot = None
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
