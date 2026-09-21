@@ -231,6 +231,50 @@ class SchedulerTest(unittest.TestCase):
             survivor.seq_id,
         )
 
+
+    def test_chunked_prefill_can_join_new_request_on_final_chunk(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=3,
+            max_num_seqs=2,
+        )
+        long_seq = Sequence(list(range(8)))
+        short_seq = Sequence([20])
+        scheduler.add(long_seq)
+        scheduler.add(short_seq)
+
+        first = scheduler.schedule()
+        long_slot = long_seq.state_slot
+        scheduler.postprocess(
+            first.prefill_seqs,
+            [None],
+            True,
+        )
+
+        second = scheduler.schedule()
+        scheduler.postprocess(
+            second.prefill_seqs,
+            [None],
+            True,
+        )
+
+        third = scheduler.schedule()
+
+        self.assertEqual(
+            third.prefill_seqs,
+            [long_seq, short_seq],
+        )
+        self.assertEqual(
+            [seq.num_scheduled_tokens for seq in third.prefill_seqs],
+            [2, 1],
+        )
+        self.assertEqual(long_seq.num_state_tokens, 6)
+        self.assertEqual(long_seq.state_slot, long_slot)
+        self.assertNotEqual(short_seq.state_slot, long_slot)
+        self.assertEqual(
+            scheduler.state_manager.owner_of(long_slot),
+            long_seq.seq_id,
+        )
+
     def test_scheduler_rejects_kv_state_progress_divergence(self):
         scheduler = make_scheduler()
         seq = make_running_sequence(
