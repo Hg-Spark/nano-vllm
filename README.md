@@ -25,6 +25,8 @@ Sparse MoE -> dynamic Top-K expert routing
 - decode-first token budgeting with round-robin decode fairness
 - hybrid preemption that invalidates KV + GDN state together
 - bounded joint prefix caching with ref-counted KV blocks + BF16 GDN snapshots
+- optional FP8 E4M3 paged KV storage with explicit K/V scales
+- profile-gated Full-Attention decode optimization workflow
 - token-by-token decode
 - deterministic greedy decoding (`temperature=0`)
 - multiple EOS token ids from `generation_config.json`
@@ -66,7 +68,9 @@ See:
 - `docs/qwen35_scheduler_preemption_prefix_design.md` — decode-first scheduling,
   hybrid preemption, joint KV/GDN prefix reuse and interview reasoning;
 - `docs/qwen35_validation_benchmark.md` — correctness gates, layer diagnosis and
-  benchmark metric definitions.
+  benchmark metric definitions;
+- `docs/qwen35_decode_fp8_profile_design.md` — atomic hybrid admission, FP8 KV
+  storage, profiling gates and the criteria for a future fused GQA/PA kernel.
 
 ## Installation
 
@@ -150,6 +154,11 @@ The real-checkpoint comparison is the final correctness gate. Unit tests prove
 lifecycle/routing invariants, the prefix-resume probe exercises the actual BF16
 GDN checkpoint path, and the layer probe narrows any HF mismatch before kernel
 optimization begins.
+
+FP8 KV is a cache-only feature; quantized model checkpoints remain out of scope.
+After correctness validation, use `profile_decode.py` to decide whether
+Full-Attention decode is large enough to justify a custom GQA/PagedAttention
+kernel.
 
 ## Optimization roadmap
 
