@@ -448,8 +448,7 @@ class ModelRunner:
         )
         slot_mapping = [
             seq.block_table[-1] * self.block_size
-            + seq.last_block_num_tokens
-            - 1
+            + (len(seq) - 1) % self.block_size
             for seq in seqs
         ]
 
