@@ -43,13 +43,17 @@ class Scheduler:
         self.state_manager = StateSlotManager(
             config.max_num_state_slots
         )
-        self.enable_prefix_cache = getattr(
+        max_prefix_cache_entries = getattr(
             config,
-            "enable_prefix_cache",
-            True,
+            "max_prefix_cache_entries",
+            16,
+        )
+        self.enable_prefix_cache = (
+            getattr(config, "enable_prefix_cache", True)
+            and max_prefix_cache_entries > 0
         )
         self.prefix_cache = JointPrefixCache(
-            getattr(config, "max_prefix_cache_entries", 16)
+            max_prefix_cache_entries
             if self.enable_prefix_cache
             else 0
         )
