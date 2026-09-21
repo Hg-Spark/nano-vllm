@@ -38,7 +38,6 @@ class StateSlotManagerTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no free hybrid state slots"):
             manager.allocate(Sequence([2]))
 
-
     def test_slot_alias_is_rejected(self):
         manager = StateSlotManager(1)
         first = Sequence([1])
@@ -80,6 +79,7 @@ class StateSlotManagerTest(unittest.TestCase):
             "non-zero committed state prefix",
         ):
             manager.allocate(seq)
+
 
 if __name__ == "__main__":
     unittest.main()
