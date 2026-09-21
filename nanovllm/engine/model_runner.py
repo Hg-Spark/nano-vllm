@@ -71,14 +71,7 @@ def build_prefill_batch_layout(
             raise RuntimeError(
                 f"sequence {seq.seq_id} has no scheduled prefill tokens"
             )
-        if seq.num_cached_tokens != seq.num_state_tokens:
-            raise RuntimeError(
-                f"sequence {seq.seq_id} KV/state prefix mismatch: "
-                f"kv={seq.num_cached_tokens}, "
-                f"state={seq.num_state_tokens}"
-            )
-
-        start = seq.num_cached_tokens
+        start = seq.committed_tokens
         seqlen_q = seq.num_scheduled_tokens
         end = start + seqlen_q
         if end > seq.num_tokens:
@@ -116,7 +109,7 @@ def build_prefill_batch_layout(
         max_seqlen_q = max(max_seqlen_q, seqlen_q)
         max_seqlen_k = max(max_seqlen_k, seqlen_k)
         state_slots.append(seq.state_slot)
-        state_prefix_lens.append(seq.num_state_tokens)
+        state_prefix_lens.append(seq.committed_tokens)
         use_block_tables = use_block_tables or start > 0
 
         if not seq.block_table:
@@ -288,7 +281,7 @@ class ModelRunner:
                 f"sequence {seq.seq_id} has no state slot to snapshot"
             )
         physical_prefix = (
-            seq.num_state_tokens + seq.num_scheduled_tokens
+            seq.committed_tokens + seq.num_scheduled_tokens
         )
         if prefix_tokens != physical_prefix:
             raise RuntimeError(
@@ -314,11 +307,11 @@ class ModelRunner:
             raise RuntimeError(
                 f"sequence {seq.seq_id} has no state slot to restore"
             )
-        if snapshot.num_tokens != seq.num_state_tokens:
+        if snapshot.num_tokens != seq.committed_tokens:
             raise RuntimeError(
                 f"sequence {seq.seq_id} restore boundary mismatch: "
                 f"snapshot={snapshot.num_tokens}, "
-                f"logical={seq.num_state_tokens}"
+                f"logical={seq.committed_tokens}"
             )
 
         modules = self.model.state_cache_modules()
@@ -407,7 +400,6 @@ class ModelRunner:
             state_slots=layout.state_slots,
             state_prefix_lens=layout.state_prefix_lens,
             prefill_q_offsets=layout.q_offsets,
-            prefill_k_offsets=layout.k_offsets,
         )
 
         return (
@@ -429,16 +421,10 @@ class ModelRunner:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         seen_slots: set[int] = set()
         for seq in seqs:
-            if seq.num_cached_tokens != seq.num_state_tokens:
-                raise RuntimeError(
-                    f"sequence {seq.seq_id} KV/state prefix mismatch: "
-                    f"kv={seq.num_cached_tokens}, "
-                    f"state={seq.num_state_tokens}"
-                )
-            if seq.num_cached_tokens != len(seq) - 1:
+            if seq.committed_tokens != len(seq) - 1:
                 raise RuntimeError(
                     f"sequence {seq.seq_id} decode prefix mismatch: "
-                    f"committed={seq.num_cached_tokens}, "
+                    f"committed={seq.committed_tokens}, "
                     f"expected={len(seq) - 1}"
                 )
             if seq.state_slot < 0:
@@ -458,12 +444,11 @@ class ModelRunner:
             seq.state_slot for seq in seqs
         )
         state_prefix_lens = tuple(
-            seq.num_state_tokens for seq in seqs
+            seq.committed_tokens for seq in seqs
         )
         slot_mapping = [
             seq.block_table[-1] * self.block_size
-            + seq.last_block_num_tokens
-            - 1
+            + (len(seq) - 1) % self.block_size
             for seq in seqs
         ]
 
@@ -507,7 +492,7 @@ class ModelRunner:
             idx
             for idx, seq in enumerate(seqs)
             if (
-                seq.num_cached_tokens
+                seq.committed_tokens
                 + seq.num_scheduled_tokens
                 == seq.num_tokens
             )

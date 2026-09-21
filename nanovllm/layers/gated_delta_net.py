@@ -364,25 +364,18 @@ class GatedDeltaNet(nn.Module):
         outputs = []
 
         if context.is_prefill:
-            if (
-                context.prefill_q_offsets is None
-                or context.prefill_k_offsets is None
-            ):
+            if context.prefill_q_offsets is None:
                 raise RuntimeError(
-                    "GDN prefill requires CPU packed sequence offsets"
+                    "GDN prefill requires CPU packed query offsets"
                 )
             q_offsets = context.prefill_q_offsets
-            k_offsets = context.prefill_k_offsets
             num_sequences = len(state_slots)
-            if (
-                len(q_offsets) != num_sequences + 1
-                or len(k_offsets) != num_sequences + 1
-            ):
+            if len(q_offsets) != num_sequences + 1:
                 raise RuntimeError(
-                    "packed prefill offsets must match state metadata"
+                    "packed query offsets must match state metadata"
                 )
-            if q_offsets[0] != 0 or k_offsets[0] != 0:
-                raise RuntimeError("packed prefill offsets must start at zero")
+            if q_offsets[0] != 0:
+                raise RuntimeError("packed query offsets must start at zero")
             if q_offsets[-1] != hidden_states.size(0):
                 raise RuntimeError(
                     "packed query offsets do not cover hidden states"
@@ -392,19 +385,17 @@ class GatedDeltaNet(nn.Module):
                 q_start = q_offsets[seq_idx]
                 q_end = q_offsets[seq_idx + 1]
                 q_len = q_end - q_start
-                k_len = k_offsets[seq_idx + 1] - k_offsets[seq_idx]
-                prefix_len = k_len - q_len
                 expected_prefix = state_prefix_lens[seq_idx]
 
-                if q_len <= 0 or k_len < q_len:
+                if q_len <= 0:
                     raise RuntimeError(
-                        f"invalid packed prefill lengths for sequence "
-                        f"{seq_idx}: q={q_len}, k={k_len}"
+                        f"invalid packed query length for sequence "
+                        f"{seq_idx}: q={q_len}"
                     )
-                if expected_prefix < 0 or prefix_len != expected_prefix:
+                if expected_prefix < 0:
                     raise RuntimeError(
-                        f"GDN state prefix mismatch for sequence {seq_idx}: "
-                        f"packed={prefix_len}, state={expected_prefix}"
+                        f"invalid GDN state prefix for sequence "
+                        f"{seq_idx}: {expected_prefix}"
                     )
 
                 if self.conv_state.numel() and slot_id >= 0:

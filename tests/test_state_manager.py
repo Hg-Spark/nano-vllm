@@ -60,23 +60,23 @@ class StateSlotManagerTest(unittest.TestCase):
         slot = manager.allocate(first)
         self.assertEqual(manager.owner_of(slot), first.seq_id)
 
-        first.num_state_tokens = 3
+        first.committed_tokens = 3
         manager.deallocate(first)
-        self.assertEqual(first.num_state_tokens, 0)
+        self.assertEqual(first.committed_tokens, 3)
         self.assertIsNone(manager.owner_of(slot))
 
         reused = manager.allocate(second)
         self.assertEqual(reused, slot)
         self.assertEqual(manager.owner_of(slot), second.seq_id)
 
-    def test_fresh_slot_rejects_nonzero_state_progress(self):
+    def test_fresh_slot_rejects_nonzero_committed_progress(self):
         manager = StateSlotManager(1)
         seq = Sequence([1])
-        seq.num_state_tokens = 1
+        seq.committed_tokens = 1
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "non-zero committed state prefix",
+            "non-zero committed prefix",
         ):
             manager.allocate(seq)
 

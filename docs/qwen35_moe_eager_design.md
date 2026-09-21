@@ -109,32 +109,27 @@ a later fused/chunked kernel.
 
 ### 4.1 Request-level state slots
 
-`Sequence` carries two pieces of recurrent-state control metadata:
+`Sequence` carries a physical state-slot id and one logical hybrid boundary:
 
 ```text
 state_slot: int
-num_state_tokens: int
+committed_tokens: int
 ```
 
 `state_slot` selects the physical Conv/Recurrent state row.
-`num_state_tokens` records how many tokens are represented by the committed
-state in that slot.
+`committed_tokens` records the token prefix represented by both GDN state and
+paged KV.
 
 `StateSlotManager` owns allocation/release and an explicit
 `slot_owners[slot] -> seq_id` mapping. GPU tensors stay inside GDN layers.
 
 One active request uses the same slot index in every GDN layer. The scheduler
-requires:
-
-```text
-num_cached_tokens == num_state_tokens
-```
-
-at scheduler boundaries. This gives:
+advances `committed_tokens` only after both KV and GDN mutations succeed. This
+gives:
 
 - predictable state capacity;
 - explicit request-to-slot ownership;
-- detection of KV/recurrent-prefix divergence;
+- one scheduler-visible source of truth for hybrid history;
 - safe physical-slot reuse after finish/preemption;
 - a kernel-friendly future layout.
 
@@ -155,19 +150,13 @@ chunk 2(state_1) -> state_2
 ```
 
 The runner builds a CPU `PrefillBatchLayout` for heterogeneous requests. The
-same request index is used across Q offsets, total-K offsets, block-table rows,
-state slots and committed state-prefix lengths.
+same request index is used across attention offsets, block-table rows, state
+slots and committed prefix lengths.
 
-For each packed request segment GDN validates:
-
-```text
-(k_len - q_len)
-    == num_state_tokens
-    == num_cached_tokens
-```
-
-The runner keeps packed offsets as CPU tuples in `Context`. GDN therefore does
-not call `.tolist()` on CUDA metadata in every layer, avoiding repeated
+Attention receives Q/K cumulative offsets. GDN only needs the packed query
+offsets plus `state_prefix_lens`, which are derived from
+`seq.committed_tokens`. This avoids maintaining a duplicate CPU key-offset
+view just to recover the recurrent prefix, and GDN still avoids repeated
 device-to-host synchronization.
 
 ### 4.4 Decode

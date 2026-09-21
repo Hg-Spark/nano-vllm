@@ -10,8 +10,7 @@ class PrefillBatchLayoutTest(unittest.TestCase):
         first = Sequence(list(range(6)))
         first.block_table = [7, 9]
         first.state_slot = 4
-        first.num_cached_tokens = 2
-        first.num_state_tokens = 2
+        first.committed_tokens = 2
         first.num_scheduled_tokens = 3
 
         second = Sequence([10, 11])
@@ -101,17 +100,14 @@ class PrefillBatchLayoutTest(unittest.TestCase):
                 block_size=4,
             )
 
-    def test_kv_state_prefix_mismatch_is_rejected(self):
+    def test_state_slot_without_kv_blocks_is_rejected(self):
         seq = Sequence([1, 2, 3])
-        seq.block_table = [0]
         seq.state_slot = 0
-        seq.num_cached_tokens = 1
-        seq.num_state_tokens = 0
-        seq.num_scheduled_tokens = 2
+        seq.num_scheduled_tokens = 3
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "KV/state prefix mismatch",
+            "state slot without KV blocks",
         ):
             build_prefill_batch_layout(
                 [seq],

@@ -11,7 +11,6 @@ class BlockManager:
             raise ValueError("num_blocks must be positive")
         self.block_size = block_size
         self.free_block_ids: deque[int] = deque(range(num_blocks))
-        self.used_block_ids: set[int] = set()
         self.block_refcounts = [0] * num_blocks
 
     def _allocate_block(self) -> int:
@@ -23,7 +22,6 @@ class BlockManager:
                 f"free KV block {block_id} has non-zero refcount"
             )
         self.block_refcounts[block_id] = 1
-        self.used_block_ids.add(block_id)
         return block_id
 
     def _required_blocks(self, num_tokens: int) -> int:
@@ -56,7 +54,6 @@ class BlockManager:
         for block_id in ids:
             self.block_refcounts[block_id] -= 1
             if self.block_refcounts[block_id] == 0:
-                self.used_block_ids.remove(block_id)
                 self.free_block_ids.append(block_id)
 
     def attach_shared_prefix(
@@ -65,7 +62,7 @@ class BlockManager:
         block_ids: tuple[int, ...],
         num_tokens: int,
     ) -> None:
-        if seq.block_table or seq.num_cached_tokens != 0:
+        if seq.block_table or seq.committed_tokens != 0:
             raise RuntimeError(
                 "shared prefix can only attach to a fresh request"
             )
@@ -95,17 +92,8 @@ class BlockManager:
         max_backed_tokens = (
             len(seq.block_table) + len(self.free_block_ids)
         ) * self.block_size
-        available = max_backed_tokens - seq.num_cached_tokens
+        available = max_backed_tokens - seq.committed_tokens
         return max(0, min(requested_tokens, available))
-
-    def can_ensure_capacity(
-        self,
-        seq: Sequence,
-        target_tokens: int,
-    ) -> bool:
-        required = self._required_blocks(target_tokens)
-        missing = max(0, required - len(seq.block_table))
-        return missing <= len(self.free_block_ids)
 
     def ensure_capacity(
         self,
@@ -128,12 +116,4 @@ class BlockManager:
 
     def deallocate(self, seq: Sequence) -> None:
         self.release_blocks(seq.block_table)
-        seq.num_cached_tokens = 0
         seq.block_table.clear()
-
-    def can_append(self, seq: Sequence) -> bool:
-        target_tokens = len(seq)
-        return self.can_ensure_capacity(seq, target_tokens)
-
-    def may_append(self, seq: Sequence) -> None:
-        self.ensure_capacity(seq, len(seq))

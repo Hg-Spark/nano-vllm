@@ -12,7 +12,6 @@ class SequenceStatus(Enum):
 
 
 class Sequence:
-    block_size = 256
     counter = count()
 
     def __init__(
@@ -28,11 +27,9 @@ class Sequence:
         self.last_token = token_ids[-1]
         self.num_tokens = len(self.token_ids)
         self.num_prompt_tokens = len(token_ids)
-        self.num_cached_tokens = 0
-        # Number of tokens represented by the committed GDN Conv/Recurrent
-        # state in state_slot. It advances together with num_cached_tokens
-        # after a successful model step.
-        self.num_state_tokens = 0
+        # Single logical boundary represented by both paged KV and GDN state.
+        # Hybrid history is committed atomically after a successful model step.
+        self.committed_tokens = 0
         self.num_scheduled_tokens = 0
         self.block_table: list[int] = []
         self.state_slot = -1
@@ -64,26 +61,6 @@ class Sequence:
     @property
     def completion_token_ids(self):
         return self.token_ids[self.num_prompt_tokens:]
-
-    @property
-    def num_blocks(self):
-        return (
-            self.num_tokens + self.block_size - 1
-        ) // self.block_size
-
-    @property
-    def last_block_num_tokens(self):
-        return (
-            self.num_tokens
-            - (self.num_blocks - 1) * self.block_size
-        )
-
-    def block(self, i):
-        if not 0 <= i < self.num_blocks:
-            raise IndexError(i)
-        return self.token_ids[
-            i * self.block_size:(i + 1) * self.block_size
-        ]
 
     def append_token(self, token_id: int):
         self.token_ids.append(token_id)

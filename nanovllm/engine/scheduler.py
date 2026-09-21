@@ -67,12 +67,6 @@ class Scheduler:
         self.waiting.append(seq)
 
     def _validate_committed_prefix(self, seq: Sequence) -> None:
-        if seq.num_cached_tokens != seq.num_state_tokens:
-            raise RuntimeError(
-                f"sequence {seq.seq_id} KV/state prefix mismatch: "
-                f"kv={seq.num_cached_tokens}, "
-                f"state={seq.num_state_tokens}"
-            )
         if seq.block_table:
             self.state_manager.validate(seq)
         elif seq.state_slot >= 0:
@@ -80,9 +74,14 @@ class Scheduler:
                 f"sequence {seq.seq_id} owns state slot "
                 "without KV allocation"
             )
+        elif seq.committed_tokens:
+            raise RuntimeError(
+                f"sequence {seq.seq_id} has committed history "
+                "without hybrid resources"
+            )
         if (
             seq.pending_state_snapshot is not None
-            and seq.num_state_tokens == 0
+            and seq.committed_tokens == 0
         ):
             raise RuntimeError(
                 f"sequence {seq.seq_id} has a pending snapshot "
@@ -100,8 +99,7 @@ class Scheduler:
         if not self.enable_prefix_cache:
             return False
         if (
-            seq.num_cached_tokens != 0
-            or seq.num_state_tokens != 0
+            seq.committed_tokens != 0
             or seq.block_table
             or seq.state_slot >= 0
         ):
@@ -129,8 +127,7 @@ class Scheduler:
             self.state_manager.deallocate(seq)
             raise
 
-        seq.num_cached_tokens = entry.num_tokens
-        seq.num_state_tokens = entry.num_tokens
+        seq.committed_tokens = entry.num_tokens
         seq.pending_state_snapshot = entry.state_snapshot
         return True
 
@@ -144,7 +141,7 @@ class Scheduler:
             return False
 
         target_tokens = (
-            seq.num_cached_tokens + seq.num_scheduled_tokens
+            seq.committed_tokens + seq.num_scheduled_tokens
         )
         if target_tokens <= 0:
             return False
@@ -161,11 +158,7 @@ class Scheduler:
         seq: Sequence,
         state_snapshot,
     ) -> None:
-        prefix_tokens = seq.num_cached_tokens
-        if prefix_tokens != seq.num_state_tokens:
-            raise RuntimeError(
-                "cannot cache a divergent KV/GDN prefix"
-            )
+        prefix_tokens = seq.committed_tokens
         if prefix_tokens <= 0:
             raise RuntimeError("cannot cache an empty prefix")
         if prefix_tokens > seq.num_prompt_tokens:
@@ -236,7 +229,9 @@ class Scheduler:
             seq = self.running.popleft()
             self._validate_committed_prefix(seq)
 
-            while not self.block_manager.can_append(seq):
+            while (
+                self.block_manager.max_schedulable_tokens(seq, 1) == 0
+            ):
                 # Reclaim idle cached prefixes before retracting live work.
                 if self._evict_one_cached_prefix():
                     continue
@@ -253,7 +248,7 @@ class Scheduler:
                 break
 
             seq.num_scheduled_tokens = 1
-            self.block_manager.may_append(seq)
+            self.block_manager.ensure_capacity(seq, len(seq))
             output.decode_seqs.append(seq)
             num_batched_tokens += 1
 
@@ -277,12 +272,12 @@ class Scheduler:
 
             seq = self.waiting[0]
             self._validate_committed_prefix(seq)
-            if seq.num_cached_tokens == 0:
+            if seq.committed_tokens == 0:
                 self._try_restore_cached_prefix(seq)
                 self._validate_committed_prefix(seq)
 
             num_remaining = (
-                seq.num_tokens - seq.num_cached_tokens
+                seq.num_tokens - seq.committed_tokens
             )
             if num_remaining <= 0:
                 raise RuntimeError(
@@ -319,16 +314,8 @@ class Scheduler:
                 break
 
             target_tokens = (
-                seq.num_cached_tokens + scheduled_tokens
+                seq.committed_tokens + scheduled_tokens
             )
-            if not self.block_manager.can_ensure_capacity(
-                seq,
-                target_tokens,
-            ):
-                raise RuntimeError(
-                    "KV capacity calculation diverged from reservation"
-                )
-
             if seq.state_slot < 0:
                 self.state_manager.allocate(seq)
             self.block_manager.ensure_capacity(
@@ -353,33 +340,29 @@ class Scheduler:
             raise RuntimeError("scheduler could not make progress")
         return output
 
-    def recover_failed_step(self, seqs: list[Sequence]) -> None:
-        """Discard possibly mutated physical state and replay from history."""
-        for seq in reversed(seqs):
-            self._validate_committed_prefix(seq)
-            if seq in self.running:
-                self.running.remove(seq)
-            if seq in self.waiting:
-                self.waiting.remove(seq)
-            seq.num_scheduled_tokens = 0
-            seq.pending_state_snapshot = None
-            seq.status = SequenceStatus.WAITING
-            self.block_manager.deallocate(seq)
-            self.state_manager.deallocate(seq)
-            self.waiting.appendleft(seq)
-
-    def preempt(self, seq: Sequence):
-        """Retract KV and GDN together; later admission restores/replays both."""
+    def _reset_to_waiting(self, seq: Sequence) -> None:
+        """Release hybrid history and replay the request from a valid prefix."""
         self._validate_committed_prefix(seq)
         if seq in self.running:
             self.running.remove(seq)
         if seq in self.waiting:
             self.waiting.remove(seq)
-        seq.status = SequenceStatus.WAITING
+        seq.num_scheduled_tokens = 0
         seq.pending_state_snapshot = None
+        seq.status = SequenceStatus.WAITING
         self.block_manager.deallocate(seq)
         self.state_manager.deallocate(seq)
+        seq.committed_tokens = 0
         self.waiting.appendleft(seq)
+
+    def recover_failed_step(self, seqs: list[Sequence]) -> None:
+        """Discard possibly mutated physical state and replay from history."""
+        for seq in reversed(seqs):
+            self._reset_to_waiting(seq)
+
+    def preempt(self, seq: Sequence):
+        """Retract KV and GDN together; later admission restores/replays both."""
+        self._reset_to_waiting(seq)
 
     def postprocess(
         self,
@@ -401,7 +384,7 @@ class Scheduler:
                     "joint prefix snapshots are valid only for prefill"
                 )
             target_tokens = (
-                seq.num_cached_tokens + seq.num_scheduled_tokens
+                seq.committed_tokens + seq.num_scheduled_tokens
             )
             snapshot_tokens = getattr(
                 snapshot,
@@ -420,8 +403,7 @@ class Scheduler:
         for seq, token_id in zip(seqs, token_ids):
             self._validate_committed_prefix(seq)
             committed_tokens = seq.num_scheduled_tokens
-            seq.num_cached_tokens += committed_tokens
-            seq.num_state_tokens += committed_tokens
+            seq.committed_tokens += committed_tokens
             seq.num_scheduled_tokens = 0
 
             snapshot = prefix_snapshots.get(seq.seq_id)
@@ -431,7 +413,7 @@ class Scheduler:
                     snapshot,
                 )
 
-            if is_prefill and seq.num_cached_tokens < seq.num_tokens:
+            if is_prefill and seq.committed_tokens < seq.num_tokens:
                 if token_id is not None:
                     raise RuntimeError(
                         "partial prefill produced an unexpected sample"
@@ -455,4 +437,5 @@ class Scheduler:
                 seq.status = SequenceStatus.FINISHED
                 self.block_manager.deallocate(seq)
                 self.state_manager.deallocate(seq)
+                seq.committed_tokens = 0
                 self.running.remove(seq)

@@ -55,10 +55,10 @@ class StateSlotManager:
     def allocate(self, seq: Sequence) -> int:
         if seq.state_slot >= 0:
             return self.validate(seq)
-        if seq.num_state_tokens != 0:
+        if seq.committed_tokens != 0:
             raise RuntimeError(
                 "cannot allocate a fresh state slot for a non-zero "
-                "committed state prefix"
+                "committed prefix"
             )
         if not self.free_slot_ids:
             raise RuntimeError("no free hybrid state slots")
@@ -72,13 +72,8 @@ class StateSlotManager:
     def deallocate(self, seq: Sequence) -> None:
         slot_id = seq.state_slot
         if slot_id < 0:
-            if seq.num_state_tokens != 0:
-                raise RuntimeError(
-                    f"sequence {seq.seq_id} has state progress without a slot"
-                )
             return
         self.validate(seq)
         self.slot_owners[slot_id] = None
         self.free_slot_ids.append(slot_id)
         seq.state_slot = -1
-        seq.num_state_tokens = 0

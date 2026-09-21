@@ -46,25 +46,20 @@ Full Attention history = paged KV prefix
 GDN history            = Conv state + recurrent matrix
 ```
 
-The runtime now tracks the logical length of both:
+The runtime tracks one logical committed boundary:
 
 ```text
-seq.num_cached_tokens
-seq.num_state_tokens
+seq.committed_tokens
 ```
 
-At scheduler boundaries they must be equal:
+That boundary means both the paged-KV history and the GDN Conv/Recurrent state
+represent exactly the same prefix. A model step may mutate physical GPU caches
+before postprocess advances the boundary, but scheduler-visible logical
+progress changes only after the whole hybrid step succeeds.
 
-```text
-num_cached_tokens == num_state_tokens
-```
-
-A model step may mutate physical GPU caches before postprocess commits the new
-length, but the next scheduler step is not allowed to observe a mismatch.
-
-This additional counter is intentionally redundant. Its value is that an
-incorrect chunk/state pairing now fails loudly instead of silently producing
-numerically inconsistent history.
+Using one source of truth avoids maintaining two counters whose only legal
+state was equality. Resource ownership remains explicit through the KV block
+table/reference counts and the GDN state slot.
 
 ---
 
@@ -266,13 +261,14 @@ state-aware and resource-aware rather than merely splitting compute.
 For every later chunk:
 
 ```text
-packed prefix length
-    = k_len - q_len
-    = seq.num_state_tokens
-    = seq.num_cached_tokens
+GDN committed prefix
+    = seq.committed_tokens
+    = state_prefix_lens[request]
 ```
 
-GDN keeps the existing physical state only when that equality holds.
+Attention still builds total-K offsets from the same committed boundary. GDN
+does not need a second CPU copy of those offsets; it reuses the owned state slot
+and the committed prefix supplied by the runner.
 
 ### 5.1 Final chunk can join a new request
 
@@ -452,21 +448,21 @@ A concise explanation:
 
 > Qwen3.5-MoE has two kinds of persistent history: paged KV for full-attention
 > layers and fixed-size Conv/Recurrent state for GDN layers. For variable-length
-> prefill I pack only current query tokens, while keeping Q offsets, total-key
-> offsets, state slots and recurrent-prefix lengths aligned by request. For
-> continuous batching I added explicit slot ownership so a recycled physical
-> state slot cannot alias two active requests. For chunked prefill I track the
-> committed recurrent prefix length separately and require it to match the KV
-> prefix and the packed K-Q length difference before reusing state across
-> scheduler steps.
+> prefill I pack only current query tokens, while keeping attention offsets,
+> state slots and the committed prefix aligned by request. For continuous
+> batching I added explicit slot ownership so a recycled physical state slot
+> cannot alias two active requests. For chunked prefill I use one committed
+> boundary for both paged KV and GDN state, so scheduler-visible history can only
+> advance atomically after a successful hybrid step.
 
 Likely follow-up questions:
 
-**Why keep both `num_cached_tokens` and `num_state_tokens` if they should be
-equal?**
+**Why use one `committed_tokens` counter for two physical histories?**
 
-Because equality is the correctness invariant. A separate counter turns an
-implicit assumption into something the scheduler and GDN can validate.
+The two histories are only valid when they represent the same token boundary.
+Keeping one logical boundary removes an impossible-to-use divergent state while
+KV reference counts and GDN slot ownership still validate the physical
+resources independently.
 
 **Why not copy vLLM/SGLang state-cache abstractions?**
 

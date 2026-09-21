@@ -46,11 +46,14 @@ committed GDN history length
 ```
 
 A request may temporarily have a scheduled-but-not-yet-committed suffix during
-one forward pass. At every scheduler boundary, however:
+one forward pass. At every scheduler boundary the shared logical source of
+truth is:
 
 ```text
-seq.num_cached_tokens == seq.num_state_tokens
+seq.committed_tokens
 ```
+
+Both paged KV and GDN state must represent that boundary.
 
 ---
 
@@ -297,14 +300,11 @@ num_tokens % kvcache_block_size == 0
 The GDN snapshot is accepted only when:
 
 ```text
-snapshot.num_tokens
-==
-seq.num_cached_tokens
-==
-seq.num_state_tokens
+snapshot.num_tokens == seq.committed_tokens
 ```
 
-This is the core joint-cache invariant.
+The retained KV blocks cover that same full-block boundary. This is the core
+joint-cache invariant.
 
 ### 4.3 Natural alignment only
 
@@ -514,7 +514,7 @@ ordering before the correctness path is proven.
 ### Scheduler boundary
 
 ```text
-num_cached_tokens == num_state_tokens
+committed_tokens = the prefix represented by both KV and GDN state
 ```
 
 ### Prefix hit
@@ -544,11 +544,7 @@ block_refcount > 0
 ### Cache publication
 
 ```text
-snapshot boundary
-==
-committed KV boundary
-==
-committed GDN boundary
+snapshot boundary == committed_tokens == retained KV prefix boundary
 ```
 
 ---
