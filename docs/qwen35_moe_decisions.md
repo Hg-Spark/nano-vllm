@@ -82,21 +82,27 @@ not the framework built around many unrelated requirements
 
 ---
 
-## 4. Why remove the model registry?
+## 4. Why keep a tiny model registry?
 
-With exactly one supported family, a registry converts:
+The supported model surface remains intentionally narrow:
 
 ```text
-config -> lookup -> one possible class
+Qwen3.5-MoE text -> Qwen3_5MoeForCausalLM
+everything else -> explicit unsupported-model error
 ```
 
-into unnecessary indirection.
+The registry exists only to preserve the runtime/model boundary. `ModelRunner`
+should execute a model interface rather than import a Qwen implementation
+directly. This mirrors the useful boundary visible in vLLM and SGLang without
+bringing in their large model/backend registries.
 
-The runner now directly constructs `Qwen3_5MoeForCausalLM`, while `Config`
-strictly validates the checkpoint family.
+The same rule is used for checkpoint loading: Qwen-specific prefix/skip rules
+live on the Qwen adapter, while the generic loader applies those rules and
+performs strict name/shape validation.
 
-A registry becomes justified again only when a second supported model family
-has a real implementation and shares enough runtime behavior to warrant it.
+This is deliberately a one-entry dispatch table, not a plugin framework. A
+second model family would add another entry only after its implementation
+exists.
 
 ---
 

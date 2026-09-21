@@ -7,9 +7,11 @@ import torch
 from nanovllm.config import Config
 from nanovllm.models.qwen3_5_moe import (
     Qwen3_5MoeExperts,
+    Qwen3_5MoeForCausalLM,
     Qwen3_5MoeSparseMoeBlock,
     Qwen3_5MoeTopKRouter,
 )
+from nanovllm.models.registry import get_model_class
 from nanovllm.utils.loader import _map_weight_name
 
 
@@ -113,18 +115,38 @@ class Qwen35MoeTest(unittest.TestCase):
         self.assertIn("shared_expert.down_proj.weight", names)
         self.assertIn("shared_expert_gate.weight", names)
 
+    def test_model_registry_keeps_runtime_model_agnostic(self):
+        self.assertIs(
+            get_model_class(self.config),
+            Qwen3_5MoeForCausalLM,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "only Qwen3.5-MoE text is implemented",
+        ):
+            get_model_class(
+                SimpleNamespace(model_type="qwen3_5_text")
+            )
+
     def test_text_checkpoint_prefix_mapping(self):
         self.assertEqual(
             _map_weight_name(
-                "model.language_model.layers.0.mlp.gate.weight"
+                Qwen3_5MoeForCausalLM,
+                "model.language_model.layers.0.mlp.gate.weight",
             ),
             "model.layers.0.mlp.gate.weight",
         )
         self.assertIsNone(
-            _map_weight_name("model.visual.blocks.0.weight")
+            _map_weight_name(
+                Qwen3_5MoeForCausalLM,
+                "model.visual.blocks.0.weight",
+            )
         )
         self.assertIsNone(
-            _map_weight_name("mtp.layers.0.weight")
+            _map_weight_name(
+                Qwen3_5MoeForCausalLM,
+                "mtp.layers.0.weight",
+            )
         )
 
     def test_config_accepts_qwen35_moe(self):

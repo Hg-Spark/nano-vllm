@@ -5,16 +5,30 @@ from safetensors import safe_open
 from torch import nn
 
 
-_TEXT_PREFIX = "model.language_model."
-_SKIP_PREFIXES = ("model.visual.", "mtp.")
-
-
-def _map_weight_name(weight_name: str) -> str | None:
-    for prefix in _SKIP_PREFIXES:
+def _map_weight_name(
+    model: nn.Module | type[nn.Module],
+    weight_name: str,
+) -> str | None:
+    skip_prefixes = getattr(
+        model,
+        "checkpoint_skip_prefixes",
+        (),
+    )
+    for prefix in skip_prefixes:
         if weight_name.startswith(prefix):
             return None
-    if weight_name.startswith(_TEXT_PREFIX):
-        return "model." + weight_name[len(_TEXT_PREFIX):]
+
+    prefix_map = getattr(
+        model,
+        "checkpoint_prefix_map",
+        (),
+    )
+    for source_prefix, target_prefix in prefix_map:
+        if weight_name.startswith(source_prefix):
+            return (
+                target_prefix
+                + weight_name[len(source_prefix):]
+            )
     return weight_name
 
 
@@ -32,14 +46,17 @@ def load_model(model: nn.Module, path: str):
     for file in checkpoint_files:
         with safe_open(file, "pt", "cpu") as f:
             for checkpoint_name in f.keys():
-                weight_name = _map_weight_name(checkpoint_name)
+                weight_name = _map_weight_name(
+                    model,
+                    checkpoint_name,
+                )
                 if weight_name is None:
                     continue
 
                 param = expected.get(weight_name)
                 if param is None:
                     raise KeyError(
-                        "unexpected Qwen3.5-MoE text weight: "
+                        "unexpected checkpoint weight: "
                         f"{checkpoint_name!r} -> {weight_name!r}"
                     )
 
@@ -59,6 +76,6 @@ def load_model(model: nn.Module, path: str):
         preview = ", ".join(missing[:8])
         suffix = "..." if len(missing) > 8 else ""
         raise KeyError(
-            "missing Qwen3.5-MoE text weights after loading: "
+            "missing model weights after loading: "
             f"{preview}{suffix}"
         )

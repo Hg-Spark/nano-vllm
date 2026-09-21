@@ -376,6 +376,15 @@ class Qwen3_5MoeModel(nn.Module):
 
 
 class Qwen3_5MoeForCausalLM(nn.Module):
+    # Checkpoint naming belongs to the model adapter. The generic loader only
+    # applies these declarative rules and validates names/shapes strictly.
+    checkpoint_prefix_map = (
+        ("model.language_model.", "model."),
+    )
+    checkpoint_skip_prefixes = (
+        "model.visual.",
+        "mtp.",
+    )
 
     def __init__(self, config) -> None:
         super().__init__()
