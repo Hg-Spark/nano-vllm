@@ -103,10 +103,17 @@ class LLMEngine:
             return [], 0.0
 
         start = perf_counter()
-        token_ids = self.model_runner.run(
-            seqs,
-            is_prefill,
-        )
+        try:
+            token_ids = self.model_runner.run(
+                seqs,
+                is_prefill,
+            )
+        except Exception:
+            # KV/GDN tensors may have been mutated before the failure. Drop
+            # both physical histories and replay this request from token
+            # history on the next step instead of reusing uncertain state.
+            self.scheduler.recover_failed_step(seqs)
+            raise
         elapsed = perf_counter() - start
         self.scheduler.postprocess(
             seqs,
