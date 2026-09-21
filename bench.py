@@ -1,31 +1,66 @@
 import os
 import time
 from random import randint, seed
+
 from nanovllm import LLM, SamplingParams
-# from vllm import LLM, SamplingParams
 
 
 def main():
+    """Reference-path microbenchmark.
+
+    This measures the current eager Qwen3.5-MoE implementation only. It is not
+    intended as a vLLM/SGLang performance comparison until fused GDN/MoE
+    kernels are implemented.
+    """
     seed(0)
-    num_seqs = 256
-    max_input_len = 1024
-    max_ouput_len = 1024
+    path = os.path.expanduser(
+        os.environ.get(
+            "NANOVLLM_MODEL",
+            "~/huggingface/Qwen3.5-35B-A3B/",
+        )
+    )
+    num_seqs = 2
+    max_input_len = 128
+    max_output_len = 32
 
-    path = os.path.expanduser("~/huggingface/Qwen3-0.6B/")
-    llm = LLM(path, enforce_eager=False, max_model_len=4096)
+    llm = LLM(
+        path,
+        max_num_batched_tokens=256,
+        max_num_seqs=num_seqs,
+        max_num_state_slots=num_seqs,
+    )
+    prompt_token_ids = [
+        [
+            randint(0, 10000)
+            for _ in range(
+                randint(64, max_input_len)
+            )
+        ]
+        for _ in range(num_seqs)
+    ]
+    params = [
+        SamplingParams(
+            temperature=0.0,
+            ignore_eos=True,
+            max_tokens=max_output_len,
+        )
+        for _ in range(num_seqs)
+    ]
 
-    prompt_token_ids = [[randint(0, 10000) for _ in range(randint(100, max_input_len))] for _ in range(num_seqs)]
-    sampling_params = [SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=randint(100, max_ouput_len)) for _ in range(num_seqs)]
-    # uncomment the following line for vllm
-    # prompt_token_ids = [dict(prompt_token_ids=p) for p in prompt_token_ids]
-
-    llm.generate(["Benchmark: "], SamplingParams())
-    t = time.time()
-    llm.generate(prompt_token_ids, sampling_params, use_tqdm=False)
-    t = (time.time() - t)
-    total_tokens = sum(sp.max_tokens for sp in sampling_params)
-    throughput = total_tokens / t
-    print(f"Total: {total_tokens}tok, Time: {t:.2f}s, Throughput: {throughput:.2f}tok/s")
+    start = time.time()
+    llm.generate(
+        prompt_token_ids,
+        params,
+        use_tqdm=False,
+    )
+    elapsed = time.time() - start
+    total_tokens = num_seqs * max_output_len
+    print(
+        f"Decode output: {total_tokens} tok, "
+        f"time={elapsed:.2f}s, "
+        f"throughput={total_tokens / elapsed:.2f} tok/s"
+    )
+    llm.exit()
 
 
 if __name__ == "__main__":
