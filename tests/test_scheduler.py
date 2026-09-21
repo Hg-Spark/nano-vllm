@@ -321,6 +321,38 @@ class SchedulerTest(unittest.TestCase):
             long_seq.seq_id,
         )
 
+    def test_failed_prefill_step_releases_uncertain_hybrid_state(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=3,
+            max_num_seqs=2,
+        )
+        seq = Sequence(list(range(8)))
+        scheduler.add(seq)
+
+        scheduled = scheduler.schedule()
+        slot = seq.state_slot
+        blocks = set(seq.block_table)
+
+        scheduler.recover_failed_step(
+            scheduled.prefill_seqs
+        )
+
+        self.assertEqual(list(scheduler.waiting), [seq])
+        self.assertNotIn(seq, scheduler.running)
+        self.assertEqual(seq.num_scheduled_tokens, 0)
+        self.assertEqual(seq.num_cached_tokens, 0)
+        self.assertEqual(seq.num_state_tokens, 0)
+        self.assertEqual(seq.state_slot, -1)
+        self.assertFalse(seq.block_table)
+        self.assertIsNone(
+            scheduler.state_manager.owner_of(slot)
+        )
+        self.assertTrue(
+            blocks.isdisjoint(
+                scheduler.block_manager.used_block_ids
+            )
+        )
+
     def test_scheduler_rejects_kv_state_progress_divergence(self):
         scheduler = make_scheduler()
         seq = make_running_sequence(
