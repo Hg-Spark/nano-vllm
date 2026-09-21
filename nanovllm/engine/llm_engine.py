@@ -152,10 +152,21 @@ class LLMEngine:
             decode_tokens=scheduled.decode_tokens,
         )
 
-        decode_outputs, stats.decode_seconds = self._run_batch(
-            scheduled.decode_seqs,
-            False,
-        )
+        try:
+            decode_outputs, stats.decode_seconds = self._run_batch(
+                scheduled.decode_seqs,
+                False,
+            )
+        except Exception:
+            # Prefill reservations for this scheduler step have not executed
+            # yet. Drop them too, otherwise a final prompt chunk may remain
+            # marked RUNNING with KV/state capacity that never received data.
+            if scheduled.prefill_seqs:
+                self.scheduler.recover_failed_step(
+                    scheduled.prefill_seqs
+                )
+            raise
+
         prefill_outputs, stats.prefill_seconds = self._run_batch(
             scheduled.prefill_seqs,
             True,
