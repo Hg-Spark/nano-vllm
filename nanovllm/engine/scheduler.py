@@ -51,6 +51,21 @@ class Scheduler:
     def add(self, seq: Sequence):
         self.waiting.append(seq)
 
+    def _validate_committed_prefix(self, seq: Sequence) -> None:
+        if seq.num_cached_tokens != seq.num_state_tokens:
+            raise RuntimeError(
+                f"sequence {seq.seq_id} KV/state prefix mismatch: "
+                f"kv={seq.num_cached_tokens}, "
+                f"state={seq.num_state_tokens}"
+            )
+        if seq.block_table:
+            self.state_manager.validate(seq)
+        elif seq.state_slot >= 0:
+            raise RuntimeError(
+                f"sequence {seq.seq_id} owns state slot "
+                "without KV allocation"
+            )
+
     def schedule(self) -> SchedulerOutput:
         output = SchedulerOutput()
         num_batched_tokens = 0
@@ -64,6 +79,7 @@ class Scheduler:
             and num_batched_tokens < self.max_num_batched_tokens
         ):
             seq = self.running.popleft()
+            self._validate_committed_prefix(seq)
             while not self.block_manager.can_append(seq):
                 if self.running:
                     self.preempt(self.running.pop())
@@ -98,6 +114,11 @@ class Scheduler:
 
             seq = self.waiting[0]
             if not seq.block_table:
+                if seq.state_slot >= 0:
+                    raise RuntimeError(
+                        f"sequence {seq.seq_id} has state slot "
+                        "without KV allocation"
+                    )
                 if (
                     not self.block_manager.can_allocate(seq)
                     or not self.state_manager.can_allocate(seq)
@@ -106,6 +127,7 @@ class Scheduler:
                 self.block_manager.allocate(seq)
                 self.state_manager.allocate(seq)
 
+            self._validate_committed_prefix(seq)
             num_tokens = (
                 seq.num_tokens - seq.num_cached_tokens
             )
@@ -130,6 +152,8 @@ class Scheduler:
                 self.waiting.popleft()
                 self.running.append(seq)
             else:
+                # A partial prefill remains at the waiting front and keeps both
+                # its KV blocks and recurrent-state slot for the next step.
                 break
 
         if output.is_empty:
@@ -137,6 +161,7 @@ class Scheduler:
         return output
 
     def preempt(self, seq: Sequence):
+        self._validate_committed_prefix(seq)
         seq.status = SequenceStatus.WAITING
         self.block_manager.deallocate(seq)
         self.state_manager.deallocate(seq)
@@ -149,7 +174,10 @@ class Scheduler:
         is_prefill: bool,
     ):
         for seq, token_id in zip(seqs, token_ids):
-            seq.num_cached_tokens += seq.num_scheduled_tokens
+            self._validate_committed_prefix(seq)
+            committed_tokens = seq.num_scheduled_tokens
+            seq.num_cached_tokens += committed_tokens
+            seq.num_state_tokens += committed_tokens
             seq.num_scheduled_tokens = 0
 
             if is_prefill and seq.num_cached_tokens < seq.num_tokens:
