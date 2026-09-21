@@ -256,6 +256,7 @@ class ModelRunner:
             slot_mapping=slot_mapping,
             context_lens=context_lens,
             block_tables=block_tables,
+            state_slots=state_slots,
         )
         return input_ids, positions
 
@@ -329,7 +330,6 @@ class ModelRunner:
             positions=positions,
             slot_mapping=slot_mapping,
             context_lens=context_lens,
-            state_slots=state_slots,
             block_tables=block_tables,
             outputs=outputs,
         )
