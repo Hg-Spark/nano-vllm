@@ -273,6 +273,33 @@ class GatedDeltaNetStateTest(unittest.TestCase):
             atol=1e-5,
         )
 
+    def test_state_slot_snapshot_round_trip(self):
+        self.layer.allocate_state_cache(1)
+        expected_conv = torch.randn_like(
+            self.layer.conv_state[0]
+        )
+        expected_recurrent = torch.randn_like(
+            self.layer.recurrent_state[0]
+        )
+        self.layer.conv_state[0].copy_(expected_conv)
+        self.layer.recurrent_state[0].copy_(expected_recurrent)
+
+        snapshot = self.layer.snapshot_state_slot(0)
+        self.layer.conv_state[0].zero_()
+        self.layer.recurrent_state[0].zero_()
+        self.layer.restore_state_slot(0, snapshot)
+
+        torch.testing.assert_close(
+            self.layer.conv_state[0],
+            expected_conv,
+        )
+        torch.testing.assert_close(
+            self.layer.recurrent_state[0],
+            expected_recurrent,
+        )
+        self.assertEqual(snapshot[0].device.type, "cpu")
+        self.assertEqual(snapshot[1].device.type, "cpu")
+
     def test_state_prefix_mismatch_is_rejected(self):
         self.layer.allocate_state_cache(1)
         hidden_states = torch.randn(
