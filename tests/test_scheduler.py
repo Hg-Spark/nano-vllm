@@ -27,6 +27,7 @@ def make_running_sequence(scheduler, token_ids):
     scheduler.block_manager.allocate(seq)
     scheduler.state_manager.allocate(seq)
     seq.num_cached_tokens = len(seq)
+    seq.num_state_tokens = len(seq)
     seq.status = SequenceStatus.RUNNING
     scheduler.running.append(seq)
     return seq
@@ -103,6 +104,13 @@ class SchedulerTest(unittest.TestCase):
             [None],
             True,
         )
+        self.assertEqual(seq.num_cached_tokens, 3)
+        self.assertEqual(seq.num_state_tokens, 3)
+        self.assertEqual(
+            scheduler.state_manager.owner_of(first_slot),
+            seq.seq_id,
+        )
+
         second = scheduler.schedule()
 
         self.assertEqual(second.prefill_tokens, 3)
@@ -123,6 +131,7 @@ class SchedulerTest(unittest.TestCase):
         scheduler.preempt(seq)
 
         self.assertEqual(seq.state_slot, -1)
+        self.assertEqual(seq.num_state_tokens, 0)
         self.assertFalse(seq.block_table)
         self.assertNotIn(
             slot,
@@ -155,6 +164,86 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(seq.state_slot, -1)
         self.assertFalse(seq.block_table)
 
+
+    def test_variable_length_prefills_share_one_batch(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=7,
+            max_num_seqs=3,
+        )
+        seqs = [
+            Sequence([1, 2]),
+            Sequence([3, 4, 5]),
+            Sequence([6, 7]),
+        ]
+        for seq in seqs:
+            scheduler.add(seq)
+
+        scheduled = scheduler.schedule()
+
+        self.assertEqual(scheduled.prefill_seqs, seqs)
+        self.assertEqual(
+            [seq.num_scheduled_tokens for seq in seqs],
+            [2, 3, 2],
+        )
+        self.assertEqual(scheduled.prefill_tokens, 7)
+        self.assertEqual(
+            len({seq.state_slot for seq in seqs}),
+            3,
+        )
+
+    def test_continuous_batching_reuses_released_state_slot(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=4,
+            max_num_seqs=2,
+        )
+        finished = make_running_sequence(
+            scheduler,
+            [1, 2],
+        )
+        survivor = make_running_sequence(
+            scheduler,
+            [3, 4],
+        )
+        released_slot = finished.state_slot
+        survivor_slot = survivor.state_slot
+
+        finished.num_scheduled_tokens = 1
+        scheduler.postprocess(
+            [finished],
+            [99],
+            False,
+        )
+
+        newcomer = Sequence([5, 6, 7])
+        scheduler.add(newcomer)
+        scheduled = scheduler.schedule()
+
+        self.assertEqual(scheduled.decode_seqs, [survivor])
+        self.assertEqual(scheduled.prefill_seqs, [newcomer])
+        self.assertEqual(newcomer.state_slot, released_slot)
+        self.assertEqual(survivor.state_slot, survivor_slot)
+        self.assertEqual(
+            scheduler.state_manager.owner_of(released_slot),
+            newcomer.seq_id,
+        )
+        self.assertEqual(
+            scheduler.state_manager.owner_of(survivor_slot),
+            survivor.seq_id,
+        )
+
+    def test_scheduler_rejects_kv_state_progress_divergence(self):
+        scheduler = make_scheduler()
+        seq = make_running_sequence(
+            scheduler,
+            [1, 2],
+        )
+        seq.num_state_tokens -= 1
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "KV/state prefix mismatch",
+        ):
+            scheduler.schedule()
 
 if __name__ == "__main__":
     unittest.main()
