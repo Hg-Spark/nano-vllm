@@ -139,8 +139,10 @@ release one slot
 
 So BlockManager remains a real abstraction.
 
-What was removed is only cross-request prefix sharing/hashing, because it is not
-safe without matching recurrent-state snapshots.
+The original KV-only prefix sharing/hashing was removed because it was not safe
+without matching recurrent-state snapshots. Stage 9 later reintroduces sharing
+with explicit block reference counts and a matching GDN checkpoint; the old
+generic hashing/cache framework stays removed.
 
 ---
 
@@ -341,8 +343,10 @@ The core project story is:
 > mechanisms separately: paged KV for Full Attention, fixed-size recurrent
 > state for Gated DeltaNet, and dynamic Top-K dispatch for sparse MoE. I first
 > built readable eager references and strict checkpoint loading, then removed
-> generic Qwen3/TP/CUDA-Graph/prefix-cache branches that were not valid for the
-> selected target. I kept BlockManager, StateSlotManager and Scheduler because
+> generic Qwen3/TP/CUDA-Graph and KV-only prefix-cache branches that were not
+> valid for the selected target. After state ownership was explicit, I added
+> back a narrow joint KV/GDN prefix cache. I kept BlockManager,
+> StateSlotManager and Scheduler because
 > they represent genuinely different resource lifetimes. I used Transformers
 > for equation/checkpoint parity and vLLM/SGLang to understand future optimized
 > invariants, without importing their large backend/EP abstractions before they
