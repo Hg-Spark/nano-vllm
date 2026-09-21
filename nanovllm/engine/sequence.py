@@ -29,6 +29,10 @@ class Sequence:
         self.num_tokens = len(self.token_ids)
         self.num_prompt_tokens = len(token_ids)
         self.num_cached_tokens = 0
+        # Number of tokens represented by the committed GDN Conv/Recurrent
+        # state in state_slot. It advances together with num_cached_tokens
+        # after a successful model step.
+        self.num_state_tokens = 0
         self.num_scheduled_tokens = 0
         self.block_table: list[int] = []
         self.state_slot = -1
