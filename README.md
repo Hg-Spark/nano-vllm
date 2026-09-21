@@ -21,7 +21,7 @@ Sparse MoE -> dynamic Top-K expert routing
 - sparse routed experts + gated shared expert
 - variable-length packed prefill across heterogeneous requests
 - continuous batching with explicit request-to-GDN-state ownership
-- state-aware chunked prefill across scheduler steps
+- state-aware chunked prefill across scheduler steps with incremental KV block growth
 - token-by-token decode
 - deterministic greedy decoding (`temperature=0`)
 - multiple EOS token ids from `generation_config.json`
