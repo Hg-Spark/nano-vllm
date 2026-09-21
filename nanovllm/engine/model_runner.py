@@ -5,7 +5,7 @@ import torch
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
 from nanovllm.layers.sampler import Sampler
-from nanovllm.models.registry import create_model
+from nanovllm.models.qwen3_5_moe import Qwen3_5MoeForCausalLM
 from nanovllm.utils.context import reset_context, set_context
 from nanovllm.utils.loader import load_model
 
@@ -173,7 +173,7 @@ class ModelRunner:
         torch.set_default_dtype(dtype)
         torch.set_default_device("cuda")
         try:
-            self.model = create_model(self.hf_config)
+            self.model = Qwen3_5MoeForCausalLM(self.hf_config)
             load_model(self.model, config.model)
             self.sampler = Sampler()
             self.warmup_model()
@@ -200,20 +200,6 @@ class ModelRunner:
         self.run([seq], True)
         torch.cuda.empty_cache()
 
-    def _cache_modules(self):
-        """Discover persistent-cache capabilities without model-specific paths."""
-        kv_modules = []
-        state_modules = []
-        for module in self.model.modules():
-            if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
-                kv_modules.append(module)
-            if (
-                callable(getattr(module, "state_cache_nbytes", None))
-                and callable(getattr(module, "allocate_state_cache", None))
-            ):
-                state_modules.append(module)
-        return kv_modules, state_modules
-
     def allocate_cache(self):
         config = self.config
         hf_config = self.hf_config
@@ -223,7 +209,8 @@ class ModelRunner:
         peak = stats["allocated_bytes.all.peak"]
         current = stats["allocated_bytes.all.current"]
 
-        kv_modules, state_modules = self._cache_modules()
+        kv_modules = self.model.kv_cache_modules()
+        state_modules = self.model.state_cache_modules()
         if not kv_modules:
             raise RuntimeError(
                 "Qwen3.5-MoE config contains no full-attention layers"
