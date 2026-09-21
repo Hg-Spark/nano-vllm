@@ -5,14 +5,12 @@ from unittest.mock import patch
 import torch
 
 from nanovllm.config import Config
-from nanovllm.engine.model_runner import ModelRunner
 from nanovllm.models.qwen3_5_moe import (
     Qwen3_5MoeExperts,
     Qwen3_5MoeForCausalLM,
     Qwen3_5MoeSparseMoeBlock,
     Qwen3_5MoeTopKRouter,
 )
-from nanovllm.models.registry import get_model_class
 from nanovllm.utils.loader import _map_weight_name
 
 
@@ -33,6 +31,13 @@ def make_text_config():
         linear_value_head_dim=4,
         linear_conv_kernel_dim=4,
         max_position_embeddings=1024,
+        vocab_size=32,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=4,
+        attention_bias=False,
+        partial_rotary_factor=0.5,
+        rope_theta=10000.0,
     )
 
 
@@ -116,46 +121,22 @@ class Qwen35MoeTest(unittest.TestCase):
         self.assertIn("shared_expert.down_proj.weight", names)
         self.assertIn("shared_expert_gate.weight", names)
 
-    def test_runner_discovers_cache_capabilities(self):
-        class KVModule(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.k_cache = torch.empty(0)
-                self.v_cache = torch.empty(0)
+    def test_model_exposes_explicit_hybrid_cache_topology(self):
+        model = Qwen3_5MoeForCausalLM(self.config)
 
-        class StateModule(torch.nn.Module):
-            def state_cache_nbytes(self, num_slots):
-                return num_slots
+        kv_modules = model.kv_cache_modules()
+        state_modules = model.state_cache_modules()
 
-            def allocate_state_cache(self, num_slots):
-                self.num_slots = num_slots
-
-        class DummyModel(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.kv = KVModule()
-                self.state = StateModule()
-
-        runner = ModelRunner.__new__(ModelRunner)
-        runner.model = DummyModel()
-
-        kv_modules, state_modules = runner._cache_modules()
-
-        self.assertEqual(kv_modules, [runner.model.kv])
-        self.assertEqual(state_modules, [runner.model.state])
-
-    def test_model_registry_keeps_runtime_model_agnostic(self):
+        self.assertEqual(len(kv_modules), 1)
+        self.assertEqual(len(state_modules), 1)
         self.assertIs(
-            get_model_class(self.config),
-            Qwen3_5MoeForCausalLM,
+            kv_modules[0],
+            model.model.layers[1].self_attn.attn,
         )
-        with self.assertRaisesRegex(
-            ValueError,
-            "only Qwen3.5-MoE text is implemented",
-        ):
-            get_model_class(
-                SimpleNamespace(model_type="qwen3_5_text")
-            )
+        self.assertIs(
+            state_modules[0],
+            model.model.layers[0].linear_attn,
+        )
 
     def test_text_checkpoint_prefix_mapping(self):
         self.assertEqual(
