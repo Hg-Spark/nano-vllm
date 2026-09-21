@@ -65,7 +65,7 @@ class BlockManager:
         block_ids: tuple[int, ...],
         num_tokens: int,
     ) -> None:
-        if seq.block_table or seq.num_cached_tokens != 0:
+        if seq.block_table or seq.committed_tokens != 0:
             raise RuntimeError(
                 "shared prefix can only attach to a fresh request"
             )
