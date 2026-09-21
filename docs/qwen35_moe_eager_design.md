@@ -312,21 +312,21 @@ memory usage; they are not part of the cache budget.
 
 ## 8. BlockManager and prefix policy
 
-`BlockManager` is now only a physical paged-KV allocator. It grows each request's block table only through the end of the currently scheduled prefill range; unscheduled prompt tails do not reserve KV memory.
+The eager baseline first reduced `BlockManager` to incremental physical KV
+allocation because KV-only cross-request reuse is unsafe for Qwen3.5-MoE: a
+reusable prefix also needs matching GDN Conv/Recurrent state.
 
-Removed:
+Stage 9 later adds back only the ownership machinery that the hybrid invariant
+requires:
 
-- xxhash;
-- block content hashes;
-- ref-counted shared prefix blocks;
-- cross-request prefix lookup.
+- per-block reference counts;
+- full-block shared KV prefixes;
+- a bounded exact-match joint prefix cache;
+- a GDN snapshot from the exact same token boundary.
 
-Cross-request KV-only prefix reuse is unsafe because a reusable Qwen3.5-MoE
-prefix also requires matching GDN Conv/Recurrent state.
-
-Chunked prefill still uses `block_tables` for a different reason: later chunks
-of the *same request* must attend to KV produced by earlier chunks. This is not
-prefix caching.
+Chunked prefill still uses `block_tables` independently for same-request
+history. See `qwen35_scheduler_preemption_prefix_design.md` for the joint
+cross-request path.
 
 ---
 
@@ -446,10 +446,12 @@ Transformers reference.
 2. GDN recurrence uses a Python token scan and is slow.
 3. Only BF16/non-quantized checkpoints are in scope.
 4. TP/EP are not implemented.
-5. Cross-request prefix caching is disabled.
-6. Vision and MTP weights are ignored.
-7. CUDA Graph is not enabled.
-8. Real GPU/checkpoint parity must be passed before calling support complete.
+5. Joint prefix caching is deliberately bounded and full-block aligned; it is
+   not a production-scale radix/hash cache.
+6. GDN snapshots are synchronous host copies and remain uncompressed.
+7. Vision and MTP weights are ignored.
+8. CUDA Graph is not enabled.
+9. Real GPU/checkpoint parity must be passed before calling support complete.
 
 ---
 
