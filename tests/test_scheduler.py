@@ -353,6 +353,85 @@ class SchedulerTest(unittest.TestCase):
             )
         )
 
+    def test_decode_budget_rotates_running_requests(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=2,
+            max_num_seqs=3,
+        )
+        first = make_running_sequence(scheduler, [1, 2])
+        second = make_running_sequence(scheduler, [3, 4])
+        third = make_running_sequence(scheduler, [5, 6])
+
+        scheduled = scheduler.schedule()
+
+        self.assertEqual(
+            scheduled.decode_seqs,
+            [first, second],
+        )
+        scheduler.postprocess(
+            scheduled.decode_seqs,
+            [10, 11],
+            False,
+        )
+
+        next_step = scheduler.schedule()
+
+        self.assertEqual(next_step.decode_seqs[0], third)
+        self.assertIn(first, next_step.decode_seqs)
+
+    def test_joint_prefix_hit_restores_kv_and_gdn_boundary_together(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=4,
+            max_num_seqs=2,
+            num_blocks=8,
+            block_size=4,
+        )
+        original = Sequence([0, 1, 2, 3, 4, 5])
+        scheduler.add(original)
+
+        first = scheduler.schedule()
+        self.assertEqual(first.prefill_tokens, 4)
+        cached_block = original.block_table[0]
+        snapshot = object()
+        scheduler.postprocess(
+            first.prefill_seqs,
+            [None],
+            True,
+            {original.seq_id: snapshot},
+        )
+        self.assertEqual(len(scheduler.prefix_cache), 1)
+        self.assertEqual(
+            scheduler.block_manager.block_refcounts[cached_block],
+            2,
+        )
+
+        final = scheduler.schedule()
+        scheduler.postprocess(
+            final.prefill_seqs,
+            [99],
+            True,
+        )
+        self.assertTrue(original.is_finished)
+        self.assertEqual(
+            scheduler.block_manager.block_refcounts[cached_block],
+            1,
+        )
+
+        newcomer = Sequence([0, 1, 2, 3, 7, 8])
+        scheduler.add(newcomer)
+        resumed = scheduler.schedule()
+
+        self.assertEqual(resumed.prefill_seqs, [newcomer])
+        self.assertEqual(newcomer.num_cached_tokens, 4)
+        self.assertEqual(newcomer.num_state_tokens, 4)
+        self.assertIs(newcomer.pending_state_snapshot, snapshot)
+        self.assertEqual(newcomer.block_table[0], cached_block)
+        self.assertEqual(newcomer.num_scheduled_tokens, 2)
+        self.assertEqual(
+            scheduler.block_manager.block_refcounts[cached_block],
+            2,
+        )
+
     def test_scheduler_rejects_kv_state_progress_divergence(self):
         scheduler = make_scheduler()
         seq = make_running_sequence(
