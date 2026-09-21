@@ -183,11 +183,11 @@ difference visible without introducing a runner hierarchy.
 
 ---
 
-## 9. Why remove cross-request prefix cache but keep block tables?
+## 9. Why was KV-only prefix cache removed, then reintroduced jointly?
 
-These are separate concepts.
+These are separate stages.
 
-Unsafe cross-request reuse:
+The original cross-request cache was unsafe for Qwen3.5-MoE:
 
 ```text
 Request B reuses KV(prefix from A)
@@ -195,15 +195,21 @@ but has no matching GDN recurrent state
 => inconsistent history
 ```
 
-Required chunked-prefill behavior:
+Block tables were kept first because same-request chunked prefill still needs
+its own earlier KV.
+
+After explicit GDN state ownership and hybrid preemption were stable, stage 9
+reintroduced cross-request reuse with a stricter cache entry:
 
 ```text
-same request:
-chunk 2 must attend to its own KV from chunk 1
+exact token prefix
++ ref-counted full KV blocks
++ GDN Conv/Recurrent snapshot at the same boundary
 ```
 
-Block tables remain for the second case. Hashing/ref-counted prefix sharing was
-removed.
+The implementation uses a small exact-match LRU rather than reviving the old
+generic prefix-hash/cache framework. This makes the new abstraction correspond
+to a real hybrid lifetime instead of restoring generality for its own sake.
 
 ---
 
