@@ -64,7 +64,9 @@ See:
 - `docs/qwen35_batching_state_design.md` — variable-length prefill, continuous
   batching, recurrent-state ownership and chunk continuity;
 - `docs/qwen35_scheduler_preemption_prefix_design.md` — decode-first scheduling,
-  hybrid preemption, joint KV/GDN prefix reuse and interview reasoning.
+  hybrid preemption, joint KV/GDN prefix reuse and interview reasoning;
+- `docs/qwen35_validation_benchmark.md` — correctness gates, layer diagnosis and
+  benchmark metric definitions.
 
 ## Installation
 
