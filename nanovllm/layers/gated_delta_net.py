@@ -1,5 +1,4 @@
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 
@@ -38,21 +37,21 @@ class GatedDeltaNet(nn.Module):
     directly with request-level state slots supplied by the runtime context.
     This removes any need for engine-side Gather/Scatter state copies.
 
-    Phase-1 intentionally supports TP=1 only. The state layout and public
-    methods are designed so the Python recurrent loop can later be replaced by
-    a state-aware CUDA kernel without changing scheduler/runtime contracts.
+    The runtime is intentionally Qwen3.5-MoE / TP=1 / eager-only. The state
+    layout is kept dense so the Python recurrence can later be replaced by a
+    fused kernel without changing scheduler ownership.
     """
 
     def __init__(self, config, layer_idx: int):
         super().__init__()
-        if dist.get_world_size() != 1:
-            raise NotImplementedError(
-                "Qwen3.5 GatedDeltaNet reference path currently requires TP=1"
-            )
-
         self.hidden_size = config.hidden_size
         self.num_v_heads = config.linear_num_value_heads
         self.num_k_heads = config.linear_num_key_heads
+        if self.num_v_heads % self.num_k_heads != 0:
+            raise ValueError(
+                "linear_num_value_heads must be divisible by "
+                "linear_num_key_heads"
+            )
         self.head_k_dim = config.linear_key_head_dim
         self.head_v_dim = config.linear_value_head_dim
         self.key_dim = self.head_k_dim * self.num_k_heads
@@ -151,6 +150,47 @@ class GatedDeltaNet(nn.Module):
             device=device,
             dtype=torch.float32,
         )
+
+    def _validate_state_slot(self, slot_id: int) -> None:
+        if not self.conv_state.numel() or not self.recurrent_state.numel():
+            raise RuntimeError("GDN state cache is not allocated")
+        if not 0 <= slot_id < self.conv_state.size(0):
+            raise RuntimeError(f"invalid GDN state slot {slot_id}")
+
+    def snapshot_state_slot(
+        self,
+        slot_id: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Copy one committed request state to host memory.
+
+        Conv state keeps the model dtype while the recurrent matrix keeps its
+        FP32 correctness dtype. Snapshot compression is intentionally deferred.
+        """
+        self._validate_state_slot(slot_id)
+        return (
+            self.conv_state[slot_id].detach().cpu().clone(),
+            self.recurrent_state[slot_id].detach().cpu().clone(),
+        )
+
+    def restore_state_slot(
+        self,
+        slot_id: int,
+        snapshot: tuple[torch.Tensor, torch.Tensor],
+    ) -> None:
+        self._validate_state_slot(slot_id)
+        conv_state, recurrent_state = snapshot
+        expected_conv = self.conv_state[slot_id]
+        expected_recurrent = self.recurrent_state[slot_id]
+        if conv_state.shape != expected_conv.shape:
+            raise RuntimeError(
+                "GDN conv snapshot shape does not match active state slot"
+            )
+        if recurrent_state.shape != expected_recurrent.shape:
+            raise RuntimeError(
+                "GDN recurrent snapshot shape does not match active state slot"
+            )
+        expected_conv.copy_(conv_state)
+        expected_recurrent.copy_(recurrent_state)
 
     def _causal_conv(
         self,
@@ -310,30 +350,67 @@ class GatedDeltaNet(nn.Module):
         context = get_context()
         if context.state_slots is None:
             raise RuntimeError("GDN requires runtime state-slot metadata")
+        if context.state_prefix_lens is None:
+            raise RuntimeError(
+                "GDN requires committed state-prefix metadata"
+            )
 
-        state_slots = context.state_slots.tolist()
+        state_slots = context.state_slots
+        state_prefix_lens = context.state_prefix_lens
+        if len(state_slots) != len(state_prefix_lens):
+            raise RuntimeError(
+                "GDN state slot/prefix metadata must have equal length"
+            )
         outputs = []
 
         if context.is_prefill:
-            if context.cu_seqlens_q is None or context.cu_seqlens_k is None:
-                raise RuntimeError("GDN prefill requires packed sequence metadata")
-            q_offsets = context.cu_seqlens_q.tolist()
-            k_offsets = context.cu_seqlens_k.tolist()
+            if context.prefill_q_offsets is None:
+                raise RuntimeError(
+                    "GDN prefill requires CPU packed query offsets"
+                )
+            q_offsets = context.prefill_q_offsets
+            num_sequences = len(state_slots)
+            if len(q_offsets) != num_sequences + 1:
+                raise RuntimeError(
+                    "packed query offsets must match state metadata"
+                )
+            if q_offsets[0] != 0:
+                raise RuntimeError("packed query offsets must start at zero")
+            if q_offsets[-1] != hidden_states.size(0):
+                raise RuntimeError(
+                    "packed query offsets do not cover hidden states"
+                )
 
             for seq_idx, slot_id in enumerate(state_slots):
                 q_start = q_offsets[seq_idx]
                 q_end = q_offsets[seq_idx + 1]
                 q_len = q_end - q_start
-                k_len = k_offsets[seq_idx + 1] - k_offsets[seq_idx]
-                prefix_len = k_len - q_len
+                expected_prefix = state_prefix_lens[seq_idx]
+
+                if q_len <= 0:
+                    raise RuntimeError(
+                        f"invalid packed query length for sequence "
+                        f"{seq_idx}: q={q_len}"
+                    )
+                if expected_prefix < 0:
+                    raise RuntimeError(
+                        f"invalid GDN state prefix for sequence "
+                        f"{seq_idx}: {expected_prefix}"
+                    )
 
                 if self.conv_state.numel() and slot_id >= 0:
                     conv_state = self.conv_state[slot_id]
                     recurrent_state = self.recurrent_state[slot_id]
-                    if prefix_len == 0:
+                    if expected_prefix == 0:
+                        # Physical slots are reused across requests. A fresh
+                        # request must discard stale state from the old owner.
                         conv_state.zero_()
                         recurrent_state.zero_()
                 else:
+                    if expected_prefix != 0:
+                        raise RuntimeError(
+                            "cached GDN prefix requires an allocated state slot"
+                        )
                     conv_state, recurrent_state = self._temporary_states(
                         hidden_states.device,
                         hidden_states.dtype,
@@ -355,6 +432,10 @@ class GatedDeltaNet(nn.Module):
                 if slot_id < 0 or not self.conv_state.numel():
                     raise RuntimeError(
                         "decode requires allocated GDN state slots"
+                    )
+                if state_prefix_lens[token_idx] < 0:
+                    raise RuntimeError(
+                        "decode state-prefix length must be non-negative"
                     )
                 outputs.append(
                     self._forward_sequence(

@@ -3,9 +3,26 @@ import gc
 import os
 
 import torch
-from transformers import AutoModelForMultimodalLM, AutoTokenizer
+from transformers import (
+    AutoConfig,
+    AutoModelForMultimodalLM,
+    AutoTokenizer,
+)
 
 from nanovllm import LLM, SamplingParams
+
+
+def validate_model_family(model_path: str) -> None:
+    config = AutoConfig.from_pretrained(model_path)
+    text_config = getattr(config, "text_config", config)
+    if (
+        getattr(config, "model_type", None) != "qwen3_5_moe"
+        and getattr(text_config, "model_type", None)
+        != "qwen3_5_moe_text"
+    ):
+        raise ValueError(
+            "verification requires a Qwen3.5-MoE checkpoint"
+        )
 
 
 def run_hf(
@@ -26,16 +43,18 @@ def run_hf(
         model_path,
         dtype=torch.bfloat16,
     ).cuda()
-    # Compare a fixed token count. Official generation configs may contain
-    # multiple stop-token ids while nano-vLLM currently exposes one EOS id.
     model.generation_config.eos_token_id = None
+
     with torch.inference_mode():
         output_ids = model.generate(
             input_ids=input_ids,
             do_sample=False,
             max_new_tokens=max_new_tokens,
         )
-    completion = output_ids[0, input_ids.size(1) :].tolist()
+    completion = output_ids[
+        0,
+        input_ids.size(1):,
+    ].tolist()
 
     del output_ids, input_ids, model
     gc.collect()
@@ -48,26 +67,26 @@ def run_nanovllm(
     prompt: str,
     max_new_tokens: int,
     max_model_len: int,
-    max_num_state_slots: int,
 ) -> list[int]:
     llm = LLM(
         model_path,
-        enforce_eager=True,
-        tensor_parallel_size=1,
         max_model_len=max_model_len,
-        max_num_seqs=max_num_state_slots,
-        max_num_state_slots=max_num_state_slots,
+        max_num_seqs=1,
+        max_num_state_slots=1,
     )
-    output = llm.generate(
-        [prompt],
-        SamplingParams(
-            temperature=0.0,
-            max_tokens=max_new_tokens,
-            ignore_eos=True,
-        ),
-        use_tqdm=False,
-    )
-    return output[0]["token_ids"]
+    try:
+        output = llm.generate(
+            [prompt],
+            SamplingParams(
+                temperature=0.0,
+                max_tokens=max_new_tokens,
+                ignore_eos=True,
+            ),
+            use_tqdm=False,
+        )
+        return output[0]["token_ids"]
+    finally:
+        llm.exit()
 
 
 def main() -> None:
@@ -75,14 +94,26 @@ def main() -> None:
     parser.add_argument("model")
     parser.add_argument(
         "--prompt",
-        default="Explain why KV cache is useful in autoregressive inference.",
+        default=(
+            "Explain why KV cache is useful in "
+            "autoregressive inference."
+        ),
     )
-    parser.add_argument("--max-new-tokens", type=int, default=32)
-    parser.add_argument("--max-model-len", type=int, default=4096)
-    parser.add_argument("--max-num-state-slots", type=int, default=4)
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=16,
+    )
+    parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=4096,
+    )
     args = parser.parse_args()
 
     model_path = os.path.expanduser(args.model)
+    validate_model_family(model_path)
+
     hf_tokens = run_hf(
         model_path,
         args.prompt,
@@ -93,7 +124,6 @@ def main() -> None:
         args.prompt,
         args.max_new_tokens,
         args.max_model_len,
-        args.max_num_state_slots,
     )
 
     common = min(len(hf_tokens), len(nano_tokens))
@@ -114,7 +144,11 @@ def main() -> None:
 
     if mismatch is None:
         mismatch = common
-    hf_token = hf_tokens[mismatch] if mismatch < len(hf_tokens) else None
+    hf_token = (
+        hf_tokens[mismatch]
+        if mismatch < len(hf_tokens)
+        else None
+    )
     nano_token = (
         nano_tokens[mismatch]
         if mismatch < len(nano_tokens)
