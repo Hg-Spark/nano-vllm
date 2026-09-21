@@ -308,6 +308,53 @@ class GatedDeltaNetStateTest(unittest.TestCase):
         self.assertEqual(snapshot[0].dtype, torch.bfloat16)
         self.assertEqual(snapshot[1].dtype, torch.bfloat16)
 
+    def test_bf16_snapshot_resume_matches_quantized_continuation(self):
+        hidden_states = torch.randn(
+            9,
+            self.layer.hidden_size,
+        )
+        split = 5
+
+        self.layer.allocate_state_cache(1)
+        set_context(
+            True,
+            state_slots=(0,),
+            state_prefix_lens=(0,),
+            prefill_q_offsets=(0, split),
+        )
+        self.layer(hidden_states[:split])
+        snapshot = self.layer.snapshot_state_slot(0)
+
+        reference_conv = snapshot[0].to(
+            self.layer.conv_state.dtype
+        )
+        reference_recurrent = snapshot[1].to(
+            self.layer.recurrent_state.dtype
+        )
+        expected = self.layer._forward_sequence(
+            hidden_states[split:],
+            reference_conv,
+            reference_recurrent,
+        )
+
+        self.layer.conv_state[0].zero_()
+        self.layer.recurrent_state[0].zero_()
+        self.layer.restore_state_slot(0, snapshot)
+        set_context(
+            True,
+            state_slots=(0,),
+            state_prefix_lens=(split,),
+            prefill_q_offsets=(0, hidden_states.size(0) - split),
+        )
+        resumed = self.layer(hidden_states[split:])
+
+        torch.testing.assert_close(
+            resumed,
+            expected,
+            rtol=0,
+            atol=0,
+        )
+
     def test_state_slot_restore_rejects_non_bf16_snapshot(self):
         self.layer.allocate_state_cache(1)
         invalid_snapshot = (
