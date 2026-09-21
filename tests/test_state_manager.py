@@ -23,6 +23,14 @@ class StateSlotManagerTest(unittest.TestCase):
         self.assertEqual(manager.allocate(second), 0)
         self.assertEqual(second.state_slot, 0)
 
+    def test_stale_slot_is_rejected(self):
+        manager = StateSlotManager(1)
+        seq = Sequence([1])
+        seq.state_slot = 0
+
+        with self.assertRaisesRegex(RuntimeError, "state slot 0 is stale"):
+            manager.allocate(seq)
+
     def test_exhaustion_is_explicit(self):
         manager = StateSlotManager(1)
         manager.allocate(Sequence([1]))

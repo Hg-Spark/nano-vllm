@@ -22,6 +22,10 @@ class StateSlotManager:
 
     def allocate(self, seq: Sequence) -> int:
         if seq.state_slot >= 0:
+            if seq.state_slot not in self.used_slot_ids:
+                raise RuntimeError(
+                    f"state slot {seq.state_slot} is stale"
+                )
             return seq.state_slot
         if not self.free_slot_ids:
             raise RuntimeError("no free hybrid state slots")
