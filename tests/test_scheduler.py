@@ -12,6 +12,8 @@ def make_scheduler(max_num_batched_tokens=4, max_num_seqs=4, num_blocks=16):
         eos=-1,
         kvcache_block_size=256,
         num_kvcache_blocks=num_blocks,
+        enable_prefix_cache=True,
+        max_num_state_slots=max_num_seqs,
     )
     Sequence.block_size = config.kvcache_block_size
     return Scheduler(config)
