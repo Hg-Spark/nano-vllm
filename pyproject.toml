@@ -4,28 +4,27 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nano-vllm"
-version = "0.2.0"
+version = "0.3.0"
 authors = [{ name = "Xingkai Yu" }]
 license = "MIT"
 license-files = ["LICENSE"]
 readme = "README.md"
-description = "a lightweight vLLM implementation built from scratch"
+description = "A compact Qwen3.5-MoE hybrid inference runtime"
 requires-python = ">=3.10,<3.13"
 dependencies = [
     "torch>=2.4.0",
     "triton>=3.0.0",
     "transformers>=5.2.0",
     "flash-attn",
-    "xxhash",
+    "safetensors",
 ]
 
 [project.urls]
-Homepage="https://github.com/GeeeekExplorer/nano-vllm"
+Homepage="https://github.com/Hg-Spark/nano-vllm"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["nanovllm*"]
-
 
 [project.optional-dependencies]
 dev = [
