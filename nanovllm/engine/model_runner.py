@@ -28,7 +28,7 @@ class PrefillBatchLayout:
 
 @dataclass(frozen=True, slots=True)
 class GDNStateSnapshot:
-    """Host checkpoint for all GDN layers at one committed prefix."""
+    """BF16 host checkpoint for all GDN layers at one committed prefix."""
 
     num_tokens: int
     layers: tuple[tuple[torch.Tensor, torch.Tensor], ...]

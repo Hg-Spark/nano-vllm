@@ -437,7 +437,7 @@ Transformers reference.
 4. TP/EP are not implemented.
 5. Joint prefix caching is deliberately bounded and full-block aligned; it is
    not a production-scale radix/hash cache.
-6. GDN snapshots are synchronous host copies and remain uncompressed.
+6. GDN prefix snapshots are synchronous BF16 host copies; active recurrent state remains FP32.
 7. Vision and MTP weights are ignored.
 8. CUDA Graph is not enabled.
 9. Real GPU/checkpoint parity must be passed before calling support complete.

@@ -482,6 +482,7 @@ request with prefix length zero clears stale physical state before use.
 
 **What would the next optimization stage be?**
 
-After the joint prefix cache, evaluate BF16 GDN snapshots as a separate
-numerical/memory optimization, then replace the eager token-scan GDN with a
-chunked/fused kernel while preserving the same ownership and prefix invariants.
+The joint prefix cache already stores GDN checkpoints in BF16 while active
+recurrent state stays FP32. The next optimization stage is therefore the eager
+token-scan GDN itself: replace it with a chunked/fused kernel while preserving
+the same ownership, restore and prefix-boundary invariants.

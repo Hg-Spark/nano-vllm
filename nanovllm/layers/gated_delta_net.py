@@ -5,6 +5,9 @@ from torch import nn
 from nanovllm.utils.context import get_context
 
 
+GDN_SNAPSHOT_DTYPE = torch.bfloat16
+
+
 def l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return x * torch.rsqrt((x * x).sum(dim=-1, keepdim=True) + eps)
 
@@ -161,15 +164,24 @@ class GatedDeltaNet(nn.Module):
         self,
         slot_id: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Copy one committed request state to host memory.
+        """Copy one committed request state to compact BF16 host storage.
 
-        Conv state keeps the model dtype while the recurrent matrix keeps its
-        FP32 correctness dtype. Snapshot compression is intentionally deferred.
+        Active recurrent state stays FP32 for execution. Prefix-cache snapshots
+        are immutable checkpoints, so both Conv and recurrent tensors are
+        quantized to BF16 before leaving the active state pool.
         """
         self._validate_state_slot(slot_id)
         return (
-            self.conv_state[slot_id].detach().cpu().clone(),
-            self.recurrent_state[slot_id].detach().cpu().clone(),
+            self.conv_state[slot_id].detach().to(
+                device="cpu",
+                dtype=GDN_SNAPSHOT_DTYPE,
+                copy=True,
+            ),
+            self.recurrent_state[slot_id].detach().to(
+                device="cpu",
+                dtype=GDN_SNAPSHOT_DTYPE,
+                copy=True,
+            ),
         )
 
     def restore_state_slot(
@@ -189,6 +201,10 @@ class GatedDeltaNet(nn.Module):
             raise RuntimeError(
                 "GDN recurrent snapshot shape does not match active state slot"
             )
+        if conv_state.dtype != GDN_SNAPSHOT_DTYPE:
+            raise RuntimeError("GDN conv snapshot must use BF16 storage")
+        if recurrent_state.dtype != GDN_SNAPSHOT_DTYPE:
+            raise RuntimeError("GDN recurrent snapshot must use BF16 storage")
         expected_conv.copy_(conv_state)
         expected_recurrent.copy_(recurrent_state)
 
