@@ -41,7 +41,6 @@ class LLMEngine:
             if key in config_fields
         }
         config = Config(model, **config_kwargs)
-        Sequence.block_size = config.kvcache_block_size
 
         self.model_runner = ModelRunner(config)
         self.tokenizer = AutoTokenizer.from_pretrained(
