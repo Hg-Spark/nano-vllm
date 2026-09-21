@@ -26,6 +26,14 @@ class PrefillBatchLayout:
     use_block_tables: bool
 
 
+@dataclass(frozen=True, slots=True)
+class GDNStateSnapshot:
+    """Host checkpoint for all GDN layers at one committed prefix."""
+
+    num_tokens: int
+    layers: tuple[tuple[torch.Tensor, torch.Tensor], ...]
+
+
 def build_prefill_batch_layout(
     seqs: list[Sequence],
     block_size: int,
@@ -270,6 +278,78 @@ class ModelRunner:
                 config.max_num_state_slots
             )
 
+    def capture_gdn_state(
+        self,
+        seq: Sequence,
+        prefix_tokens: int,
+    ) -> GDNStateSnapshot:
+        if seq.state_slot < 0:
+            raise RuntimeError(
+                f"sequence {seq.seq_id} has no state slot to snapshot"
+            )
+        physical_prefix = (
+            seq.num_state_tokens + seq.num_scheduled_tokens
+        )
+        if prefix_tokens != physical_prefix:
+            raise RuntimeError(
+                f"sequence {seq.seq_id} snapshot boundary mismatch: "
+                f"requested={prefix_tokens}, physical={physical_prefix}"
+            )
+
+        layers = tuple(
+            module.snapshot_state_slot(seq.state_slot)
+            for module in self.model.state_cache_modules()
+        )
+        return GDNStateSnapshot(
+            num_tokens=prefix_tokens,
+            layers=layers,
+        )
+
+    def restore_gdn_state(
+        self,
+        seq: Sequence,
+        snapshot: GDNStateSnapshot,
+    ) -> None:
+        if seq.state_slot < 0:
+            raise RuntimeError(
+                f"sequence {seq.seq_id} has no state slot to restore"
+            )
+        if snapshot.num_tokens != seq.num_state_tokens:
+            raise RuntimeError(
+                f"sequence {seq.seq_id} restore boundary mismatch: "
+                f"snapshot={snapshot.num_tokens}, "
+                f"logical={seq.num_state_tokens}"
+            )
+
+        modules = self.model.state_cache_modules()
+        if len(snapshot.layers) != len(modules):
+            raise RuntimeError(
+                "GDN snapshot layer count does not match model"
+            )
+        for module, layer_snapshot in zip(
+            modules,
+            snapshot.layers,
+        ):
+            module.restore_state_slot(
+                seq.state_slot,
+                layer_snapshot,
+            )
+
+    def _restore_pending_states(
+        self,
+        seqs: list[Sequence],
+    ) -> None:
+        for seq in seqs:
+            snapshot = seq.pending_state_snapshot
+            if snapshot is None:
+                continue
+            if not isinstance(snapshot, GDNStateSnapshot):
+                raise RuntimeError(
+                    "invalid pending GDN state snapshot"
+                )
+            self.restore_gdn_state(seq, snapshot)
+            seq.pending_state_snapshot = None
+
     def prepare_block_tables(
         self,
         seqs: list[Sequence],
@@ -450,6 +530,15 @@ class ModelRunner:
         is_prefill: bool,
     ) -> list[int | None]:
         try:
+            if not is_prefill and any(
+                seq.pending_state_snapshot is not None
+                for seq in seqs
+            ):
+                raise RuntimeError(
+                    "pending GDN prefix restore is valid only for prefill"
+                )
+            self._restore_pending_states(seqs)
+
             if is_prefill:
                 input_ids, positions = self.prepare_prefill(seqs)
             else:
