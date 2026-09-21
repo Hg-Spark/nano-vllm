@@ -28,9 +28,14 @@ class Config:
         self.model_config = getattr(self.hf_config, "text_config", self.hf_config)
         root_type = getattr(self.hf_config, "model_type", "")
         text_type = getattr(self.model_config, "model_type", "")
-        self.is_hybrid = root_type.startswith("qwen3_5") or text_type.startswith("qwen3_5")
+        if root_type.startswith("qwen3_5") and text_type != "qwen3_5_text":
+            raise NotImplementedError(
+                f"stage-1 Qwen3.5 support is dense text-only; got text model type {text_type!r}"
+            )
+        self.is_hybrid = text_type == "qwen3_5_text"
         if self.is_hybrid:
-            # Prefix reuse is unsafe until recurrent/conv states are cached together
-            # with the full-attention KV blocks.
+            # CUDA graph capture and KV-only prefix reuse both assume stateless
+            # decoder layers. GDN breaks that assumption in this first stage.
+            self.enforce_eager = True
             self.enable_prefix_cache = False
         self.max_model_len = min(self.max_model_len, self.model_config.max_position_embeddings)
