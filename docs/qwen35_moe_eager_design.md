@@ -15,8 +15,9 @@ eager execution
 The primary reference target is Qwen3.5-35B-A3B.
 
 Unsupported paths are rejected explicitly rather than kept as dormant generic
-branches: dense Qwen3/Qwen3.5, vision, MTP, quantization, TP/EP,
-cross-request prefix sharing and CUDA Graph.
+branches: dense Qwen3/Qwen3.5, vision, MTP, quantization, TP/EP and CUDA Graph.
+Cross-request reuse is intentionally narrow: only full-block joint KV + GDN
+prefix entries are supported.
 
 This scope is deliberate. The project is intended to expose Qwen3.5-MoE's
 runtime invariants before adding optimized kernels or distributed execution.
@@ -174,7 +175,9 @@ request returns to waiting
 re-prefill from token history
 ```
 
-No recurrent-state checkpoint is retained.
+Preemption itself does not create a new recurrent checkpoint. If a previously
+published joint prefix exists, re-admission may restore its BF16 GDN snapshot
+and shared KV blocks; otherwise the request replays from token history.
 
 ---
 
@@ -425,7 +428,14 @@ Tests cover:
 ### Real checkpoint
 
 `verify_qwen3_5_moe.py` compares deterministic greedy token ids against the
-Transformers reference.
+Transformers reference. With `--check-prefix-resume`, it also compares a fresh
+uncached execution against a second request restored from a real BF16 GDN
+prefix snapshot.
+
+If greedy parity fails, `diagnose_qwen3_5_moe.py` captures decoder-layer hidden
+states sequentially from Transformers and nano-vLLM and reports per-layer
+max/mean/RMS error so the first material divergence can be localized without
+keeping two model copies resident at once.
 
 ---
 
@@ -440,19 +450,20 @@ Transformers reference.
 6. GDN prefix snapshots are synchronous BF16 host copies; active recurrent state remains FP32.
 7. Vision and MTP weights are ignored.
 8. CUDA Graph is not enabled.
-9. Real GPU/checkpoint parity must be passed before calling support complete.
+9. Real GPU/checkpoint parity and BF16 prefix-resume parity must be passed before calling support complete.
 
 ---
 
 ## 13. Next engineering order
 
 ```text
-A. real checkpoint HF parity
+A. real checkpoint HF parity + BF16 prefix-resume parity
 B. layer-wise numerical probes if parity fails
-C. profile GDN vs MoE cost
-D. fused/chunked GDN prefill + decode
-E. grouped/fused MoE expert execution
-F. remove remaining Python synchronization from optimized data path
-G. CUDA Graph after kernels have stable state addressing
-H. TP/EP only if a concrete deployment target requires them
+C. record TTFT/TPOT/P50/P99 + prefill/decode throughput
+D. profile GDN vs MoE cost
+E. fused/chunked GDN prefill + decode
+F. grouped/fused MoE expert execution
+G. remove remaining Python synchronization from optimized data path
+H. CUDA Graph after kernels have stable state addressing
+I. TP/EP only if a concrete deployment target requires them
 ```
