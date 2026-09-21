@@ -55,7 +55,7 @@ class StateSlotManager:
     def allocate(self, seq: Sequence) -> int:
         if seq.state_slot >= 0:
             return self.validate(seq)
-        if seq.num_state_tokens != 0:
+        if seq.committed_tokens != 0:
             raise RuntimeError(
                 "cannot allocate a fresh state slot for a non-zero "
                 "committed prefix"
@@ -77,4 +77,3 @@ class StateSlotManager:
         self.slot_owners[slot_id] = None
         self.free_slot_ids.append(slot_id)
         seq.state_slot = -1
-        seq.num_state_tokens = 0
