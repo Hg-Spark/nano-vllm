@@ -146,6 +146,28 @@ class Qwen35MoeTest(unittest.TestCase):
         self.assertEqual(config.tensor_parallel_size, 1)
         self.assertTrue(config.enforce_eager)
 
+    def test_state_slots_are_clamped_to_sequence_capacity(self):
+        root = SimpleNamespace(
+            model_type="qwen3_5_moe",
+            text_config=self.config,
+            quantization_config=None,
+        )
+        with (
+            patch("nanovllm.config.os.path.isdir", return_value=True),
+            patch(
+                "nanovllm.config.AutoConfig.from_pretrained",
+                return_value=root,
+            ),
+        ):
+            config = Config(
+                "/tmp/qwen35-moe",
+                max_num_seqs=2,
+                max_num_state_slots=8,
+            )
+
+        self.assertEqual(config.max_num_seqs, 2)
+        self.assertEqual(config.max_num_state_slots, 2)
+
     def test_config_rejects_dense_qwen35(self):
         dense = SimpleNamespace(
             model_type="qwen3_5",

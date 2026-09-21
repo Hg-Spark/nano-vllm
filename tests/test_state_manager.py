@@ -11,10 +11,13 @@ class StateSlotManagerTest(unittest.TestCase):
         first = Sequence([1, 2])
         second = Sequence([3, 4])
 
+        self.assertTrue(manager.can_allocate(first))
         self.assertEqual(manager.allocate(first), 0)
         self.assertEqual(first.state_slot, 0)
+        self.assertFalse(manager.can_allocate(second))
 
         manager.deallocate(first)
+        self.assertTrue(manager.can_allocate(second))
         self.assertEqual(first.state_slot, -1)
 
         self.assertEqual(manager.allocate(second), 0)

@@ -23,6 +23,16 @@ class Config:
     def __post_init__(self):
         if not os.path.isdir(self.model):
             raise ValueError(f"model path does not exist: {self.model}")
+        if self.max_num_batched_tokens <= 0:
+            raise ValueError("max_num_batched_tokens must be positive")
+        if self.max_num_seqs <= 0:
+            raise ValueError("max_num_seqs must be positive")
+        if self.max_model_len <= 0:
+            raise ValueError("max_model_len must be positive")
+        if not 0.0 < self.gpu_memory_utilization <= 1.0:
+            raise ValueError(
+                "gpu_memory_utilization must be in (0, 1]"
+            )
         if self.kvcache_block_size % 256 != 0:
             raise ValueError("kvcache_block_size must be a multiple of 256")
         if self.tensor_parallel_size != 1:
@@ -88,7 +98,10 @@ class Config:
             self.max_num_state_slots = min(self.max_num_seqs, 4)
         if self.max_num_state_slots <= 0:
             raise ValueError("max_num_state_slots must be positive")
-        self.max_num_seqs = min(
+
+        active_limit = min(
             self.max_num_seqs,
             self.max_num_state_slots,
         )
+        self.max_num_seqs = active_limit
+        self.max_num_state_slots = active_limit
