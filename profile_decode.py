@@ -9,7 +9,12 @@ from nanovllm.sampling_params import SamplingParams
 
 
 def _device_time_us(event) -> float:
-    for name in ("device_time_total", "cuda_time_total"):
+    for name in (
+        "device_time_total",
+        "cuda_time_total",
+        "self_device_time_total",
+        "self_cuda_time_total",
+    ):
         value = getattr(event, name, None)
         if value is not None:
             return float(value)
