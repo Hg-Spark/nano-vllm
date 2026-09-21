@@ -39,5 +39,47 @@ class StateSlotManagerTest(unittest.TestCase):
             manager.allocate(Sequence([2]))
 
 
+    def test_slot_alias_is_rejected(self):
+        manager = StateSlotManager(1)
+        first = Sequence([1])
+        second = Sequence([2])
+        manager.allocate(first)
+        second.state_slot = first.state_slot
+
+        self.assertFalse(manager.can_allocate(second))
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "is owned by sequence",
+        ):
+            manager.allocate(second)
+
+    def test_owner_changes_only_after_release(self):
+        manager = StateSlotManager(1)
+        first = Sequence([1])
+        second = Sequence([2])
+
+        slot = manager.allocate(first)
+        self.assertEqual(manager.owner_of(slot), first.seq_id)
+
+        first.num_state_tokens = 3
+        manager.deallocate(first)
+        self.assertEqual(first.num_state_tokens, 0)
+        self.assertIsNone(manager.owner_of(slot))
+
+        reused = manager.allocate(second)
+        self.assertEqual(reused, slot)
+        self.assertEqual(manager.owner_of(slot), second.seq_id)
+
+    def test_fresh_slot_rejects_nonzero_state_progress(self):
+        manager = StateSlotManager(1)
+        seq = Sequence([1])
+        seq.num_state_tokens = 1
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "non-zero committed state prefix",
+        ):
+            manager.allocate(seq)
+
 if __name__ == "__main__":
     unittest.main()
