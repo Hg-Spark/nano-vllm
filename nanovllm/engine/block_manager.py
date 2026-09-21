@@ -55,7 +55,10 @@ class BlockManager:
         self.used_block_ids.remove(block_id)
         self.free_block_ids.append(block_id)
 
-    def can_allocate(self, seq: Sequence) -> int:
+    def can_allocate(self, seq: Sequence, use_prefix_cache: bool = True) -> int:
+        if not use_prefix_cache:
+            return 0 if len(self.free_block_ids) >= seq.num_blocks else -1
+
         h = -1
         num_cached_blocks = 0
         num_new_blocks = seq.num_blocks
@@ -110,7 +113,8 @@ class BlockManager:
     def hash_blocks(self, seq: Sequence):
         start = seq.num_cached_tokens // self.block_size
         end = (seq.num_cached_tokens + seq.num_scheduled_tokens) // self.block_size
-        if start == end: return
+        if start == end:
+            return
         h = self.blocks[seq.block_table[start - 1]].hash if start > 0 else -1
         for i in range(start, end):
             block = self.blocks[seq.block_table[i]]
