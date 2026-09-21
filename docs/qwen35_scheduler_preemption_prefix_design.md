@@ -242,6 +242,13 @@ forward fails before commit
 A previously published prefix-cache entry remains valid because it has its own
 KV references and an immutable host snapshot.
 
+One scheduler decision may reserve both decode and prefill work, while the eager
+engine executes the decode batch first. If decode fails, the prefill batch has
+not run yet but may already own KV blocks/state slots or have moved to
+`RUNNING` after scheduling its final prompt chunk. The engine therefore rolls
+back those unexecuted prefill reservations as part of the same failed step.
+This prevents scheduler metadata from claiming history that was never written.
+
 ---
 
 ## 4. Stage 9 — Joint Prefix Cache
@@ -595,11 +602,17 @@ The fix is round-robin rotation of selected decode requests.
 
 - decode uses budget before prefill;
 - decode round-robin fairness under a smaller token budget;
-- hybrid preemption releases KV and GDN together;
+- hybrid preemption releases KV and GDN together and detaches queue ownership;
 - failed-step recovery resets both histories;
+- malformed or boundary-mismatched GDN snapshots are rejected before commit;
 - joint prefix publication keeps an extra KV block reference;
 - request finish drops only its own KV reference;
 - a later request restores matching KV/GDN prefix metadata together.
+
+`tests/test_llm_engine.py`
+
+- decode failure also rolls back the co-scheduled, not-yet-executed prefill
+  reservation.
 
 `tests/test_prefix_cache.py`
 
