@@ -151,6 +151,47 @@ class GatedDeltaNet(nn.Module):
             dtype=torch.float32,
         )
 
+    def _validate_state_slot(self, slot_id: int) -> None:
+        if not self.conv_state.numel() or not self.recurrent_state.numel():
+            raise RuntimeError("GDN state cache is not allocated")
+        if not 0 <= slot_id < self.conv_state.size(0):
+            raise RuntimeError(f"invalid GDN state slot {slot_id}")
+
+    def snapshot_state_slot(
+        self,
+        slot_id: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Copy one committed request state to host memory.
+
+        Conv state keeps the model dtype while the recurrent matrix keeps its
+        FP32 correctness dtype. Snapshot compression is intentionally deferred.
+        """
+        self._validate_state_slot(slot_id)
+        return (
+            self.conv_state[slot_id].detach().cpu().clone(),
+            self.recurrent_state[slot_id].detach().cpu().clone(),
+        )
+
+    def restore_state_slot(
+        self,
+        slot_id: int,
+        snapshot: tuple[torch.Tensor, torch.Tensor],
+    ) -> None:
+        self._validate_state_slot(slot_id)
+        conv_state, recurrent_state = snapshot
+        expected_conv = self.conv_state[slot_id]
+        expected_recurrent = self.recurrent_state[slot_id]
+        if conv_state.shape != expected_conv.shape:
+            raise RuntimeError(
+                "GDN conv snapshot shape does not match active state slot"
+            )
+        if recurrent_state.shape != expected_recurrent.shape:
+            raise RuntimeError(
+                "GDN recurrent snapshot shape does not match active state slot"
+            )
+        expected_conv.copy_(conv_state)
+        expected_recurrent.copy_(recurrent_state)
+
     def _causal_conv(
         self,
         mixed_qkv: torch.Tensor,
