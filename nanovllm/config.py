@@ -1,3 +1,4 @@
+import math
 import os
 from dataclasses import dataclass
 
@@ -21,6 +22,9 @@ class Config:
     max_num_state_slots: int | None = None
     enable_prefix_cache: bool = True
     max_prefix_cache_entries: int = 16
+    kv_cache_dtype: str = "auto"
+    kv_cache_k_scale: float = 1.0
+    kv_cache_v_scale: float = 1.0
 
     def __post_init__(self):
         if not os.path.isdir(self.model):
@@ -35,6 +39,16 @@ class Config:
             raise ValueError(
                 "max_prefix_cache_entries must be non-negative"
             )
+        if self.kv_cache_dtype not in ("auto", "fp8_e4m3"):
+            raise ValueError(
+                "kv_cache_dtype must be 'auto' or 'fp8_e4m3'"
+            )
+        for name, scale in (
+            ("kv_cache_k_scale", self.kv_cache_k_scale),
+            ("kv_cache_v_scale", self.kv_cache_v_scale),
+        ):
+            if not math.isfinite(scale) or scale <= 0.0:
+                raise ValueError(f"{name} must be finite and positive")
         if not 0.0 < self.gpu_memory_utilization <= 1.0:
             raise ValueError(
                 "gpu_memory_utilization must be in (0, 1]"
