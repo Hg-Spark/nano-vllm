@@ -8,4 +8,7 @@ class SamplingParams:
     ignore_eos: bool = False
 
     def __post_init__(self):
-        assert self.temperature >= 0.0, "temperature must be non-negative"
+        if self.temperature < 0.0:
+            raise ValueError("temperature must be non-negative")
+        if self.max_tokens <= 0:
+            raise ValueError("max_tokens must be positive")

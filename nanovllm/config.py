@@ -7,7 +7,7 @@ from transformers import AutoConfig, PretrainedConfig
 @dataclass(slots=True)
 class Config:
     model: str
-    max_num_batched_tokens: int = 16384
+    max_num_batched_tokens: int = 512
     max_num_seqs: int = 4
     max_model_len: int = 4096
     gpu_memory_utilization: float = 0.9

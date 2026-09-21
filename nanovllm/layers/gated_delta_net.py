@@ -1,5 +1,4 @@
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 
@@ -38,21 +37,21 @@ class GatedDeltaNet(nn.Module):
     directly with request-level state slots supplied by the runtime context.
     This removes any need for engine-side Gather/Scatter state copies.
 
-    Phase-1 intentionally supports TP=1 only. The state layout and public
-    methods are designed so the Python recurrent loop can later be replaced by
-    a state-aware CUDA kernel without changing scheduler/runtime contracts.
+    The runtime is intentionally Qwen3.5-MoE / TP=1 / eager-only. The state
+    layout is kept dense so the Python recurrence can later be replaced by a
+    fused kernel without changing scheduler ownership.
     """
 
     def __init__(self, config, layer_idx: int):
         super().__init__()
-        if dist.get_world_size() != 1:
-            raise NotImplementedError(
-                "Qwen3.5 GatedDeltaNet reference path currently requires TP=1"
-            )
-
         self.hidden_size = config.hidden_size
         self.num_v_heads = config.linear_num_value_heads
         self.num_k_heads = config.linear_num_key_heads
+        if self.num_v_heads % self.num_k_heads != 0:
+            raise ValueError(
+                "linear_num_value_heads must be divisible by "
+                "linear_num_key_heads"
+            )
         self.head_k_dim = config.linear_key_head_dim
         self.head_v_dim = config.linear_value_head_dim
         self.key_dim = self.head_k_dim * self.num_k_heads
@@ -311,14 +310,19 @@ class GatedDeltaNet(nn.Module):
         if context.state_slots is None:
             raise RuntimeError("GDN requires runtime state-slot metadata")
 
-        state_slots = context.state_slots.tolist()
+        state_slots = context.state_slots
         outputs = []
 
         if context.is_prefill:
-            if context.cu_seqlens_q is None or context.cu_seqlens_k is None:
-                raise RuntimeError("GDN prefill requires packed sequence metadata")
-            q_offsets = context.cu_seqlens_q.tolist()
-            k_offsets = context.cu_seqlens_k.tolist()
+            if (
+                context.prefill_q_offsets is None
+                or context.prefill_k_offsets is None
+            ):
+                raise RuntimeError(
+                    "GDN prefill requires CPU packed sequence offsets"
+                )
+            q_offsets = context.prefill_q_offsets
+            k_offsets = context.prefill_k_offsets
 
             for seq_idx, slot_id in enumerate(state_slots):
                 q_start = q_offsets[seq_idx]
