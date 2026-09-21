@@ -109,19 +109,33 @@ a later fused/chunked kernel.
 
 ### 4.1 Request-level state slots
 
-`Sequence` carries only:
+`Sequence` carries two pieces of recurrent-state control metadata:
 
 ```text
 state_slot: int
+num_state_tokens: int
 ```
 
-`StateSlotManager` owns allocation/release. GPU tensors stay inside GDN layers.
+`state_slot` selects the physical Conv/Recurrent state row.
+`num_state_tokens` records how many tokens are represented by the committed
+state in that slot.
 
-One request uses the same slot index in every GDN layer. This gives:
+`StateSlotManager` owns allocation/release and an explicit
+`slot_owners[slot] -> seq_id` mapping. GPU tensors stay inside GDN layers.
+
+One active request uses the same slot index in every GDN layer. The scheduler
+requires:
+
+```text
+num_cached_tokens == num_state_tokens
+```
+
+at scheduler boundaries. This gives:
 
 - predictable state capacity;
-- contiguous GPU state tensors;
-- simple preemption/reuse semantics;
+- explicit request-to-slot ownership;
+- detection of KV/recurrent-prefix divergence;
+- safe physical-slot reuse after finish/preemption;
 - a kernel-friendly future layout.
 
 ### 4.2 Fresh prefill
@@ -130,7 +144,7 @@ A newly admitted request starts with zero GDN state. Physical slots may contain
 stale values from earlier requests, so a fresh prefix (`prefix_len == 0`) clears
 the selected slot before use.
 
-### 4.3 Chunked prefill
+### 4.3 Chunked and variable-length prefill
 
 Later chunks keep the same state slot:
 
@@ -138,6 +152,18 @@ Later chunks keep the same state slot:
 chunk 1 -> state_1
 chunk 2(state_1) -> state_2
 ...
+```
+
+The runner builds a CPU `PrefillBatchLayout` for heterogeneous requests. The
+same request index is used across Q offsets, total-K offsets, block-table rows,
+state slots and committed state-prefix lengths.
+
+For each packed request segment GDN validates:
+
+```text
+(k_len - q_len)
+    == num_state_tokens
+    == num_cached_tokens
 ```
 
 The runner keeps packed offsets as CPU tuples in `Context`. GDN therefore does
@@ -320,8 +346,11 @@ enough KV blocks
 one free recurrent state slot
 ```
 
-A partially prefetched request stays at the waiting front and keeps its state
-slot.
+`StateSlotManager` validates the request owner of every retained slot.
+A partially prefetched request stays at the waiting front and keeps its KV
+allocation, state slot and committed state-prefix length. When its final chunk
+leaves token budget, a fresh request may join the same variable-length prefill
+batch.
 
 ### 9.1 Sampling boundary
 
