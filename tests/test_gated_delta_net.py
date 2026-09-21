@@ -45,6 +45,10 @@ class GatedDeltaNetStateTest(unittest.TestCase):
         self.addCleanup(world_size.stop)
         world_size.start()
         self.layer = GatedDeltaNet(make_config(), layer_idx=0)
+        with torch.no_grad():
+            # Unit tests instantiate the layer without loading a checkpoint.
+            # Keep the recurrence parameters finite and deterministic.
+            self.layer.A_log.zero_()
 
     def test_chunked_prefill_matches_single_chunk(self):
         hidden_states = torch.randn(11, self.layer.hidden_size)
