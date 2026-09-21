@@ -5,6 +5,7 @@ from unittest.mock import patch
 import torch
 
 from nanovllm.layers.gated_delta_net import GatedDeltaNet
+from nanovllm.utils.context import reset_context, set_context
 
 
 def make_config():
@@ -128,6 +129,39 @@ class GatedDeltaNetStateTest(unittest.TestCase):
         torch.testing.assert_close(
             decode_recurrent,
             full_recurrent,
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+
+    def test_fresh_prefill_clears_reused_physical_slot(self):
+        hidden_states = torch.randn(5, self.layer.hidden_size)
+
+        expected_conv, expected_recurrent = make_states(self.layer)
+        expected = self.layer._forward_sequence(
+            hidden_states,
+            expected_conv,
+            expected_recurrent,
+        )
+
+        self.layer.allocate_state_cache(1)
+        self.layer.conv_state[0].fill_(7)
+        self.layer.recurrent_state[0].fill_(11)
+
+        set_context(
+            True,
+            cu_seqlens_q=torch.tensor([0, hidden_states.size(0)], dtype=torch.int32),
+            cu_seqlens_k=torch.tensor([0, hidden_states.size(0)], dtype=torch.int32),
+            state_slots=torch.tensor([0], dtype=torch.int32),
+        )
+        self.addCleanup(reset_context)
+        actual = self.layer(hidden_states)
+
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(self.layer.conv_state[0], expected_conv)
+        torch.testing.assert_close(
+            self.layer.recurrent_state[0],
+            expected_recurrent,
             rtol=1e-5,
             atol=1e-5,
         )
