@@ -19,6 +19,8 @@ class Config:
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
     max_num_state_slots: int | None = None
+    enable_prefix_cache: bool = True
+    max_prefix_cache_entries: int = 16
 
     def __post_init__(self):
         if not os.path.isdir(self.model):
@@ -29,6 +31,10 @@ class Config:
             raise ValueError("max_num_seqs must be positive")
         if self.max_model_len <= 0:
             raise ValueError("max_model_len must be positive")
+        if self.max_prefix_cache_entries < 0:
+            raise ValueError(
+                "max_prefix_cache_entries must be non-negative"
+            )
         if not 0.0 < self.gpu_memory_utilization <= 1.0:
             raise ValueError(
                 "gpu_memory_utilization must be in (0, 1]"
