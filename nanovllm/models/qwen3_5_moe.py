@@ -197,7 +197,7 @@ class Qwen3_5MoeExperts(nn.Module):
         # kernel. Only experts selected by at least one token are executed.
         active_experts = torch.unique(selected_experts).tolist()
         for expert_idx in active_experts:
-            topk_pos, token_idx = torch.where(
+            token_idx, topk_pos = torch.where(
                 selected_experts == expert_idx
             )
             current = hidden_states[token_idx]
