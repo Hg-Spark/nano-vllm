@@ -4,7 +4,7 @@ from nanovllm.engine.sequence import Sequence
 
 
 class BlockManager:
-    """Paged-KV allocator with request-local incremental growth."""
+    """Paged-KV allocator with request-local growth and shared-prefix refs."""
 
     def __init__(self, num_blocks: int, block_size: int):
         if num_blocks <= 0:
@@ -12,11 +12,17 @@ class BlockManager:
         self.block_size = block_size
         self.free_block_ids: deque[int] = deque(range(num_blocks))
         self.used_block_ids: set[int] = set()
+        self.block_refcounts = [0] * num_blocks
 
     def _allocate_block(self) -> int:
         if not self.free_block_ids:
             raise RuntimeError("no free KV cache blocks")
         block_id = self.free_block_ids.popleft()
+        if self.block_refcounts[block_id] != 0:
+            raise RuntimeError(
+                f"free KV block {block_id} has non-zero refcount"
+            )
+        self.block_refcounts[block_id] = 1
         self.used_block_ids.add(block_id)
         return block_id
 
@@ -24,6 +30,59 @@ class BlockManager:
         if num_tokens < 0:
             raise ValueError("num_tokens must be non-negative")
         return (num_tokens + self.block_size - 1) // self.block_size
+
+    def retain_blocks(self, block_ids) -> None:
+        ids = tuple(block_ids)
+        for block_id in ids:
+            if not 0 <= block_id < len(self.block_refcounts):
+                raise RuntimeError(f"invalid KV block {block_id}")
+            if self.block_refcounts[block_id] <= 0:
+                raise RuntimeError(
+                    f"KV block {block_id} is not allocated"
+                )
+        for block_id in ids:
+            self.block_refcounts[block_id] += 1
+
+    def release_blocks(self, block_ids) -> None:
+        ids = tuple(block_ids)
+        for block_id in ids:
+            if not 0 <= block_id < len(self.block_refcounts):
+                raise RuntimeError(f"invalid KV block {block_id}")
+            if self.block_refcounts[block_id] <= 0:
+                raise RuntimeError(
+                    f"KV block {block_id} is not allocated"
+                )
+
+        for block_id in ids:
+            self.block_refcounts[block_id] -= 1
+            if self.block_refcounts[block_id] == 0:
+                self.used_block_ids.remove(block_id)
+                self.free_block_ids.append(block_id)
+
+    def attach_shared_prefix(
+        self,
+        seq: Sequence,
+        block_ids: tuple[int, ...],
+        num_tokens: int,
+    ) -> None:
+        if seq.block_table or seq.num_cached_tokens != 0:
+            raise RuntimeError(
+                "shared prefix can only attach to a fresh request"
+            )
+        if num_tokens <= 0 or num_tokens % self.block_size != 0:
+            raise RuntimeError(
+                "shared KV prefix must end on a full block boundary"
+            )
+        required = self._required_blocks(num_tokens)
+        if len(block_ids) != required:
+            raise RuntimeError(
+                "shared prefix block count does not match token length"
+            )
+        if len(set(block_ids)) != len(block_ids):
+            raise RuntimeError("shared prefix contains duplicate KV blocks")
+
+        self.retain_blocks(block_ids)
+        seq.block_table.extend(block_ids)
 
     def max_schedulable_tokens(
         self,
@@ -68,13 +127,7 @@ class BlockManager:
         )
 
     def deallocate(self, seq: Sequence) -> None:
-        for block_id in seq.block_table:
-            if block_id not in self.used_block_ids:
-                raise RuntimeError(
-                    f"KV block {block_id} is not allocated"
-                )
-            self.used_block_ids.remove(block_id)
-            self.free_block_ids.append(block_id)
+        self.release_blocks(seq.block_table)
         seq.num_cached_tokens = 0
         seq.block_table.clear()
 
