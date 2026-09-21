@@ -116,7 +116,7 @@ class LLMEngine:
                     ):
                         continue
                     target_tokens = (
-                        seq.num_cached_tokens
+                        seq.committed_tokens
                         + seq.num_scheduled_tokens
                     )
                     prefix_snapshots[seq.seq_id] = (
