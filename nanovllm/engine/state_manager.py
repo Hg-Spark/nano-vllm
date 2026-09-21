@@ -7,15 +7,14 @@ class StateSlotManager:
     """Manage stable logical slots for per-request recurrent state.
 
     Every GDN layer indexes its physical Conv/Recurrent state pool with the
-    same request-level slot id. The manager owns the request <-> slot mapping;
-    GPU tensors remain inside GDN layers.
+    same request-level slot id. slot_owners is the single occupancy source of
+    truth; GPU tensors remain inside GDN layers.
     """
 
     def __init__(self, num_slots: int):
         if num_slots <= 0:
             raise ValueError("num_slots must be positive")
         self.free_slot_ids: deque[int] = deque(range(num_slots))
-        self.used_slot_ids: set[int] = set()
         self.slot_owners: list[int | None] = [None] * num_slots
 
     def owner_of(self, slot_id: int) -> int | None:
@@ -27,7 +26,6 @@ class StateSlotManager:
         slot_id = seq.state_slot
         return (
             0 <= slot_id < len(self.slot_owners)
-            and slot_id in self.used_slot_ids
             and self.slot_owners[slot_id] == seq.seq_id
         )
 
@@ -40,7 +38,7 @@ class StateSlotManager:
         if not 0 <= slot_id < len(self.slot_owners):
             raise RuntimeError(f"invalid state slot {slot_id}")
         owner = self.slot_owners[slot_id]
-        if slot_id not in self.used_slot_ids or owner is None:
+        if owner is None:
             raise RuntimeError(f"state slot {slot_id} is stale")
         if owner != seq.seq_id:
             raise RuntimeError(
@@ -65,7 +63,8 @@ class StateSlotManager:
         if not self.free_slot_ids:
             raise RuntimeError("no free hybrid state slots")
         slot_id = self.free_slot_ids.popleft()
-        self.used_slot_ids.add(slot_id)
+        if self.slot_owners[slot_id] is not None:
+            raise RuntimeError(f"state slot {slot_id} is unexpectedly occupied")
         self.slot_owners[slot_id] = seq.seq_id
         seq.state_slot = slot_id
         return slot_id
@@ -79,7 +78,6 @@ class StateSlotManager:
                 )
             return
         self.validate(seq)
-        self.used_slot_ids.remove(slot_id)
         self.slot_owners[slot_id] = None
         self.free_slot_ids.append(slot_id)
         seq.state_slot = -1
