@@ -153,6 +153,7 @@ class GatedDeltaNetStateTest(unittest.TestCase):
         set_context(
             True,
             state_slots=(0,),
+            state_prefix_lens=(0,),
             prefill_q_offsets=(0, 5),
             prefill_k_offsets=(0, 5),
         )
@@ -184,6 +185,7 @@ class GatedDeltaNetStateTest(unittest.TestCase):
         set_context(
             True,
             state_slots=(0,),
+            state_prefix_lens=(0,),
             prefill_q_offsets=(0, 3),
             prefill_k_offsets=(0, 3),
         )
@@ -192,6 +194,7 @@ class GatedDeltaNetStateTest(unittest.TestCase):
         set_context(
             True,
             state_slots=(0,),
+            state_prefix_lens=(3,),
             prefill_q_offsets=(0, 4),
             prefill_k_offsets=(0, 7),
         )
@@ -204,6 +207,91 @@ class GatedDeltaNetStateTest(unittest.TestCase):
             atol=1e-5,
         )
 
+
+    def test_variable_length_batch_keeps_state_aligned(self):
+        first_seq = torch.randn(
+            6,
+            self.layer.hidden_size,
+        )
+        second_seq = torch.randn(
+            4,
+            self.layer.hidden_size,
+        )
+
+        first_conv, first_recurrent = make_states(self.layer)
+        expected_first = self.layer._forward_sequence(
+            first_seq,
+            first_conv,
+            first_recurrent,
+        )
+        second_conv, second_recurrent = make_states(self.layer)
+        expected_second = self.layer._forward_sequence(
+            second_seq,
+            second_conv,
+            second_recurrent,
+        )
+
+        self.layer.allocate_state_cache(2)
+        set_context(
+            True,
+            state_slots=(0,),
+            state_prefix_lens=(0,),
+            prefill_q_offsets=(0, 2),
+            prefill_k_offsets=(0, 2),
+        )
+        first_chunk = self.layer(first_seq[:2])
+
+        packed = torch.cat([
+            first_seq[2:],
+            second_seq[:3],
+        ])
+        set_context(
+            True,
+            state_slots=(0, 1),
+            state_prefix_lens=(2, 0),
+            prefill_q_offsets=(0, 4, 7),
+            prefill_k_offsets=(0, 6, 9),
+        )
+        mixed_chunk = self.layer(packed)
+
+        torch.testing.assert_close(
+            first_chunk,
+            expected_first[:2],
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        torch.testing.assert_close(
+            mixed_chunk[:4],
+            expected_first[2:],
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        torch.testing.assert_close(
+            mixed_chunk[4:],
+            expected_second[:3],
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+    def test_state_prefix_mismatch_is_rejected(self):
+        self.layer.allocate_state_cache(1)
+        hidden_states = torch.randn(
+            2,
+            self.layer.hidden_size,
+        )
+        set_context(
+            True,
+            state_slots=(0,),
+            state_prefix_lens=(2,),
+            prefill_q_offsets=(0, 2),
+            prefill_k_offsets=(0, 3),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "GDN state prefix mismatch",
+        ):
+            self.layer(hidden_states)
 
 if __name__ == "__main__":
     unittest.main()
