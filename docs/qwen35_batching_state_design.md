@@ -293,23 +293,17 @@ ownership and cross-step recurrent continuity all meet in one batch.
 
 ### 5.2 Preemption policy
 
-The current policy remains recompute-based:
+Stages 7-9 extend this baseline with explicit hybrid preemption and joint prefix
+restore. A preempted request still releases its request-owned KV blocks and GDN
+slot together, but on re-admission it may attach a previously published
+full-block KV prefix and restore the matching GDN snapshot before replaying the
+remaining history.
 
-```text
-preempt request
-  -> release KV blocks
-  -> release recurrent-state slot
-  -> reset committed KV/state lengths
-  -> return request to waiting
-  -> prefill again from token history
-```
+If no valid joint prefix exists, replay falls back to token history from zero.
+A model-step exception before logical commit still invalidates both request
+histories together.
 
-No recurrent-state snapshot is retained. A model-step exception before logical
-commit uses the same recompute principle: the scheduler releases both KV and
-GDN state so possibly mutated physical history is never reused.
-
-That is a deliberate scope choice. Prefix/state checkpointing changes the cache
-ownership model and should be introduced as a separate stage.
+See `qwen35_scheduler_preemption_prefix_design.md` for the current policy.
 
 ---
 
@@ -361,11 +355,12 @@ solving a current requirement.
 Full Attention and GDN execute inside the same decoder loop. The runtime
 difference is metadata and persistent state ownership, which fits in one runner.
 
-### Do not add prefix-state checkpoints yet
+### Keep prefix-state checkpoints narrow
 
-Checkpointing enables cross-request prefix reuse for recurrent models, but it
-also requires checkpoint lifetime, copy/restore semantics and prefix matching.
-The current stage only guarantees continuity for the same active request.
+The next stages add one bounded joint prefix cache because KV-only reuse is
+incorrect for GDN. The cache keeps exact token prefixes, full-block KV
+references and matching host GDN snapshots. It intentionally does not add a
+generic cache-group hierarchy or radix tree.
 
 ---
 
@@ -490,5 +485,6 @@ request with prefix length zero clears stale physical state before use.
 
 **What would the next optimization stage be?**
 
-Replace the eager token-scan GDN with a chunked/fused kernel while preserving
-the same `PrefillBatchLayout`, slot ownership and state-prefix invariants.
+After the joint prefix cache, evaluate BF16 GDN snapshots as a separate
+numerical/memory optimization, then replace the eager token-scan GDN with a
+chunked/fused kernel while preserving the same ownership and prefix invariants.
