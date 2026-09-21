@@ -487,6 +487,45 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(seq.num_scheduled_tokens, 4)
         self.assertEqual(len(scheduler.prefix_cache), 0)
 
+    def test_prefill_reservation_rolls_back_kv_and_state_together(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=4,
+            max_num_seqs=2,
+            num_blocks=4,
+            block_size=4,
+        )
+        seq = Sequence([1, 2, 3, 4])
+        scheduler.add(seq)
+
+        original_ensure_capacity = (
+            scheduler.block_manager.ensure_capacity
+        )
+
+        def fail_after_kv_growth(target_seq, target_tokens):
+            original_ensure_capacity(target_seq, target_tokens)
+            raise RuntimeError("injected reservation failure")
+
+        scheduler.block_manager.ensure_capacity = fail_after_kv_growth
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "injected reservation failure",
+        ):
+            scheduler.schedule()
+
+        self.assertEqual(list(scheduler.waiting), [seq])
+        self.assertEqual(seq.state_slot, -1)
+        self.assertFalse(seq.block_table)
+        self.assertEqual(seq.committed_tokens, 0)
+        self.assertEqual(
+            sum(scheduler.block_manager.block_refcounts),
+            0,
+        )
+        self.assertEqual(
+            len(scheduler.state_manager.free_slot_ids),
+            2,
+        )
+
     def test_scheduler_rejects_committed_history_without_resources(self):
         scheduler = make_scheduler()
         seq = Sequence([1, 2])

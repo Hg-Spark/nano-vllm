@@ -213,6 +213,36 @@ class Scheduler:
                 old_entry.block_ids
             )
 
+    def _reserve_prefill_resources(
+        self,
+        seq: Sequence,
+        target_tokens: int,
+    ) -> None:
+        """Reserve KV growth and a GDN slot as one scheduler transaction.
+
+        Existing committed KV blocks/state ownership are never discarded by a
+        failed reservation. Only resources acquired by this call are rolled
+        back, so a chunked-prefill request can retry from its last committed
+        hybrid boundary.
+        """
+        old_num_blocks = len(seq.block_table)
+        allocated_state = seq.state_slot < 0
+        try:
+            if allocated_state:
+                self.state_manager.allocate(seq)
+            self.block_manager.ensure_capacity(
+                seq,
+                target_tokens,
+            )
+        except Exception:
+            self.block_manager.truncate_blocks(
+                seq,
+                old_num_blocks,
+            )
+            if allocated_state and seq.state_slot >= 0:
+                self.state_manager.deallocate(seq)
+            raise
+
     def schedule(self) -> SchedulerOutput:
         output = SchedulerOutput()
         num_batched_tokens = 0
@@ -316,9 +346,7 @@ class Scheduler:
             target_tokens = (
                 seq.committed_tokens + scheduled_tokens
             )
-            if seq.state_slot < 0:
-                self.state_manager.allocate(seq)
-            self.block_manager.ensure_capacity(
+            self._reserve_prefill_resources(
                 seq,
                 target_tokens,
             )

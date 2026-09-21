@@ -114,6 +114,20 @@ class BlockManager:
             for _ in range(missing)
         )
 
+    def truncate_blocks(
+        self,
+        seq: Sequence,
+        keep_num_blocks: int,
+    ) -> None:
+        """Release only a speculative KV tail and keep committed prefix refs."""
+        if not 0 <= keep_num_blocks <= len(seq.block_table):
+            raise ValueError("invalid KV block rollback boundary")
+        released = tuple(seq.block_table[keep_num_blocks:])
+        if not released:
+            return
+        self.release_blocks(released)
+        del seq.block_table[keep_num_blocks:]
+
     def deallocate(self, seq: Sequence) -> None:
         self.release_blocks(seq.block_table)
         seq.block_table.clear()
