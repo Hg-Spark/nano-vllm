@@ -16,7 +16,6 @@ class Context:
     state_slots: tuple[int, ...] | None = None
     state_prefix_lens: tuple[int, ...] | None = None
     prefill_q_offsets: tuple[int, ...] | None = None
-    prefill_k_offsets: tuple[int, ...] | None = None
 
 
 _CONTEXT = Context()
@@ -38,7 +37,6 @@ def set_context(
     state_slots=None,
     state_prefix_lens=None,
     prefill_q_offsets=None,
-    prefill_k_offsets=None,
 ) -> None:
     global _CONTEXT
     _CONTEXT = Context(
@@ -53,7 +51,6 @@ def set_context(
         state_slots=state_slots,
         state_prefix_lens=state_prefix_lens,
         prefill_q_offsets=prefill_q_offsets,
-        prefill_k_offsets=prefill_k_offsets,
     )
 
 
