@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from torch.profiler import record_function
 import triton
 import triton.language as tl
 
@@ -223,15 +224,16 @@ class Attention(nn.Module):
         )
 
         if k_cache.numel() and v_cache.numel():
-            store_kvcache(
-                k,
-                v,
-                k_cache,
-                v_cache,
-                context.slot_mapping,
-                self.k_scale,
-                self.v_scale,
-            )
+            with record_function("nanovllm::kv_cache_store"):
+                store_kvcache(
+                    k,
+                    v,
+                    k_cache,
+                    v_cache,
+                    context.slot_mapping,
+                    self.k_scale,
+                    self.v_scale,
+                )
 
         if context.is_prefill:
             if context.block_tables is not None:
@@ -259,23 +261,26 @@ class Attention(nn.Module):
                 block_table=context.block_tables,
             )
 
-        if use_fp8_cache:
-            return fp8_paged_attention_reference(
-                q,
+        with record_function(
+            "nanovllm::full_attention_decode"
+        ):
+            if use_fp8_cache:
+                return fp8_paged_attention_reference(
+                    q,
+                    k_cache,
+                    v_cache,
+                    context,
+                    self.scale,
+                    self.k_scale,
+                    self.v_scale,
+                )
+
+            return flash_attn_with_kvcache(
+                q.unsqueeze(1),
                 k_cache,
                 v_cache,
-                context,
-                self.scale,
-                self.k_scale,
-                self.v_scale,
-            )
-
-        return flash_attn_with_kvcache(
-            q.unsqueeze(1),
-            k_cache,
-            v_cache,
-            cache_seqlens=context.context_lens,
-            block_table=context.block_tables,
-            softmax_scale=self.scale,
-            causal=True,
-        ).squeeze(1)
+                cache_seqlens=context.context_lens,
+                block_table=context.block_tables,
+                softmax_scale=self.scale,
+                causal=True,
+            ).squeeze(1)
