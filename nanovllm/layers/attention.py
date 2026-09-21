@@ -39,12 +39,12 @@ def store_kvcache_kernel(
     value = tl.load(value_ptr + idx * value_stride + offsets)
     if IS_FP8:
         key = tl.maximum(
-            tl.minimum(key / k_scale, FP8_E4M3_MAX),
-            -FP8_E4M3_MAX,
+            tl.minimum(key / k_scale, 448.0),
+            -448.0,
         )
         value = tl.maximum(
-            tl.minimum(value / v_scale, FP8_E4M3_MAX),
-            -FP8_E4M3_MAX,
+            tl.minimum(value / v_scale, 448.0),
+            -448.0,
         )
 
     cache_offsets = slot * D + offsets
