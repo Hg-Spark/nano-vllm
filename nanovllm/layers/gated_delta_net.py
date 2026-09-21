@@ -309,8 +309,17 @@ class GatedDeltaNet(nn.Module):
         context = get_context()
         if context.state_slots is None:
             raise RuntimeError("GDN requires runtime state-slot metadata")
+        if context.state_prefix_lens is None:
+            raise RuntimeError(
+                "GDN requires committed state-prefix metadata"
+            )
 
         state_slots = context.state_slots
+        state_prefix_lens = context.state_prefix_lens
+        if len(state_slots) != len(state_prefix_lens):
+            raise RuntimeError(
+                "GDN state slot/prefix metadata must have equal length"
+            )
         outputs = []
 
         if context.is_prefill:
@@ -323,6 +332,20 @@ class GatedDeltaNet(nn.Module):
                 )
             q_offsets = context.prefill_q_offsets
             k_offsets = context.prefill_k_offsets
+            num_sequences = len(state_slots)
+            if (
+                len(q_offsets) != num_sequences + 1
+                or len(k_offsets) != num_sequences + 1
+            ):
+                raise RuntimeError(
+                    "packed prefill offsets must match state metadata"
+                )
+            if q_offsets[0] != 0 or k_offsets[0] != 0:
+                raise RuntimeError("packed prefill offsets must start at zero")
+            if q_offsets[-1] != hidden_states.size(0):
+                raise RuntimeError(
+                    "packed query offsets do not cover hidden states"
+                )
 
             for seq_idx, slot_id in enumerate(state_slots):
                 q_start = q_offsets[seq_idx]
@@ -330,14 +353,32 @@ class GatedDeltaNet(nn.Module):
                 q_len = q_end - q_start
                 k_len = k_offsets[seq_idx + 1] - k_offsets[seq_idx]
                 prefix_len = k_len - q_len
+                expected_prefix = state_prefix_lens[seq_idx]
+
+                if q_len <= 0 or k_len < q_len:
+                    raise RuntimeError(
+                        f"invalid packed prefill lengths for sequence "
+                        f"{seq_idx}: q={q_len}, k={k_len}"
+                    )
+                if expected_prefix < 0 or prefix_len != expected_prefix:
+                    raise RuntimeError(
+                        f"GDN state prefix mismatch for sequence {seq_idx}: "
+                        f"packed={prefix_len}, state={expected_prefix}"
+                    )
 
                 if self.conv_state.numel() and slot_id >= 0:
                     conv_state = self.conv_state[slot_id]
                     recurrent_state = self.recurrent_state[slot_id]
-                    if prefix_len == 0:
+                    if expected_prefix == 0:
+                        # Physical slots are reused across requests. A fresh
+                        # request must discard stale state from the old owner.
                         conv_state.zero_()
                         recurrent_state.zero_()
                 else:
+                    if expected_prefix != 0:
+                        raise RuntimeError(
+                            "cached GDN prefix requires an allocated state slot"
+                        )
                     conv_state, recurrent_state = self._temporary_states(
                         hidden_states.device,
                         hidden_states.dtype,
@@ -359,6 +400,10 @@ class GatedDeltaNet(nn.Module):
                 if slot_id < 0 or not self.conv_state.numel():
                     raise RuntimeError(
                         "decode requires allocated GDN state slots"
+                    )
+                if state_prefix_lens[token_idx] < 0:
+                    raise RuntimeError(
+                        "decode state-prefix length must be non-negative"
                     )
                 outputs.append(
                     self._forward_sequence(
