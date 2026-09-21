@@ -619,6 +619,7 @@ The fix is round-robin rotation of selected decode requests.
 `tests/test_gated_delta_net.py`
 
 - BF16 state-slot snapshot/restore round trip against the quantized reference;
+- BF16 snapshot continuation matches explicit quantized-state continuation;
 - existing chunk/decode continuity coverage;
 - prefix-length mismatch rejection.
 

@@ -64,7 +64,9 @@ See:
 - `docs/qwen35_batching_state_design.md` — variable-length prefill, continuous
   batching, recurrent-state ownership and chunk continuity;
 - `docs/qwen35_scheduler_preemption_prefix_design.md` — decode-first scheduling,
-  hybrid preemption, joint KV/GDN prefix reuse and interview reasoning.
+  hybrid preemption, joint KV/GDN prefix reuse and interview reasoning;
+- `docs/qwen35_validation_benchmark.md` — correctness gates, layer diagnosis and
+  benchmark metric definitions.
 
 ## Installation
 
@@ -118,15 +120,36 @@ CPU-level invariants:
 pytest tests
 ```
 
-Real-checkpoint greedy parity:
+Real-checkpoint greedy parity plus BF16 prefix-resume parity:
 
 ```bash
-python verify_qwen3_5_moe.py /path/to/Qwen3.5-35B-A3B
+python verify_qwen3_5_moe.py /path/to/Qwen3.5-MoE \\
+  --check-prefix-resume
 ```
 
-The real-checkpoint comparison is the final correctness gate. Unit tests can
-prove lifecycle and routing invariants but cannot prove that every checkpoint
-mapping and model equation matches the upstream implementation.
+If token parity fails, locate the first decoder layer with material numerical
+divergence:
+
+```bash
+python diagnose_qwen3_5_moe.py /path/to/Qwen3.5-MoE
+```
+
+Serving benchmark with TTFT, TPOT, P50/P99 latency, prefill/decode execution
+throughput and peak CUDA memory:
+
+```bash
+python bench.py /path/to/Qwen3.5-MoE \\
+  --num-requests 8 \\
+  --min-input-len 64 \\
+  --max-input-len 256 \\
+  --output-len 32 \\
+  --json
+```
+
+The real-checkpoint comparison is the final correctness gate. Unit tests prove
+lifecycle/routing invariants, the prefix-resume probe exercises the actual BF16
+GDN checkpoint path, and the layer probe narrows any HF mismatch before kernel
+optimization begins.
 
 ## Optimization roadmap
 
