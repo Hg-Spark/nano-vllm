@@ -395,6 +395,20 @@ class Qwen3_5MoeForCausalLM(nn.Module):
             bias=False,
         )
 
+    def kv_cache_modules(self) -> list[Attention]:
+        return [
+            layer.self_attn.attn
+            for layer in self.model.layers
+            if layer.block_type == "full_attention"
+        ]
+
+    def state_cache_modules(self) -> list[GatedDeltaNet]:
+        return [
+            layer.linear_attn
+            for layer in self.model.layers
+            if layer.block_type == "linear_attention"
+        ]
+
     def forward(
         self,
         input_ids: torch.Tensor,
