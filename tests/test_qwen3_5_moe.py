@@ -25,6 +25,7 @@ def make_text_config():
         moe_intermediate_size=3,
         shared_expert_intermediate_size=5,
         layer_types=["linear_attention", "full_attention"],
+        num_hidden_layers=2,
         linear_num_value_heads=2,
         linear_num_key_heads=1,
         linear_key_head_dim=4,
