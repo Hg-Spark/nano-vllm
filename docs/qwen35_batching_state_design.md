@@ -304,7 +304,9 @@ preempt request
   -> prefill again from token history
 ```
 
-No recurrent-state snapshot is retained.
+No recurrent-state snapshot is retained. A model-step exception before logical
+commit uses the same recompute principle: the scheduler releases both KV and
+GDN state so possibly mutated physical history is never reused.
 
 That is a deliberate scope choice. Prefix/state checkpointing changes the cache
 ownership model and should be introduced as a separate stage.
@@ -429,6 +431,8 @@ Covers:
 - released-slot reuse by a newly admitted request;
 - final chunk + fresh request in the same prefill batch;
 - preemption release;
+- failed-step invalidation and recompute;
+- incremental KV growth across prefill chunks;
 - KV/state progress divergence rejection.
 
 ### GDN numerical continuity
