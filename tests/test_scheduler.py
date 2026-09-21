@@ -9,12 +9,13 @@ def make_scheduler(
     max_num_batched_tokens=4,
     max_num_seqs=4,
     num_blocks=16,
+    block_size=256,
 ):
     config = SimpleNamespace(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
         eos_token_ids=(99, 100),
-        kvcache_block_size=256,
+        kvcache_block_size=block_size,
         num_kvcache_blocks=num_blocks,
         max_num_state_slots=max_num_seqs,
     )
@@ -24,7 +25,7 @@ def make_scheduler(
 
 def make_running_sequence(scheduler, token_ids):
     seq = Sequence(token_ids)
-    scheduler.block_manager.allocate(seq)
+    scheduler.block_manager.ensure_capacity(seq, len(seq))
     scheduler.state_manager.allocate(seq)
     seq.num_cached_tokens = len(seq)
     seq.num_state_tokens = len(seq)
@@ -116,6 +117,54 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(second.prefill_tokens, 3)
         self.assertEqual(seq.state_slot, first_slot)
 
+    def test_chunked_prefill_allocates_only_scheduled_kv_range(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=3,
+            max_num_seqs=2,
+            num_blocks=4,
+            block_size=4,
+        )
+        seq = Sequence(list(range(10)))
+        scheduler.add(seq)
+
+        first = scheduler.schedule()
+
+        self.assertEqual(first.prefill_tokens, 3)
+        self.assertEqual(len(seq.block_table), 1)
+
+        scheduler.postprocess(
+            first.prefill_seqs,
+            [None],
+            True,
+        )
+        second = scheduler.schedule()
+
+        self.assertEqual(second.prefill_tokens, 3)
+        self.assertEqual(len(seq.block_table), 2)
+
+    def test_long_prompt_admits_without_full_prompt_reservation(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=4,
+            max_num_seqs=2,
+            num_blocks=4,
+            block_size=4,
+        )
+        running = make_running_sequence(
+            scheduler,
+            [1, 2, 3, 4, 5],
+        )
+        long_prompt = Sequence(list(range(10)))
+        scheduler.add(long_prompt)
+
+        # The running request owns two of four blocks. The long prompt needs
+        # three blocks in total, but its first scheduled range needs only one.
+        scheduled = scheduler.schedule()
+
+        self.assertEqual(scheduled.decode_seqs, [running])
+        self.assertEqual(scheduled.prefill_seqs, [long_prompt])
+        self.assertEqual(long_prompt.num_scheduled_tokens, 3)
+        self.assertEqual(len(long_prompt.block_table), 1)
+
     def test_preempt_releases_kv_and_state(self):
         scheduler = make_scheduler(
             max_num_batched_tokens=4,
@@ -133,9 +182,8 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(seq.state_slot, -1)
         self.assertEqual(seq.num_state_tokens, 0)
         self.assertFalse(seq.block_table)
-        self.assertNotIn(
-            slot,
-            scheduler.state_manager.used_slot_ids,
+        self.assertIsNone(
+            scheduler.state_manager.owner_of(slot)
         )
         self.assertTrue(
             blocks.isdisjoint(
@@ -163,7 +211,6 @@ class SchedulerTest(unittest.TestCase):
         self.assertTrue(seq.is_finished)
         self.assertEqual(seq.state_slot, -1)
         self.assertFalse(seq.block_table)
-
 
     def test_variable_length_prefills_share_one_batch(self):
         scheduler = make_scheduler(
@@ -231,7 +278,6 @@ class SchedulerTest(unittest.TestCase):
             survivor.seq_id,
         )
 
-
     def test_chunked_prefill_can_join_new_request_on_final_chunk(self):
         scheduler = make_scheduler(
             max_num_batched_tokens=3,
@@ -288,6 +334,7 @@ class SchedulerTest(unittest.TestCase):
             "KV/state prefix mismatch",
         ):
             scheduler.schedule()
+
 
 if __name__ == "__main__":
     unittest.main()
