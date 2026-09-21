@@ -179,8 +179,12 @@ class Scheduler:
         snapshot_tokens = getattr(
             state_snapshot,
             "num_tokens",
-            prefix_tokens,
+            None,
         )
+        if snapshot_tokens is None:
+            raise RuntimeError(
+                "GDN snapshot is missing prefix-boundary metadata"
+            )
         if snapshot_tokens != prefix_tokens:
             raise RuntimeError(
                 "GDN snapshot boundary does not match KV prefix boundary"
@@ -367,6 +371,10 @@ class Scheduler:
     def preempt(self, seq: Sequence):
         """Retract KV and GDN together; later admission restores/replays both."""
         self._validate_committed_prefix(seq)
+        if seq in self.running:
+            self.running.remove(seq)
+        if seq in self.waiting:
+            self.waiting.remove(seq)
         seq.status = SequenceStatus.WAITING
         seq.pending_state_snapshot = None
         self.block_manager.deallocate(seq)
@@ -381,6 +389,34 @@ class Scheduler:
         prefix_snapshots: dict[int, object] | None = None,
     ):
         prefix_snapshots = prefix_snapshots or {}
+
+        # Validate every snapshot before mutating any logical progress so a
+        # malformed checkpoint cannot leave a partially committed batch.
+        for seq in seqs:
+            snapshot = prefix_snapshots.get(seq.seq_id)
+            if snapshot is None:
+                continue
+            if not is_prefill:
+                raise RuntimeError(
+                    "joint prefix snapshots are valid only for prefill"
+                )
+            target_tokens = (
+                seq.num_cached_tokens + seq.num_scheduled_tokens
+            )
+            snapshot_tokens = getattr(
+                snapshot,
+                "num_tokens",
+                None,
+            )
+            if snapshot_tokens is None:
+                raise RuntimeError(
+                    "GDN snapshot is missing prefix-boundary metadata"
+                )
+            if snapshot_tokens != target_tokens:
+                raise RuntimeError(
+                    "GDN snapshot boundary does not match scheduled prefix"
+                )
+
         for seq, token_id in zip(seqs, token_ids):
             self._validate_committed_prefix(seq)
             committed_tokens = seq.num_scheduled_tokens
@@ -390,10 +426,6 @@ class Scheduler:
 
             snapshot = prefix_snapshots.get(seq.seq_id)
             if snapshot is not None:
-                if not is_prefill:
-                    raise RuntimeError(
-                        "joint prefix snapshots are valid only for prefill"
-                    )
                 self._publish_committed_prefix(
                     seq,
                     snapshot,
