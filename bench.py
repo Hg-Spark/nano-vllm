@@ -316,6 +316,11 @@ def main() -> None:
     finally:
         llm.exit()
 
+    result["environment"] = {
+        "model": model_path,
+        "gpu": torch.cuda.get_device_name(0),
+        "torch_version": torch.__version__,
+    }
     result["config"] = {
         "num_requests": args.num_requests,
         "min_input_len": args.min_input_len,
