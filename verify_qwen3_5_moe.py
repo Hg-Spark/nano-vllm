@@ -152,10 +152,11 @@ def run_prefix_resume_probe(
         tokenizer,
         block_size,
     )
-    if len(prompt_b) >= max_model_len:
+    if len(prompt_b) + max_new_tokens > max_model_len:
         raise ValueError(
-            "prefix-resume probe prompt exceeds max_model_len: "
-            f"prompt={len(prompt_b)}, max={max_model_len}"
+            "prefix-resume probe exceeds max_model_len: "
+            f"prompt={len(prompt_b)}, output={max_new_tokens}, "
+            f"max={max_model_len}"
         )
 
     params = SamplingParams(
@@ -181,6 +182,9 @@ def run_prefix_resume_probe(
         )[0]["token_ids"]
     finally:
         baseline.exit()
+    del baseline
+    gc.collect()
+    torch.cuda.empty_cache()
 
     cached = LLM(
         model_path,
