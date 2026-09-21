@@ -396,11 +396,16 @@ class Qwen3_5MoeForCausalLM(nn.Module):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
+        sequence_indices: list[int] | None = None,
     ) -> torch.Tensor:
         from nanovllm.utils.context import get_context
 
         context = get_context()
         if context.is_prefill:
             last_indices = context.cu_seqlens_q[1:] - 1
+            if sequence_indices is not None:
+                last_indices = last_indices[sequence_indices]
             hidden_states = hidden_states[last_indices].contiguous()
+        elif sequence_indices is not None:
+            hidden_states = hidden_states[sequence_indices]
         return self.lm_head(hidden_states)

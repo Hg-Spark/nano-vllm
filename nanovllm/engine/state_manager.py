@@ -17,6 +17,9 @@ class StateSlotManager:
         self.free_slot_ids: deque[int] = deque(range(num_slots))
         self.used_slot_ids: set[int] = set()
 
+    def can_allocate(self, seq: Sequence) -> bool:
+        return seq.state_slot >= 0 or bool(self.free_slot_ids)
+
     def allocate(self, seq: Sequence) -> int:
         if seq.state_slot >= 0:
             return seq.state_slot

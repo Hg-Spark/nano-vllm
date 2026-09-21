@@ -329,11 +329,10 @@ class ModelRunner:
         input_ids: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        hidden_states = self.model(
+        return self.model(
             input_ids,
             positions,
         )
-        return self.model.compute_logits(hidden_states)
 
     def run(
         self,
@@ -346,7 +345,10 @@ class ModelRunner:
             else:
                 input_ids, positions = self.prepare_decode(seqs)
 
-            logits = self.run_model(input_ids, positions)
+            hidden_states = self.run_model(
+                input_ids,
+                positions,
+            )
             sample_indices = self._sample_indices(
                 seqs,
                 is_prefill,
@@ -356,6 +358,10 @@ class ModelRunner:
                 for _ in seqs
             ]
             if sample_indices:
+                logits = self.model.compute_logits(
+                    hidden_states,
+                    sample_indices if is_prefill else None,
+                )
                 temperatures = torch.tensor(
                     [
                         seqs[idx].temperature
@@ -365,7 +371,7 @@ class ModelRunner:
                     pin_memory=True,
                 ).cuda(non_blocking=True)
                 sampled = self.sampler(
-                    logits[sample_indices],
+                    logits,
                     temperatures,
                 ).tolist()
                 for idx, token_id in zip(

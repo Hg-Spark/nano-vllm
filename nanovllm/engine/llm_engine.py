@@ -56,7 +56,7 @@ class LLMEngine:
             eos_token_ids = _normalize_eos_token_ids(
                 generation_config.eos_token_id
             )
-        except OSError:
+        except (OSError, ValueError):
             eos_token_ids = ()
 
         if not eos_token_ids:

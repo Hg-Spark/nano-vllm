@@ -98,7 +98,10 @@ class Scheduler:
 
             seq = self.waiting[0]
             if not seq.block_table:
-                if not self.block_manager.can_allocate(seq):
+                if (
+                    not self.block_manager.can_allocate(seq)
+                    or not self.state_manager.can_allocate(seq)
+                ):
                     break
                 self.block_manager.allocate(seq)
                 self.state_manager.allocate(seq)
