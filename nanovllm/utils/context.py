@@ -14,6 +14,7 @@ class Context:
     context_lens: torch.Tensor | None = None
     block_tables: torch.Tensor | None = None
     state_slots: tuple[int, ...] | None = None
+    state_prefix_lens: tuple[int, ...] | None = None
     prefill_q_offsets: tuple[int, ...] | None = None
     prefill_k_offsets: tuple[int, ...] | None = None
 
@@ -35,6 +36,7 @@ def set_context(
     context_lens=None,
     block_tables=None,
     state_slots=None,
+    state_prefix_lens=None,
     prefill_q_offsets=None,
     prefill_k_offsets=None,
 ) -> None:
@@ -49,6 +51,7 @@ def set_context(
         context_lens=context_lens,
         block_tables=block_tables,
         state_slots=state_slots,
+        state_prefix_lens=state_prefix_lens,
         prefill_q_offsets=prefill_q_offsets,
         prefill_k_offsets=prefill_k_offsets,
     )
