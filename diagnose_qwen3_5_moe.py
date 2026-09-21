@@ -1,6 +1,5 @@
 import argparse
 import gc
-import math
 import os
 
 import torch
@@ -50,7 +49,10 @@ def _extract_hidden(output) -> torch.Tensor:
     )
 
 
-def _capture_hooks(layers, sink: list[torch.Tensor]):
+def _capture_hooks(
+    layers,
+    sink: list[torch.Tensor | None],
+):
     handles = []
 
     def make_hook(index: int):
@@ -82,7 +84,7 @@ def capture_hf_layers(
         dtype=torch.bfloat16,
     ).cuda().eval()
     layers = _find_hf_layers(model)
-    captured: list[torch.Tensor] = []
+    captured: list[torch.Tensor | None] = []
     handles = _capture_hooks(layers, captured)
     try:
         ids = torch.tensor(
@@ -104,7 +106,11 @@ def capture_hf_layers(
 
     if any(value is None for value in captured):
         raise RuntimeError("HF layer probe missed one or more decoder layers")
-    return captured
+    return [
+        value
+        for value in captured
+        if value is not None
+    ]
 
 
 def capture_nano_layers(
@@ -120,7 +126,7 @@ def capture_nano_layers(
         max_num_state_slots=1,
         enable_prefix_cache=False,
     )
-    captured: list[torch.Tensor] = []
+    captured: list[torch.Tensor | None] = []
     handles = _capture_hooks(
         llm.model_runner.model.model.layers,
         captured,
@@ -158,7 +164,11 @@ def capture_nano_layers(
         raise RuntimeError(
             "nano-vLLM layer probe missed one or more decoder layers"
         )
-    return captured
+    return [
+        value
+        for value in captured
+        if value is not None
+    ]
 
 
 def _flatten_hidden(tensor: torch.Tensor) -> torch.Tensor:
