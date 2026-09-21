@@ -1,14 +1,18 @@
-# Qwen3.5 Hybrid Eager Support: Design & Interview Notes
+# Qwen3.5 Hybrid Eager Support — Design, Migration Decisions & Interview Notes
 
 > Branch: `feature/qwen35-hybrid-eager`
 >
-> Goal: extend nano-vLLM from a pure Transformer decoder runner to a minimal hybrid runner that can execute Qwen3.5 dense text models containing both Full Attention and Gated DeltaNet (GDN) layers.
+> Goal: extend nano-vLLM from a pure Transformer inference path to a small,
+> inspectable runtime that can execute Qwen3.5 dense text models containing
+> both Full Attention and Gated DeltaNet (GDN) layers.
 >
-> This stage prioritizes correctness, inspectability and a clear state model. Kernel fusion, CUDA Graph, MoE, vision, hybrid prefix caching and aggressive tensor-parallel sharding are intentionally deferred.
+> Priority order: correctness -> state lifecycle -> measurable optimization.
+> Fused GDN kernels, GDN tensor parallelism, hybrid prefix checkpoints, MoE,
+> vision and hybrid CUDA Graph are deliberately deferred.
 
 ---
 
-## 1. Why this order?
+## 1. Implementation order
 
 The dependency chain is:
 
@@ -16,202 +20,491 @@ The dependency chain is:
 Qwen3.5 checkpoint/config
         |
         v
-[1] model semantics are correct
+[1] Model semantics
     - checkpoint mapping
     - zero-centered RMSNorm
     - partial RoPE
-    - gated full attention
-    - GDN math
+    - gated Full Attention
+    - GDN recurrence
     - layer_types dispatch
         |
         v
-[2] execution semantics are correct
-    - one packed batch
-    - Full Attention and GDN share one forward pass
-    - per-request identity survives TP worker serialization
+[2] Runtime semantics
+    - one ModelRunner
+    - packed prefill/decode metadata
+    - Full Attention uses KV cache
+    - GDN uses request state_slot
         |
         v
-[3] state lifetime is correct
-    - Conv history
-    - recurrent matrix state
+[3] State lifecycle
+    - stable logical slot
+    - per-layer Conv state pool
+    - per-layer recurrent state pool
     - chunked prefill continuity
     - decode continuity
-    - preemption reset
-    - finish release
+    - preemption/release/reuse
 ```
 
-This order separates three kinds of bugs:
+This order separates three failure domains:
 
-1. **model bug**: wrong parameter mapping or math;
-2. **runner bug**: wrong token/sequence dispatch;
-3. **state bug**: correct single call, wrong result across calls.
+1. **model bugs** — wrong math or wrong checkpoint mapping;
+2. **runner bugs** — wrong sequence/token metadata;
+3. **state bugs** — one forward is correct but multiple forwards diverge.
 
-Trying to optimize kernels before separating these failure domains makes numerical debugging much harder.
+Kernel optimization is intentionally later because it changes execution order and
+numerics at the same time.
 
 ---
 
-# Stage 1 — Qwen3.5 Text-only Eager adaptation
+# 2. Migration decision: how much abstraction is actually needed?
 
-## 1.1 Scope
+This branch originally used a simple prototype:
 
-Supported in this stage:
+```text
+(seq_id, layer_idx)
+        |
+        v
+Python dict
+        |
+        v
+ConvState + RecurrentState
+```
 
-- dense Qwen3.5 text backbone (`qwen3_5_text`);
-- eager execution;
-- Full Attention + GDN hybrid layers;
-- chunked prefill and token-by-token decode;
-- existing nano-vLLM paged KV cache for Full Attention layers.
+That prototype was useful because it made the GDN lifecycle easy to understand.
+It was not kept as the final runtime contract.
 
-Explicitly deferred:
+The selected design is:
+
+```text
+Sequence
+   |
+   | state_slot: int
+   v
+StateSlotManager
+   |
+   +--------------------------+
+   |                          |
+   v                          v
+Full Attention            GDN layer N
+BlockManager              state_pool[state_slot]
+   |                       |- conv_state
+Paged KV cache             |- recurrent_state
+```
+
+## 2.1 Abstractions kept
+
+### StateSlotManager — keep
+
+It is a small allocator, not a general cache framework.
+
+Why it is justified now:
+
+- GPU recurrent tensors should not live inside `Sequence`;
+- scheduler admission needs a finite recurrent-state capacity;
+- all GDN layers can use the same request-level integer slot;
+- slot reuse can be tested explicitly;
+- later fused kernels can index dense state tensors directly.
+
+Inlining this logic into `Scheduler` would save only a few lines while mixing
+request scheduling and recurrent-state ownership.
+
+### Per-layer contiguous state pools — keep
+
+Each GDN layer owns:
+
+```text
+conv_state[num_slots, ...]
+recurrent_state[num_slots, ...]
+```
+
+This is already useful in eager mode because memory usage becomes predictable
+and can be subtracted from the KV-cache budget before block allocation.
+
+Stable addresses are also useful later, but CUDA Graph is not the reason this
+design is kept today.
+
+### One unified ModelRunner — keep
+
+A separate `HybridModelRunner` subclass was considered and rejected.
+
+Qwen3.5 needs only a small amount of extra metadata:
+
+- `state_slots` in runtime context;
+- GDN state-pool allocation;
+- hybrid-aware cache memory accounting.
+
+A new runner hierarchy would duplicate most of the existing path. The current
+implementation keeps one `ModelRunner` and lets model/layer capabilities expose
+what persistent memory they need.
+
+### Model registry — keep
+
+The registry is intentionally small. It removes Qwen-specific conditionals from
+the runner and supports both root architectures and nested `text_config`.
+
+This is a concrete two-model dispatch table, not a plugin framework.
+
+## 2.2 Mature abstractions deliberately rejected or deferred
+
+The branch does **not** add:
+
+- a generalized multi-cache framework;
+- cache groups or cache-backend interfaces;
+- recurrent prefix checkpoint objects;
+- GDN-specific CUDA Graph workspace/capture;
+- generic state gather/scatter engines;
+- a vLLM-scale attention/backend hierarchy.
+
+These become worthwhile only when there are multiple stateful model families or
+multiple optimized backends that actually need the abstraction.
+
+## 2.3 Scheduler split: kept, but not generalized
+
+The scheduler returns decode and prefill groups separately.
+
+Why keep this:
+
+- decode and chunked prefill have different token budgets;
+- decode priority avoids long-prefill head-of-line blocking;
+- the engine can run decode first and then dynamic-length prefill;
+- state slots stay stable across both phases.
+
+Why stop here:
+
+- there is no generic scheduling-policy interface;
+- no cache-group abstraction is introduced;
+- no hybrid-specific scheduler subclass exists.
+
+---
+
+# Stage 1 — Qwen3.5 dense text eager path
+
+## 3. Scope
+
+Supported:
+
+- dense Qwen3.5 text backbone;
+- Full Attention + GDN layers;
+- eager hybrid execution;
+- chunked prefill;
+- token-by-token decode;
+- existing paged KV cache for Full Attention;
+- recurrent Conv/matrix state for GDN.
+
+Deferred:
 
 - Qwen3.5 MoE;
 - vision tower;
 - MTP;
-- CUDA Graph for hybrid execution;
-- fused GDN kernel;
-- recurrent-state-aware prefix caching.
+- fused GDN kernels;
+- GDN TP sharding;
+- recurrent-state-aware prefix caching;
+- hybrid CUDA Graph.
 
-### Why start with dense text-only?
-
-The first engineering objective is to validate the new **hybrid execution semantics**. Adding MoE introduces routing, expert parallelism and a second large source of numerical/performance bugs. Adding vision introduces a second modality and checkpoint namespace.
-
-A narrow first stage gives a reliable reference path that later optimizations can compare against.
+Dense text-only is the right first target because MoE and vision introduce new
+failure domains unrelated to the hybrid recurrent execution model.
 
 ---
 
-## 1.2 Config handling
+# 4. Config handling
 
-nano-vLLM originally assumes the root Hugging Face config directly describes the decoder.
+The runtime retains:
 
-Qwen3.5 may expose the text decoder through `text_config`, so the runtime now keeps:
+- `hf_config`: root Hugging Face config;
+- `text_config`: decoder config used by the text runner.
 
-- `hf_config`: original root config;
-- `model_config`: decoder/text config used by the runner.
+Hybrid detection comes from `layer_types` containing `linear_attention`.
 
-For a detected dense Qwen3.5 text model:
+For hybrid models:
 
-- force `enforce_eager = True`;
-- temporarily disable prefix cache;
-- dispatch to `HybridModelRunner`.
+- `enforce_eager = True`;
+- prefix reuse is disabled;
+- active sequence count is bounded by recurrent state slots.
 
-### Why force eager?
-
-GDN mutates per-request recurrent state every forward pass. Existing CUDA Graph capture assumes the decoder's persistent runtime state is represented by fixed graph inputs plus KV cache buffers.
-
-Capturing first and fixing state semantics later would hide state mutation inside graph replay and make lifecycle errors difficult to isolate.
-
-The intended sequence is:
-
-```text
-eager correctness
- -> stable state addresses / explicit pool
- -> fused kernels
- -> CUDA Graph capture
-```
+The default recurrent slot count is intentionally conservative for the Python
+reference path. It prevents allocating a large recurrent pool merely because
+`max_num_seqs` has a high Transformer-oriented default.
 
 ---
 
-## 1.3 Checkpoint mapping
+# 5. Checkpoint mapping
 
-Qwen3.5 checkpoint names can contain a language-model namespace such as:
-
-```text
-model.language_model.layers.0....
-```
-
-while the local minimal model uses:
+The text-only runtime must map wrapper checkpoints such as:
 
 ```text
-model.layers.0....
+model.language_model.layers.0...
 ```
 
-The loader therefore supports a model-owned `map_weight_name()` callback before applying nano-vLLM's existing packed-weight logic.
+onto the local text module tree:
 
-The Qwen3.5 mapper:
+```text
+model.layers.0...
+```
 
-- strips the language-model wrapper;
-- skips vision weights;
-- skips MTP weights;
-- preserves strict errors for unexpected text parameters.
+Vision/MTP namespaces are explicitly skipped. Unexpected text weights fail
+strictly.
 
-### Why keep mapping in the model?
+The mapping is declared by the model through prefix metadata while the generic
+loader applies the rule.
 
-Checkpoint naming is a **model-format concern**. Putting Qwen3.5-specific prefixes into the generic loader would make the loader accumulate architecture-specific branches.
+Design principle:
 
-The generic loader only defines the extension point. The model owns the mapping rule.
+```text
+checkpoint format knowledge belongs to the model
+loader owns only generic mapping mechanics
+```
 
-### Why keep strict failures?
-
-Silently ignoring unknown text weights can make the engine start with uninitialized parameters and produce plausible-looking but incorrect output. Unsupported vision/MTP namespaces are explicitly ignored; unexpected decoder weights fail fast.
+Strict failure is important: silently ignoring an unexpected decoder tensor can
+produce plausible but numerically invalid output.
 
 ---
 
-## 1.4 Qwen3.5-specific math
+# 6. Qwen3.5 model semantics
 
-### Zero-centered RMSNorm
+## 6.1 Zero-centered RMSNorm
 
-Qwen3.5 uses a zero-centered norm parameterization:
+Qwen3.5 uses:
 
 ```text
 y = RMSNorm(x) * (1 + weight)
 ```
 
-This differs from the existing Qwen3 path where `weight` is initialized around one.
+A separate Qwen3.5 norm is used so the existing Qwen3 behavior is not changed.
 
-A separate `Qwen3_5RMSNorm` is kept instead of modifying the old layer.
+## 6.2 Partial RoPE
 
-**Reason:** changing the shared RMSNorm risks silently changing Qwen3 behavior.
-
----
-
-### Partial RoPE
-
-Qwen3.5 rotates only part of each attention head.
-
-The existing rotary layer assumed:
+Only the first `rotary_dim` channels of each head are rotated.
 
 ```text
-rotary_dim == head_dim
+head = [rotary prefix | pass-through tail]
 ```
 
-It now rotates the first `rotary_dim` channels and passes the tail through unchanged.
+Partial RoPE is implemented in the shared rotary primitive because it is a
+reusable mathematical operation rather than a Qwen3.5-only runtime policy.
 
-**Reason:** partial RoPE is a reusable primitive and belongs in the generic RoPE implementation.
+## 6.3 Gated Full Attention
 
----
-
-### Gated Full Attention
-
-Qwen3.5 Full Attention produces both query and query-side output gate information. The implementation keeps this explicit:
+The Full Attention path is:
 
 ```text
 hidden
-  -> q_proj -> query + gate
-  -> q/k norm
+  -> q projection -> query + gate
+  -> q/k RMSNorm
   -> partial RoPE
-  -> FlashAttention
+  -> existing Attention/Paged KV
   -> sigmoid(gate)
-  -> o_proj
+  -> output projection
 ```
 
-The existing nano-vLLM Attention backend and paged KV cache remain unchanged.
-
-**Reason:** reuse the proven cache/FlashAttention path and only adapt the model-specific projection semantics.
+The existing KV-cache and attention backend remain in use.
 
 ---
 
-## 1.5 Gated DeltaNet reference path
+# Stage 2 — Unified hybrid runtime
 
-The first implementation deliberately uses readable PyTorch operations:
+## 7. Why the original pure-KV assumption is insufficient
 
-1. input projection into Q/K/V channels;
-2. stateful causal depthwise Conv1d;
+Full Attention persistent history:
+
+```text
+K/V tensors indexed by token position
+```
+
+GDN persistent history:
+
+```text
+fixed-size recurrent matrix
++ short causal-convolution history
+```
+
+These histories have different allocation and mutation rules.
+
+The model can still execute both layer types in one decoder loop. The runtime
+only needs to provide each request's stable `state_slot`.
+
+---
+
+# 8. Runtime context
+
+Packed prefill/decode context carries:
+
+```text
+state_slots = [slot(request A), slot(request B), ...]
+```
+
+The GDN layer uses cumulative sequence lengths to locate each packed token range
+and `state_slot` to locate persistent recurrent state.
+
+Why not put CUDA tensors in `Sequence`?
+
+- `Sequence` is CPU scheduler metadata;
+- it is serialized to TP workers;
+- GPU state is large and mutable;
+- carrying tensors through scheduler/IPC would couple execution memory to
+  control-plane objects.
+
+Only an integer slot crosses that boundary.
+
+---
+
+# 9. Hybrid memory accounting
+
+The runner discovers two kinds of persistent modules:
+
+### KV modules
+
+Modules exposing `k_cache` and `v_cache`.
+
+Only Full Attention layers contribute to KV block memory.
+
+### Stateful modules
+
+Modules exposing:
+
+```text
+state_cache_nbytes(num_slots)
+allocate_state_cache(num_slots)
+```
+
+This small capability contract is kept because the runner needs to reserve
+recurrent memory before deciding how many KV blocks fit.
+
+The memory budget is conceptually:
+
+```text
+GPU cache budget
+  - all GDN state pools
+  = memory available for Full Attention KV blocks
+```
+
+No more general cache interface is introduced.
+
+---
+
+# Stage 3 — GDN state lifecycle
+
+## 10. State representation
+
+Each GDN layer owns:
+
+```text
+conv_state[
+    num_slots,
+    conv_channels,
+    conv_kernel_size
+]
+
+recurrent_state[
+    num_slots,
+    value_heads,
+    key_head_dim,
+    value_head_dim
+]
+```
+
+The recurrent matrix remains fp32 in the correctness reference path.
+
+---
+
+# 11. Why state slots are better than the initial dict prototype
+
+The initial dictionary design:
+
+```text
+dict[(seq_id, layer_idx)] -> tensors
+```
+
+has two strengths:
+
+- very easy to prototype;
+- lifecycle is explicit.
+
+Its problems become visible once runtime integration is considered:
+
+1. allocation happens incrementally rather than at admission;
+2. total GPU state capacity is difficult to budget;
+3. batched kernels would need Python lookup/gather;
+4. state addresses are not naturally dense;
+5. future graph capture would need a second addressing scheme.
+
+A logical slot solves these without introducing a large framework:
+
+```text
+request -> integer slot
+layer -> dense tensor pool
+```
+
+This is the point where the extra structure pays for itself.
+
+---
+
+# 12. Lifecycle
+
+## 12.1 Admission
+
+The scheduler allocates:
+
+- KV blocks through `BlockManager`;
+- one recurrent `state_slot` through `StateSlotManager`.
+
+## 12.2 Fresh prefill
+
+When a request starts from prefix length zero, every GDN layer clears the
+physical slot before processing tokens.
+
+This is essential because physical slots are reused.
+
+## 12.3 Chunked prefill
+
+For later chunks:
+
+```text
+prefix_len > 0
+```
+
+the same slot is retained and its final Conv/recurrent state is used as the
+initial state for the next chunk.
+
+## 12.4 Decode
+
+Each new token updates the same per-layer state pool entry.
+
+## 12.5 Preemption
+
+Current nano-vLLM preemption discards KV and recomputes the sequence.
+
+GDN follows the same semantic policy:
+
+```text
+preempt
+ -> release logical state_slot
+ -> request returns to prefill
+ -> newly allocated slot is cleared on fresh prefill
+ -> state is rebuilt from tokens
+```
+
+## 12.6 Completion
+
+Both KV blocks and the logical state slot are released.
+
+The physical state tensor does not need eager zeroing at release because fresh
+prefill guarantees zero-before-use. This avoids an unnecessary scheduler-to-GPU
+operation while preserving correctness.
+
+---
+
+# 13. GDN reference implementation
+
+The eager implementation keeps the mathematical path readable:
+
+1. Q/K/V projection;
+2. stateful depthwise causal Conv1d;
 3. Q/K L2 normalization;
-4. token-wise recurrent delta update;
+4. token-wise gated delta recurrence;
 5. gated RMSNorm;
 6. output projection.
 
-The recurrence is conceptually:
+Conceptually:
 
 ```text
 S_t = exp(g_t) * S_(t-1)
@@ -221,472 +514,296 @@ S_t = S_t + k_t * delta_t^T
 o_t = q_t^T S_t
 ```
 
-The recurrent state is kept in fp32 for the reference path.
+Why use a Python scan first?
 
-### Why a Python scan first?
-
-A fused Triton/FLA kernel changes both:
-
-- the execution schedule;
-- numerical behavior.
-
-Keeping the recurrence readable provides a reference implementation for later kernel validation:
+It provides a trusted target for later optimization:
 
 ```text
-optimized_kernel_output ~= reference_scan_output
-optimized_final_state ~= reference_final_state
+optimized_output ~= eager_reference_output
+optimized_final_state ~= eager_reference_final_state
 ```
 
-This is more useful during development and interviews than importing a large opaque backend immediately.
+Importing a large optimized backend immediately would hide the state transition
+that this project is intended to understand and optimize.
 
 ---
 
-# Stage 2 — Hybrid ModelRunner
+# 14. Prefix cache policy
 
-## 2.1 Problem with the original runner
+KV-only prefix reuse is unsafe for a hybrid model.
 
-The original runner assumes every decoder layer consumes the same cache model:
+A reusable prefix P contains:
 
 ```text
-token positions -> KV cache blocks
+Full Attention: KV(P)
+GDN: ConvState(P) + RecurrentState(P)
 ```
 
-Qwen3.5 contains two layer families:
+Restoring only KV(P) creates inconsistent model history.
 
-| Layer | Persistent history |
-|---|---|
-| Full Attention | K/V tensors indexed by token position |
-| GDN | fixed-size recurrent matrix + short Conv1d history |
+Therefore:
 
-The model forward can still be one layer loop, but the runner must carry enough request identity for GDN to find its state.
+```text
+hybrid model -> prefix cache disabled
+```
+
+Re-enabling it requires a prefix entry that restores both histories from the
+same token boundary.
 
 ---
 
-## 2.2 Minimal runner abstraction
+# 15. CUDA Graph policy
 
-The base runner now exposes small hooks:
+Hybrid execution is forced eager in this stage.
 
-```python
-build_model(...)
-initialize_runtime_state(...)
-prepare_sequence_state(...)
-release_sequences(...)
+During migration, state-slot CUDA Graph plumbing was intentionally *not*
+retained merely as future scaffolding.
+
+The intended order remains:
+
+```text
+correct eager lifecycle
+ -> fused state-aware GDN kernel
+ -> stable batched state access
+ -> graph-capture validation
+ -> enable hybrid CUDA Graph
 ```
 
-`HybridModelRunner` overrides only these hybrid-specific points.
-
-### Why avoid a generic backend framework?
-
-nano-vLLM is valuable because the execution path is small enough to understand.
-
-A vLLM-scale abstraction for cache groups, attention backends and state pools would solve problems this project does not yet have. Four explicit hooks separate the concerns needed today without introducing a hierarchy whose purpose is only future speculation.
+This keeps current code aligned with current capabilities.
 
 ---
 
-## 2.3 Packed-batch sequence metadata
+# 16. Validation
 
-Full Attention already understands a packed batch through cumulative sequence lengths.
+## Unit invariants
 
-GDN additionally needs to know which token range belongs to which request. The runtime context now carries:
-
-```text
-seq_ids  = (request A, request B, ...)
-seq_lens = (tokens for A, tokens for B, ...)
-```
-
-A GDN layer slices the packed hidden-state tensor by these boundaries and updates each request's own state.
-
-### Why not store state directly on Sequence?
-
-`Sequence` is scheduler metadata and is serialized to tensor-parallel workers.
-
-Putting CUDA tensors inside it would:
-
-- make IPC serialization expensive;
-- mix CPU scheduling state with GPU execution state;
-- duplicate or transfer large recurrent tensors.
-
-The sequence carries a stable integer identity. GPU state remains runner-owned.
-
----
-
-## 2.4 Full Attention KV allocation
-
-Only Full Attention layers need KV cache.
-
-For a hybrid model, KV block memory is therefore sized with:
+### GDN chunk continuity
 
 ```text
-num_full_attention_layers
-```
-
-instead of:
-
-```text
-num_hidden_layers
-```
-
-This keeps the existing paged KV representation and avoids allocating meaningless KV memory for GDN layers.
-
----
-
-# Stage 3 — GDN State Manager
-
-## 3.1 State representation
-
-Each active request owns, for each GDN layer:
-
-```text
-conv_state      [conv_channels, kernel_size - 1]
-recurrent_state [value_heads, key_head_dim, value_head_dim]
-```
-
-Lookup key:
-
-```text
-(seq_id, layer_idx)
-```
-
-### Why separate it from BlockManager?
-
-The two caches have different allocation semantics.
-
-KV cache:
-
-- grows with token count;
-- paged into blocks;
-- can share immutable prefix blocks.
-
-GDN state:
-
-- fixed size per active request;
-- represents the **entire processed prefix**;
-- mutates after every token;
-- cannot be reconstructed from a KV block id alone.
-
-Forcing both into one block-table abstraction would hide these differences and complicate correctness.
-
----
-
-## 3.2 Lifecycle
-
-The state lifecycle is:
-
-```text
-request admitted
-      |
-      v
-first GDN use -> lazy allocate zero state
-      |
-      v
-chunked prefill -> carry final chunk state to next chunk
-      |
-      v
-decode -> update same state one token at a time
-      |
-      +---- scheduler preemption/recompute
-      |            |
-      |            v
-      |       reset GDN state
-      |       rebuild from prompt
-      |
-      v
-request finished -> release all layer states
-```
-
-### First prefill
-
-If `num_cached_tokens == 0`, stale state for that `seq_id` is cleared before execution.
-
-### Chunked prefill
-
-State is **not** cleared between chunks. The next chunk continues from the previous chunk's final Conv/recurrent state.
-
-### Decode
-
-One new token updates exactly the same state.
-
-### Preemption
-
-nano-vLLM's current preemption strategy discards KV blocks and recomputes the request. GDN state must follow the same semantic choice.
-
-When the request returns to prefill with zero cached tokens, its recurrent state is reset and reconstructed from the prompt.
-
-### Completion
-
-The engine explicitly releases the sequence's recurrent states after scheduler completion.
-
----
-
-# Why hybrid prefix caching is disabled in this stage
-
-A KV prefix hit is insufficient for GDN.
-
-Suppose two requests share a token prefix:
-
-```text
-prefix P
-   |
-   +-- Full Attention history: KV(P)
-   |
-   +-- GDN history: ConvState(P), RecurrentState(P)
-```
-
-Reusing only `KV(P)` gives a partially restored model history.
-
-That failure can be silent: Full Attention layers are correct while GDN layers start from zero or unrelated state.
-
-Therefore the safe stage-1 policy is:
-
-```text
-hybrid model -> no prefix reuse
-```
-
-A future implementation can re-enable it only when a prefix-cache entry includes compatible recurrent-state checkpoints.
-
----
-
-# Comparison with vLLM / SGLang
-
-The external projects are used as design evidence, not as code templates.
-
-## vLLM ideas worth learning from
-
-- treats hybrid recurrent models as having cache semantics different from pure KV attention;
-- exposes model-specific recurrent-state shape/dtype metadata;
-- optimizes Qwen3.5 projections and kernels aggressively.
-
-### What this implementation does differently
-
-nano-vLLM keeps:
-
-- separate readable GDN projections;
-- a plain Python recurrent reference;
-- a small `GDNStateManager`;
-- explicit runner hooks.
-
-This preserves the educational value of the code and creates a baseline before optimization.
-
----
-
-## SGLang ideas worth learning from
-
-SGLang's hybrid designs separate:
-
-- Full Attention KV storage;
-- recurrent-state storage.
-
-That separation validates the core architectural decision used here.
-
-### What this implementation does differently
-
-No general cache-pool framework is introduced yet. State is a dictionary keyed by request/layer because it is enough to prove lifecycle correctness.
-
-A slot-based contiguous pool becomes worthwhile when:
-
-- CUDA Graph requires stable addresses;
-- scheduling must reserve recurrent-state capacity;
-- batched fused GDN kernels need dense state tensors.
-
----
-
-# Validation strategy
-
-## Unit invariants included
-
-### 1. Conv state continuity
-
-```text
-conv(full_sequence)
+GDN(full)
 ==
-concat(conv(chunk_1), conv(chunk_2 using state_1))
+concat(
+  GDN(chunk1, zero_state),
+  GDN(chunk2, state_after_chunk1),
+  ...
+)
 ```
 
-and final states must match.
+Outputs and final states must match.
 
-### 2. Recurrent state continuity
+### Decode continuity
 
-```text
-scan(full_sequence)
-==
-concat(scan(chunk_1), scan(chunk_2 using state_1))
-```
+Token-by-token execution must match the same eager recurrence over the full
+sequence.
 
-and final recurrent states must match.
+### Slot allocation/reuse
 
-### 3. State isolation
+`StateSlotManager` tests:
 
-Mutating request A must not change request B.
+- allocate;
+- exhaustion;
+- release;
+- reuse.
 
-### 4. Reset/release
+### Physical state reuse
 
-- reset returns a request to zero state;
-- release removes all request-owned layer state.
+A reused physical slot is deliberately filled with stale nonzero values. A
+fresh prefill must clear it and produce the same output/final state as execution
+from explicit zero state.
+
+### Scheduler lifecycle
+
+Tests cover:
+
+- state-slot persistence across chunked prefill;
+- state-slot release on preemption;
+- hybrid prefix cache disabled;
+- shared batch/sequence budget.
+
+### Partial RoPE
+
+The pass-through tail is tested separately from the rotated prefix.
 
 ---
 
-## Required GPU numerical test before calling the model adapter complete
+# 17. Real-checkpoint validation
 
-The most important integration test is against Hugging Face on the same dense checkpoint.
+Before calling Qwen3.5 support complete, compare the same checkpoint against the
+Hugging Face implementation using deterministic greedy generation.
 
-Recommended deterministic setup:
-
-```text
-temperature = 0
-batch = 1
-eager mode
-same dtype
-same prompt ids
-disable stochastic sampling
-```
-
-Compare in this order:
+Recommended order when debugging:
 
 1. embedding output;
-2. output after first GDN layer;
-3. output after first Full Attention layer;
+2. first GDN layer;
+3. first Full Attention layer;
 4. final hidden state;
 5. logits;
-6. greedy generated token ids.
+6. generated token ids.
 
-Debugging from the earliest diverging layer is much faster than comparing only generated text.
+Comparing only final text makes it much harder to identify the first divergent
+semantic layer.
 
-Suggested acceptance targets depend on dtype, but token ids should match for a short deterministic smoke test before performance work begins.
-
----
-
-# Known limitations / intentional debt
-
-1. **GDN tensor parallelism is replicated.**
-   - Correctness is prioritized.
-   - Memory and compute scale poorly with TP.
-   - Next step: shard by compatible head dimension and define collectives explicitly.
-
-2. **GDN recurrence is a Python token loop.**
-   - This is the numerical reference path.
-   - It will be slow for long prefill.
-   - Next step: Triton/FLA fused chunk scan with reference comparison.
-
-3. **Hybrid prefix caching is disabled.**
-   - Correct until recurrent checkpoints are cached with prefix metadata.
-
-4. **Hybrid CUDA Graph is disabled.**
-   - A contiguous state pool with stable addresses should come first.
-
-5. **No recurrent-state admission control.**
-   - The manager exposes `bytes_per_sequence`, but scheduler capacity is still KV-centric.
-   - Next step: reserve both KV blocks and recurrent slots before admitting a request.
-
-6. **Dense text-only scope.**
-   - MoE, vision and MTP intentionally stay outside this stage.
+The repository includes `verify_qwen3_5.py` for end-to-end token comparison.
 
 ---
 
-# Recommended next engineering order
+# 18. What was learned from larger engines
+
+vLLM/SGLang are useful as architectural evidence:
+
+- recurrent state is not ordinary KV cache;
+- hybrid engines need explicit state ownership;
+- optimized kernels benefit from dense/stable state layout.
+
+This project intentionally does not reproduce their generalized cache/backend
+frameworks.
+
+The chosen rule is:
 
 ```text
-A. HF numerical alignment on real Qwen3.5 dense checkpoint
-       |
-B. contiguous recurrent-state pool + admission accounting
-       |
-C. GDN TP sharding
-       |
-D. fused prefill/decode GDN kernels
-       |
-E. recurrent-state-aware prefix cache
-       |
-F. CUDA Graph
-       |
-G. MoE / vision extensions
+copy the invariant,
+not the framework built around a much larger product surface
 ```
 
-The key rule is to keep one trusted eager reference path while optimizing.
+---
+
+# 19. Known limitations
+
+1. **GDN TP=1**
+   - explicit correctness restriction;
+   - next step: shard compatible head dimensions and define collectives.
+
+2. **Python recurrent scan**
+   - correct but slow for long prefill;
+   - next step: Triton/chunked fused scan.
+
+3. **Hybrid prefix cache disabled**
+   - needs recurrent state checkpoints.
+
+4. **Hybrid CUDA Graph disabled**
+   - should be enabled only after a graph-safe GDN kernel exists.
+
+5. **Dense text-only**
+   - MoE, vision and MTP remain separate stages.
+
+6. **Real GPU/checkpoint numerical alignment still required**
+   - unit invariants validate state semantics;
+   - they do not replace Hugging Face end-to-end comparison.
 
 ---
 
-# Interview explanation
+# 20. Recommended next engineering order
 
-## 30-second project summary
+```text
+A. real Qwen3.5 checkpoint numerical alignment
+        |
+B. profile eager GDN prefill/decode
+        |
+C. fused GDN prefill/decode kernel
+        |
+D. GDN tensor parallelism
+        |
+E. recurrent-state prefix checkpoints
+        |
+F. hybrid CUDA Graph
+        |
+G. MoE / vision
+```
 
-> I extended nano-vLLM from a pure Transformer runner to support Qwen3.5's hybrid Full Attention + Gated DeltaNet decoder. I first implemented a dense text-only eager reference path and checkpoint mapping, then added a minimal HybridModelRunner that carries request identity through packed batches, and finally introduced a GDN State Manager for convolution and recurrent states. The main engineering issue was that recurrent state has a different lifecycle from paged KV cache, especially under chunked prefill and preemption, so I modeled it separately and temporarily disabled KV-only prefix reuse until recurrent checkpoints can be cached safely.
-
----
-
-## Common follow-up questions
-
-### Q1. Why does GDN need its own state manager?
-
-Because KV cache is token-indexed and grows with sequence length, while GDN stores a fixed-size mutable summary of the whole prefix plus short convolution history. Their allocation, sharing and reset semantics differ.
-
-### Q2. Why is prefix caching dangerous here?
-
-A token-prefix hit restores Full Attention KV but does not automatically restore the GDN recurrent/conv state for the same prefix. Reusing only one part of model history gives incorrect continuation.
-
-### Q3. Why not copy vLLM's hybrid cache design?
-
-nano-vLLM has a much smaller scope. The minimal state manager makes lifecycle semantics explicit and keeps the implementation understandable. A generalized cache framework is justified later when stable state slots, CUDA Graph and admission control require it.
-
-### Q4. Why Eager first?
-
-It gives a trustworthy numerical reference and keeps mutable recurrent state visible. Kernel fusion and graph capture can then be validated against that reference independently.
-
-### Q5. What happens during preemption?
-
-Current nano-vLLM preemption discards KV and recomputes the sequence. GDN state follows the same policy: reset recurrent/conv state and rebuild it during prefill.
-
-### Q6. What is the next performance bottleneck?
-
-The Python recurrent scan dominates GDN prefill. The next optimization is a fused/chunked scan kernel, followed by GDN TP sharding and a contiguous recurrent-state pool.
-
-### Q7. How would you prove a fused kernel is correct?
-
-Run full-sequence and chunked reference scans, compare both outputs and final states, then compare layer outputs/logits against the eager reference over multiple lengths and dtypes.
+Each optimized stage should retain the eager path as its numerical oracle until
+the new path is validated.
 
 ---
 
-# Files to read in study order
+# 21. Interview summary
+
+> I extended nano-vLLM to support Qwen3.5's Full Attention + Gated DeltaNet
+> hybrid decoder. I first built an eager numerical reference, then separated
+> paged KV history from fixed-size recurrent state. My first prototype keyed GDN
+> state by request/layer in a Python dictionary because it made lifecycle bugs
+> easy to debug. During runtime integration I replaced that with a small
+> request-level StateSlotManager and per-layer contiguous state pools, because
+> the engine needed predictable GPU memory accounting, explicit admission
+> capacity and dense state addressing. I deliberately kept one ModelRunner and
+> avoided a generalized cache framework. Prefix caching and CUDA Graph remain
+> disabled until recurrent-state checkpoints and graph-safe GDN kernels exist.
+
+## Common follow-up: why not keep the dict?
+
+Because after proving correctness, the dict no longer matches the data plane:
+GPU state is dense, fixed-size and capacity constrained. A stable integer slot
+lets scheduler metadata stay on CPU while every GDN layer directly indexes its
+GPU state pool.
+
+## Common follow-up: why not merge recurrent state into BlockManager?
+
+KV grows with sequence length and is paged/shareable by token blocks. GDN state
+is fixed-size per active sequence and mutates every token. Their ownership and
+reuse semantics are different enough that sharing one allocator would obscure
+the important invariant.
+
+## Common follow-up: why no HybridModelRunner?
+
+The hybrid differences are small enough to express as runtime metadata and
+stateful-layer capabilities. A subclass would duplicate most of the runner and
+make the project harder to read.
+
+## Common follow-up: why eager first?
+
+It exposes state mutation directly and gives later fused kernels a numerical
+reference.
+
+---
+
+# 22. Study order
 
 ```text
 nanovllm/config.py
-    -> model detection and scope
+  -> hybrid detection and scope
+
+nanovllm/models/registry.py
+  -> model resolution without runner conditionals
 
 nanovllm/models/qwen3_5.py
-    -> model semantics and layer dispatch
+  -> model math and layer dispatch
 
-nanovllm/layers/gated_delta.py
-    -> reference Conv + recurrence
+nanovllm/layers/gated_delta_net.py
+  -> readable GDN recurrence + physical state pools
+
+nanovllm/engine/state_manager.py
+  -> logical request-slot ownership
 
 nanovllm/utils/context.py
-    -> packed request identity
+  -> state_slot metadata crossing runner -> layer boundary
 
 nanovllm/engine/model_runner.py
-    -> HybridModelRunner integration
-
-nanovllm/engine/gdn_state.py
-    -> state representation and lifecycle
+  -> KV/state memory accounting and packed metadata
 
 nanovllm/engine/scheduler.py
-nanovllm/engine/block_manager.py
-    -> prefix-cache safety policy
+  -> admission, chunked prefill, preemption and release
 
-tests/test_gdn_reference.py
-tests/test_gdn_state_manager.py
-    -> invariants
+tests/test_gated_delta_net.py
+tests/test_state_manager.py
+tests/test_scheduler.py
+tests/test_rotary_embedding.py
+  -> correctness invariants
+
+verify_qwen3_5.py
+  -> real-checkpoint integration validation
 ```
 
----
-
-## What should be emphasized in an interview?
-
-The strongest part of this work is not “I added another model class”.
-
-The engineering story is:
+The central engineering point is the cache-model transition:
 
 ```text
-I identified that hybrid recurrent inference invalidates a pure-KV cache assumption,
-separated model correctness / execution correctness / state-lifecycle correctness,
-built a small eager reference implementation,
-and left explicit upgrade points for kernel, TP, cache and graph optimizations.
+pure Transformer:
+request history ~= paged KV
+
+hybrid Qwen3.5:
+request history =
+    paged KV
+  + mutable Conv state
+  + mutable recurrent matrix
 ```
 
-That explanation demonstrates understanding of inference-engine architecture rather than only model transcription.
+Once that invariant is explicit, the rest of the runtime design becomes much
+easier to justify.
