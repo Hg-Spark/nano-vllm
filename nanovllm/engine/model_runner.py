@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import torch
 from torch.profiler import record_function
 
@@ -8,11 +10,12 @@ from nanovllm.engine.cache_runtime import (
     capture_gdn_state,
     restore_pending_states,
 )
+from nanovllm.engine.schedule import ScheduledChunk
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
 from nanovllm.layers.sampler import Sampler
 from nanovllm.models.qwen3_5_moe import Qwen3_5MoeForCausalLM
-from nanovllm.utils.context import reset_context
+from nanovllm.utils.context import use_context
 from nanovllm.utils.loader import load_model
 
 
@@ -25,11 +28,18 @@ def _resolve_dtype(config) -> torch.dtype:
     return dtype or torch.bfloat16
 
 
+@dataclass(slots=True)
+class BatchResult:
+    token_ids: list[int | None]
+    prefix_snapshots: dict[int, GDNStateSnapshot]
+
+
 class ModelRunner:
 
     def __init__(self, config: Config):
         self.config = config
         self.block_size = config.kvcache_block_size
+        self._closed = False
 
         torch.cuda.set_device(0)
         default_dtype = torch.get_default_dtype()
@@ -54,7 +64,15 @@ class ModelRunner:
             torch.set_default_dtype(default_dtype)
 
     def exit(self):
+        if self._closed:
+            return
+        self._closed = True
+
         torch.cuda.synchronize()
+        self.kv_cache = None
+        self.model = None
+        self.sampler = None
+        torch.cuda.empty_cache()
 
     def warmup_model(self):
         torch.cuda.empty_cache()
@@ -67,78 +85,57 @@ class ModelRunner:
         if seq_len <= 0:
             raise ValueError("warmup sequence length must be positive")
         seq = Sequence([0] * seq_len)
-        seq.num_scheduled_tokens = seq_len
-        self.run([seq], True)
+        self.run((ScheduledChunk(seq, 0, seq_len),), True)
         torch.cuda.empty_cache()
-
-    def capture_gdn_state(
-        self,
-        seq: Sequence,
-        prefix_tokens: int,
-    ) -> GDNStateSnapshot:
-        return capture_gdn_state(
-            self.model,
-            seq,
-            prefix_tokens,
-        )
 
     def _sample_indices(
         self,
-        seqs: list[Sequence],
+        chunks: tuple[ScheduledChunk, ...],
         is_prefill: bool,
     ) -> list[int]:
         if not is_prefill:
-            return list(range(len(seqs)))
+            return list(range(len(chunks)))
         return [
             idx
-            for idx, seq in enumerate(seqs)
-            if (
-                seq.committed_tokens
-                + seq.num_scheduled_tokens
-                == seq.num_tokens
-            )
+            for idx, chunk in enumerate(chunks)
+            if chunk.end == len(chunk.seq)
         ]
 
     @torch.inference_mode()
     def run(
         self,
-        seqs: list[Sequence],
+        chunks: tuple[ScheduledChunk, ...],
         is_prefill: bool,
-    ) -> list[int | None]:
-        try:
-            if not is_prefill and any(
-                seq.pending_state_snapshot is not None
-                for seq in seqs
-            ):
-                raise RuntimeError(
-                    "pending GDN prefix restore is valid only for prefill"
-                )
-            restore_pending_states(self.model, seqs)
-
-            if is_prefill:
-                input_ids, positions = prepare_prefill(
-                    seqs,
-                    self.block_size,
-                )
-            else:
-                input_ids, positions = prepare_decode(
-                    seqs,
-                    self.block_size,
-                )
-
-            profile_range = (
-                "nanovllm::prefill_model"
-                if is_prefill
-                else "nanovllm::decode_model"
+    ) -> BatchResult:
+        seqs = [chunk.seq for chunk in chunks]
+        if not is_prefill and any(
+            seq.pending_state_snapshot is not None
+            for seq in seqs
+        ):
+            raise RuntimeError(
+                "pending GDN prefix restore is valid only for prefill"
             )
+        restore_pending_states(self.model, seqs)
+
+        if is_prefill:
+            batch = prepare_prefill(chunks, self.block_size)
+        else:
+            batch = prepare_decode(chunks, self.block_size)
+
+        profile_range = (
+            "nanovllm::prefill_model"
+            if is_prefill
+            else "nanovllm::decode_model"
+        )
+        with use_context(batch.context):
             with record_function(profile_range):
                 hidden_states = self.model(
-                    input_ids,
-                    positions,
+                    batch.input_ids,
+                    batch.positions,
                 )
 
             sample_indices = self._sample_indices(
-                seqs,
+                chunks,
                 is_prefill,
             )
             results: list[int | None] = [None for _ in seqs]
@@ -164,6 +161,10 @@ class ModelRunner:
                     sampled,
                 ):
                     results[idx] = token_id
-            return results
-        finally:
-            reset_context()
+
+        prefix_snapshots = {
+            chunk.seq.seq_id: capture_gdn_state(self.model, chunk)
+            for chunk in chunks
+            if chunk.capture_snapshot
+        }
+        return BatchResult(results, prefix_snapshots)

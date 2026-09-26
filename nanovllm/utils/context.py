@@ -1,9 +1,11 @@
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 import torch
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class Context:
     is_prefill: bool = False
     cu_seqlens_q: torch.Tensor | None = None
@@ -18,42 +20,20 @@ class Context:
     prefill_q_offsets: tuple[int, ...] | None = None
 
 
-_CONTEXT = Context()
+_CONTEXT: ContextVar[Context] = ContextVar(
+    "nanovllm_context",
+    default=Context(),
+)
 
 
 def get_context() -> Context:
-    return _CONTEXT
+    return _CONTEXT.get()
 
 
-def set_context(
-    is_prefill: bool,
-    cu_seqlens_q=None,
-    cu_seqlens_k=None,
-    max_seqlen_q: int = 0,
-    max_seqlen_k: int = 0,
-    slot_mapping=None,
-    context_lens=None,
-    block_tables=None,
-    state_slots=None,
-    state_prefix_lens=None,
-    prefill_q_offsets=None,
-) -> None:
-    global _CONTEXT
-    _CONTEXT = Context(
-        is_prefill=is_prefill,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_k=cu_seqlens_k,
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_k=max_seqlen_k,
-        slot_mapping=slot_mapping,
-        context_lens=context_lens,
-        block_tables=block_tables,
-        state_slots=state_slots,
-        state_prefix_lens=state_prefix_lens,
-        prefill_q_offsets=prefill_q_offsets,
-    )
-
-
-def reset_context() -> None:
-    global _CONTEXT
-    _CONTEXT = Context()
+@contextmanager
+def use_context(context: Context):
+    token = _CONTEXT.set(context)
+    try:
+        yield
+    finally:
+        _CONTEXT.reset(token)

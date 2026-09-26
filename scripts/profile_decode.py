@@ -64,6 +64,37 @@ def parse_args():
     return parser.parse_args()
 
 
+def prepare_fixed_decode_batch(
+    engine: LLMEngine,
+    prompt: list[int],
+    sampling: SamplingParams,
+    batch_size: int,
+) -> None:
+    """Prefill requests independently, then expose one aligned decode batch."""
+    parked = []
+    for _ in range(batch_size):
+        engine.add_request(prompt, sampling)
+
+        while engine.scheduler.waiting:
+            scheduled = engine.scheduler.schedule()
+            if scheduled.decode_chunks:
+                raise RuntimeError(
+                    "fixed-batch setup unexpectedly scheduled decode work"
+                )
+            engine._run_batch(
+                scheduled.prefill_chunks,
+                True,
+            )
+
+        if len(engine.scheduler.running) != 1:
+            raise RuntimeError(
+                "fixed-batch setup expected exactly one completed prefill"
+            )
+        parked.append(engine.scheduler.running.pop())
+
+    engine.scheduler.running.extend(parked)
+
+
 def main():
     args = parse_args()
     if args.context_len <= 0:
@@ -72,6 +103,10 @@ def main():
         raise ValueError("batch-size must be positive")
     if args.profile_steps <= 0:
         raise ValueError("profile-steps must be positive")
+    if args.max_batched_tokens < args.batch_size:
+        raise ValueError(
+            "fixed decode batch requires max-batched-tokens >= batch-size"
+        )
     if not 0.0 <= args.attention_threshold <= 1.0:
         raise ValueError("attention-threshold must be in [0, 1]")
 
@@ -86,6 +121,7 @@ def main():
         max_num_batched_tokens=args.max_batched_tokens,
         max_model_len=args.context_len + max_tokens + 1,
         kv_cache_dtype=args.kv_cache_dtype,
+        max_prefix_cache_entries=0,
     )
     sampling = SamplingParams(
         temperature=0.0,
@@ -95,19 +131,24 @@ def main():
     prompt = [args.token_id] * args.context_len
 
     try:
-        for _ in range(args.batch_size):
-            engine.add_request(prompt, sampling)
-
-        # Fill each request's hybrid history before measuring decode. Chunked
-        # prefill is allowed here; only the profile window must be decode-only.
-        while engine.scheduler.waiting:
-            engine.step()
+        prepare_fixed_decode_batch(
+            engine,
+            prompt,
+            sampling,
+            args.batch_size,
+        )
 
         for _ in range(args.warmup_steps):
             _, stats = engine.step()
             if stats.prefill_tokens:
                 raise RuntimeError(
                     "warmup unexpectedly contained prefill work"
+                )
+            if stats.decode_tokens != args.batch_size:
+                raise RuntimeError(
+                    "warmup decode batch drifted: "
+                    f"expected={args.batch_size}, "
+                    f"actual={stats.decode_tokens}"
                 )
 
         torch.cuda.synchronize()
@@ -128,6 +169,12 @@ def main():
                 if stats.prefill_tokens:
                     raise RuntimeError(
                         "profile window unexpectedly contained prefill work"
+                    )
+                if stats.decode_tokens != args.batch_size:
+                    raise RuntimeError(
+                        "profile decode batch drifted: "
+                        f"expected={args.batch_size}, "
+                        f"actual={stats.decode_tokens}"
                     )
             end_event.record()
             torch.cuda.synchronize()

@@ -120,8 +120,8 @@ finally:
 | `kv_cache_dtype` | `"auto"` | `auto` 跟随模型 dtype；`fp8_e4m3` 使用 FP8 KV 存储 |
 | `kv_cache_k_scale` | `1.0` | FP8 K 的全局标量缩放系数，必须有限且大于零 |
 | `kv_cache_v_scale` | `1.0` | FP8 V 的全局标量缩放系数，必须有限且大于零 |
-| `tensor_parallel_size` | `1` | 当前仅支持 `1` |
-| `enforce_eager` | `True` | 当前必须为 `True` |
+
+当前运行时固定为单卡 eager，这属于实现边界，不再作为可配置开关暴露。
 
 物理 KV 块数由启动时的显存预算推导，不是构造参数。未知参数会触发 `unsupported runtime options`，不能直接照搬其他推理引擎的配置。
 

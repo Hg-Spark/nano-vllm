@@ -2,8 +2,16 @@ from dataclasses import dataclass
 
 import torch
 
+from nanovllm.engine.schedule import ScheduledChunk
 from nanovllm.engine.sequence import Sequence
-from nanovllm.utils.context import set_context
+from nanovllm.utils.context import Context
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedBatch:
+    input_ids: torch.Tensor
+    positions: torch.Tensor
+    context: Context
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,16 +31,16 @@ class PrefillBatchLayout:
 
 
 def build_prefill_batch_layout(
-    seqs: list[Sequence],
+    chunks: tuple[ScheduledChunk, ...],
     block_size: int,
 ) -> PrefillBatchLayout:
     """Pack variable-length chunks while preserving request alignment."""
-    if not seqs:
+    if not chunks:
         raise ValueError("prefill batch must not be empty")
     if block_size <= 0:
         raise ValueError("block_size must be positive")
 
-    has_block_tables = [bool(seq.block_table) for seq in seqs]
+    has_block_tables = [bool(chunk.seq.block_table) for chunk in chunks]
     if any(has_block_tables) and not all(has_block_tables):
         raise RuntimeError(
             "prefill batch cannot mix allocated and unallocated requests"
@@ -50,15 +58,15 @@ def build_prefill_batch_layout(
     max_seqlen_k = 0
     use_block_tables = False
 
-    for seq in seqs:
-        if seq.num_scheduled_tokens <= 0:
+    for chunk in chunks:
+        seq = chunk.seq
+        start = chunk.start
+        end = chunk.end
+        seqlen_q = chunk.num_tokens
+        if start != seq.committed_tokens:
             raise RuntimeError(
-                f"sequence {seq.seq_id} has no scheduled prefill tokens"
+                f"sequence {seq.seq_id} scheduled prefix changed"
             )
-
-        start = seq.committed_tokens
-        seqlen_q = seq.num_scheduled_tokens
-        end = start + seqlen_q
         if end > seq.num_tokens:
             raise RuntimeError(
                 f"sequence {seq.seq_id} prefill range [{start}, {end}) "
@@ -150,17 +158,18 @@ def prepare_block_tables(seqs: list[Sequence]) -> torch.Tensor:
 
 
 def prepare_prefill(
-    seqs: list[Sequence],
+    chunks: tuple[ScheduledChunk, ...],
     block_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    layout = build_prefill_batch_layout(seqs, block_size)
+) -> PreparedBatch:
+    layout = build_prefill_batch_layout(chunks, block_size)
+    seqs = [chunk.seq for chunk in chunks]
     block_tables = (
         prepare_block_tables(seqs)
         if layout.use_block_tables
         else None
     )
 
-    set_context(
+    context = Context(
         is_prefill=True,
         cu_seqlens_q=torch.tensor(
             layout.q_offsets,
@@ -185,27 +194,34 @@ def prepare_prefill(
         prefill_q_offsets=layout.q_offsets,
     )
 
-    return (
-        torch.tensor(
+    return PreparedBatch(
+        input_ids=torch.tensor(
             layout.input_ids,
             dtype=torch.int64,
             pin_memory=True,
         ).cuda(non_blocking=True),
-        torch.tensor(
+        positions=torch.tensor(
             layout.positions,
             dtype=torch.int64,
             pin_memory=True,
         ).cuda(non_blocking=True),
+        context=context,
     )
 
 
 def prepare_decode(
-    seqs: list[Sequence],
+    chunks: tuple[ScheduledChunk, ...],
     block_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> PreparedBatch:
     seen_slots: set[int] = set()
-    for seq in seqs:
-        if seq.committed_tokens != len(seq) - 1:
+    seqs = [chunk.seq for chunk in chunks]
+    for chunk in chunks:
+        seq = chunk.seq
+        if (
+            chunk.start != seq.committed_tokens
+            or chunk.end != len(seq)
+            or chunk.num_tokens != 1
+        ):
             raise RuntimeError(
                 f"sequence {seq.seq_id} decode prefix mismatch: "
                 f"committed={seq.committed_tokens}, "
@@ -232,7 +248,7 @@ def prepare_decode(
         for seq in seqs
     ]
 
-    set_context(
+    context = Context(
         is_prefill=False,
         slot_mapping=torch.tensor(
             slot_mapping,
@@ -248,15 +264,16 @@ def prepare_decode(
         state_slots=state_slots,
         state_prefix_lens=state_prefix_lens,
     )
-    return (
-        torch.tensor(
+    return PreparedBatch(
+        input_ids=torch.tensor(
             input_ids,
             dtype=torch.int64,
             pin_memory=True,
         ).cuda(non_blocking=True),
-        torch.tensor(
+        positions=torch.tensor(
             positions,
             dtype=torch.int64,
             pin_memory=True,
         ).cuda(non_blocking=True),
+        context=context,
     )

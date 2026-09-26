@@ -1,10 +1,7 @@
-from nanovllm.engine.block_manager import BlockManager
+from nanovllm.engine.hybrid_resources import HybridResources
 from nanovllm.engine.prefix_cache import JointPrefixCache, JointPrefixEntry
 from nanovllm.engine.sequence import Sequence
-from nanovllm.engine.state_manager import (
-    GDNStateSnapshot,
-    StateSlotManager,
-)
+from nanovllm.engine.state_manager import GDNStateSnapshot
 
 
 class PrefixRuntime:
@@ -14,20 +11,19 @@ class PrefixRuntime:
         self,
         max_entries: int,
         block_size: int,
-        block_manager: BlockManager,
-        state_manager: StateSlotManager,
+        resources: HybridResources,
     ):
         self.block_size = block_size
-        self.block_manager = block_manager
-        self.state_manager = state_manager
+        self.resources = resources
+        self.block_manager = resources.block_manager
         self.cache = JointPrefixCache(max_entries)
-
-    def __len__(self) -> int:
-        return len(self.cache)
 
     @property
     def enabled(self) -> bool:
         return self.cache.max_entries > 0
+
+    def entries(self) -> tuple[JointPrefixEntry, ...]:
+        return self.cache.entries()
 
     def evict_one(self) -> bool:
         entry = self.cache.pop_lru()
@@ -53,41 +49,32 @@ class PrefixRuntime:
         )
         if entry is None:
             return False
-        if not self.state_manager.can_allocate(seq):
+        if not self.resources.state_manager.can_allocate(seq):
             return False
 
-        self.state_manager.allocate(seq)
-        try:
-            self.block_manager.attach_shared_prefix(
-                seq,
-                entry.block_ids,
-                entry.num_tokens,
-            )
-        except Exception:
-            self.state_manager.deallocate(seq)
-            raise
-
-        seq.committed_tokens = entry.num_tokens
-        seq.pending_state_snapshot = entry.state_snapshot
+        self.resources.restore_prefix(
+            seq,
+            entry.block_ids,
+            entry.num_tokens,
+            entry.state_snapshot,
+        )
         return True
 
-    def should_snapshot_after_step(self, seq: Sequence) -> bool:
+    def should_snapshot_after_step(
+        self,
+        seq: Sequence,
+        end: int,
+    ) -> bool:
         if not self.enabled:
             return False
-        if seq.num_scheduled_tokens <= 0 or seq.state_slot < 0:
+        if end <= seq.committed_tokens or seq.state_slot < 0:
+            return False
+        if end > seq.num_prompt_tokens:
+            return False
+        if end % self.block_size != 0:
             return False
 
-        target_tokens = (
-            seq.committed_tokens + seq.num_scheduled_tokens
-        )
-        if target_tokens <= 0:
-            return False
-        if target_tokens > seq.num_prompt_tokens:
-            return False
-        if target_tokens % self.block_size != 0:
-            return False
-
-        key = tuple(seq.token_ids[:target_tokens])
+        key = tuple(seq.token_ids[:end])
         return not self.cache.contains(key)
 
     def publish(

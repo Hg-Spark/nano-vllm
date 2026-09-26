@@ -39,6 +39,9 @@ class JointPrefixCache:
     def contains(self, token_ids: tuple[int, ...]) -> bool:
         return token_ids in self._entries
 
+    def entries(self) -> tuple[JointPrefixEntry, ...]:
+        return tuple(self._entries.values())
+
     def longest_match(
         self,
         token_ids: list[int] | tuple[int, ...],

@@ -28,7 +28,7 @@ Gated DeltaNet  → 卷积状态 + 循环矩阵，每个活动请求独占状态
 | 方面 | 当前实现 |
 | --- | --- |
 | 模型 | Qwen3.5-MoE 文本部分，包括 `Qwen3.5-35B-A3B` 对应的模型结构 |
-| 权重与执行 | 非量化 safetensors；BF16 为参考验证路径；单 GPU，`tensor_parallel_size=1`，eager |
+| 权重与执行 | 非量化 safetensors；BF16 为参考验证路径；仅支持单 GPU eager 执行 |
 | 模型层 | 带门控的 Full Attention、局部维度 RoPE、Gated DeltaNet、Top-K 路由与带门控的共享专家 |
 | 调度 | 变长打包 prefill、连续批处理、分块 prefill、decode 优先的共享 token 预算 |
 | 状态管理 | KV/GDN 联合抢占、执行失败后重算、有容量上限的联合前缀缓存 |

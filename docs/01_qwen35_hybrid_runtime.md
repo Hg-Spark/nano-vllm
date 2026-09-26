@@ -109,13 +109,14 @@ KV 的有效前缀长度 = GDN 的有效前缀长度 = Sequence.committed_tokens
 
 | 字段 | 作用 |
 | --- | --- |
-| `token_ids` / `num_tokens` | 已知的输入与生成 token；最后一个生成 token 可能尚未参与前向 |
+| `token_ids` | 已知的输入与生成 token；`num_tokens` 和 `last_token` 由它直接取得 |
 | `num_prompt_tokens` | 原始输入长度，用于区分 prompt 和 completion |
 | `committed_tokens` | 两种历史共同表示的已提交长度 |
-| `num_scheduled_tokens` | 本轮预定执行的 token 数，尚未提交 |
 | `block_table` | 请求的逻辑块到物理 KV 块的映射 |
 | `state_slot` | GDN 活动槽号，`-1` 表示尚未拥有槽位 |
 | `pending_state_snapshot` | 命中前缀后，等待写入设备槽位的 GDN 快照 |
+
+本轮安排由 [ScheduledChunk](../nanovllm/engine/schedule.py) 独立记录 `[start,end)`，执行成功后 `committed_tokens` 才推进到 `end`。
 
 例如，长度为 3 的 prompt 完成 prefill 并生成第一个 token 后，`num_tokens=4`，但 `committed_tokens=3`。下一个 decode 会把第 4 个 token 送进模型，再生成第 5 个。这里的“少一个”是自回归生成的正常语义。
 
@@ -124,8 +125,9 @@ KV 的有效前缀长度 = GDN 的有效前缀长度 = Sequence.committed_tokens
 ```mermaid
 flowchart TD
     A[LLMEngine：请求与生成循环] --> B[Scheduler：安排工作和资源]
-    B --> C[BlockManager：KV 块引用]
-    B --> D[StateSlotManager：GDN 槽位所有权]
+    B --> R[HybridResources：联合预留与释放]
+    R --> C[BlockManager：KV 块引用]
+    R --> D[StateSlotManager：GDN 槽位所有权]
     B --> E[PrefixRuntime：联合前缀生命周期]
     B --> F[ModelRunner：执行与采样]
     F --> G[batch.py：构造本轮输入]
@@ -144,12 +146,14 @@ flowchart TD
 | --- | --- |
 | [llm_engine.py](../nanovllm/engine/llm_engine.py) | API、请求长度检查、生成循环、执行异常的恢复入口 |
 | [scheduler.py](../nanovllm/engine/scheduler.py) | 队列、预算、资源预留、抢占与逻辑提交 |
-| [batch.py](../nanovllm/engine/batch.py) | 将请求列表转成打包输入、位置和缓存索引 |
+| [schedule.py](../nanovllm/engine/schedule.py) | 保存本轮每个请求的执行区间和快照需求 |
+| [hybrid_resources.py](../nanovllm/engine/hybrid_resources.py) | 联合预留、恢复与释放请求的 KV/GDN 资源 |
+| [batch.py](../nanovllm/engine/batch.py) | 将本轮区间转成打包输入、位置和缓存索引 |
 | [context.py](../nanovllm/utils/context.py) | 将单次 forward 的元数据传给模型层 |
 | [cache_runtime.py](../nanovllm/engine/cache_runtime.py) | 分配物理 KV/GDN 张量，捕获和恢复快照 |
 | [model_runner.py](../nanovllm/engine/model_runner.py) | 构造模型、加载、预热、前向与采样 |
 
-`Context` 是当前批次的临时元数据，不拥有长期请求状态；`ModelRunner.run()` 在 `finally` 中清理它。当前是同步的单运行时路径，不应把这个上下文当作多线程并发引擎的隔离机制。
+`Context` 是当前批次的临时元数据，不拥有长期请求状态。`batch.py` 将它与输入张量一起返回；`ModelRunner.run()` 在作用域内安装上下文，退出作用域时恢复原值。
 
 ## 5. 变长打包到底打包了什么
 

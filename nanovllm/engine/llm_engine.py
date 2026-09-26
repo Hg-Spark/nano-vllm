@@ -7,9 +7,9 @@ from transformers import AutoTokenizer, GenerationConfig
 
 from nanovllm.config import Config
 from nanovllm.engine.model_runner import ModelRunner
+from nanovllm.engine.schedule import ScheduledChunk
 from nanovllm.engine.scheduler import Scheduler
 from nanovllm.engine.sequence import Sequence
-from nanovllm.engine.state_manager import GDNStateSnapshot
 from nanovllm.sampling_params import SamplingParams
 
 
@@ -45,6 +45,10 @@ class LLMEngine:
         self.max_model_len = config.max_model_len
 
         self.model_runner = ModelRunner(config)
+        self.max_kv_tokens = (
+            self.model_runner.num_kvcache_blocks
+            * config.kvcache_block_size
+        )
         self.tokenizer = AutoTokenizer.from_pretrained(
             config.model,
             use_fast=True,
@@ -79,19 +83,26 @@ class LLMEngine:
             self.model_runner.num_kvcache_blocks,
         )
         self._closed = False
-        atexit.register(self.exit)
+        self._atexit_handler = self.exit
+        atexit.register(self._atexit_handler)
 
     def exit(self):
         if self._closed:
             return
         self._closed = True
+
+        handler = self._atexit_handler
+        self._atexit_handler = None
+        if handler is not None:
+            atexit.unregister(handler)
+
         self.model_runner.exit()
 
-    def add_request(
+    def _prepare_request(
         self,
         prompt: str | list[int],
         sampling_params: SamplingParams,
-    ):
+    ) -> Sequence:
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
 
@@ -109,57 +120,58 @@ class LLMEngine:
                 f"max_model_len={self.max_model_len}"
             )
 
+        required_kv_tokens = (
+            prompt_len
+            + max(0, sampling_params.max_tokens - 1)
+        )
+        if required_kv_tokens > self.max_kv_tokens:
+            raise ValueError(
+                "request exceeds physical KV cache capacity: "
+                f"required={required_kv_tokens}, "
+                f"capacity={self.max_kv_tokens}"
+            )
+
+        return Sequence(prompt, sampling_params)
+
+    def add_request(
+        self,
+        prompt: str | list[int],
+        sampling_params: SamplingParams,
+    ):
         self.scheduler.add(
-            Sequence(prompt, sampling_params)
+            self._prepare_request(prompt, sampling_params)
         )
 
     def _run_batch(
         self,
-        seqs: list[Sequence],
+        chunks: tuple[ScheduledChunk, ...],
         is_prefill: bool,
     ) -> tuple[list[tuple[int, list[int]]], float]:
-        if not seqs:
+        if not chunks:
             return [], 0.0
 
         start = perf_counter()
-        prefix_snapshots: dict[int, GDNStateSnapshot] = {}
         try:
-            token_ids = self.model_runner.run(
-                seqs,
+            result = self.model_runner.run(
+                chunks,
                 is_prefill,
             )
-            if is_prefill:
-                for seq in seqs:
-                    if not self.scheduler.prefix_runtime.should_snapshot_after_step(
-                        seq
-                    ):
-                        continue
-                    target_tokens = (
-                        seq.committed_tokens
-                        + seq.num_scheduled_tokens
-                    )
-                    prefix_snapshots[seq.seq_id] = (
-                        self.model_runner.capture_gdn_state(
-                            seq,
-                            target_tokens,
-                        )
-                    )
         except Exception:
             # KV/GDN tensors may have been mutated before logical commit.
             # Drop both request-owned histories; any previously published
             # joint-prefix entry remains independently pinned and valid.
-            self.scheduler.recover_failed_step(seqs)
+            self.scheduler.recover_failed_step(chunks)
             raise
         elapsed = perf_counter() - start
         self.scheduler.postprocess(
-            seqs,
-            token_ids,
+            chunks,
+            result.token_ids,
             is_prefill,
-            prefix_snapshots,
+            result.prefix_snapshots,
         )
         outputs = [
             (seq.seq_id, seq.completion_token_ids)
-            for seq in seqs
+            for seq in (chunk.seq for chunk in chunks)
             if seq.is_finished
         ]
         return outputs, elapsed
@@ -173,21 +185,21 @@ class LLMEngine:
 
         try:
             decode_outputs, stats.decode_seconds = self._run_batch(
-                scheduled.decode_seqs,
+                scheduled.decode_chunks,
                 False,
             )
         except Exception:
             # Prefill reservations for this scheduler step have not executed
             # yet. Drop them too, otherwise a final prompt chunk may remain
             # marked RUNNING with KV/state capacity that never received data.
-            if scheduled.prefill_seqs:
+            if scheduled.prefill_chunks:
                 self.scheduler.recover_failed_step(
-                    scheduled.prefill_seqs
+                    scheduled.prefill_chunks
                 )
             raise
 
         prefill_outputs, stats.prefill_seconds = self._run_batch(
-            scheduled.prefill_seqs,
+            scheduled.prefill_chunks,
             True,
         )
         return decode_outputs + prefill_outputs, stats
@@ -201,12 +213,12 @@ class LLMEngine:
         sampling_params: SamplingParams | list[SamplingParams],
         use_tqdm: bool = True,
     ) -> list[dict]:
-        pbar = tqdm(
-            total=len(prompts),
-            desc="Generating",
-            dynamic_ncols=True,
-            disable=not use_tqdm,
-        )
+        if not self.scheduler.is_finished():
+            raise RuntimeError(
+                "generate requires an idle engine; "
+                "use add_request()/step() for continuous batching"
+            )
+
         if not isinstance(sampling_params, list):
             sampling_params = [
                 sampling_params
@@ -216,9 +228,19 @@ class LLMEngine:
                 "sampling_params length must match prompts"
             )
 
-        for prompt, sp in zip(prompts, sampling_params):
-            self.add_request(prompt, sp)
+        seqs = [
+            self._prepare_request(prompt, sp)
+            for prompt, sp in zip(prompts, sampling_params)
+        ]
+        for seq in seqs:
+            self.scheduler.add(seq)
 
+        pbar = tqdm(
+            total=len(prompts),
+            desc="Generating",
+            dynamic_ncols=True,
+            disable=not use_tqdm,
+        )
         outputs = {}
         prefill_throughput = 0.0
         decode_throughput = 0.0

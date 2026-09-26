@@ -141,18 +141,23 @@ def capture_nano_layers(
         )
         llm.scheduler.add(seq)
         scheduled = llm.scheduler.schedule()
-        if scheduled.decode_seqs or scheduled.prefill_seqs != [seq]:
+        if (
+            scheduled.decode_chunks
+            or len(scheduled.prefill_chunks) != 1
+            or scheduled.prefill_chunks[0].seq is not seq
+        ):
             raise RuntimeError(
                 "layer probe requires one full prefill batch"
             )
-        if seq.num_scheduled_tokens != len(input_ids):
+        chunk = scheduled.prefill_chunks[0]
+        if chunk.num_tokens != len(input_ids):
             raise RuntimeError(
                 "layer probe prompt was chunked unexpectedly: "
-                f"scheduled={seq.num_scheduled_tokens}, "
+                f"scheduled={chunk.num_tokens}, "
                 f"prompt={len(input_ids)}"
             )
         llm.model_runner.run(
-            scheduled.prefill_seqs,
+            scheduled.prefill_chunks,
             is_prefill=True,
         )
     finally:

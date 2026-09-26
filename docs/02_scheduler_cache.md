@@ -6,7 +6,7 @@
 
 ## 1. 一轮调度与一次前向不同
 
-[Scheduler.schedule()](../nanovllm/engine/scheduler.py)返回 `SchedulerOutput`，里面分别保存 `decode_seqs` 和 `prefill_seqs`。两者共享本轮的 `max_num_batched_tokens` 和请求数量限制。
+[Scheduler.schedule()](../nanovllm/engine/scheduler.py)返回 `SchedulerOutput`，分别保存 `decode_chunks` 和 `prefill_chunks`。每个不可变的 `ScheduledChunk` 给出请求及本轮 `[start,end)`；两类工作共享 `max_num_batched_tokens` 和请求数量限制。
 
 调度顺序为：
 
@@ -56,7 +56,7 @@ KV 只增长到容纳 `end` 所需的块数；GDN 始终沿用该请求的同一
 
 第 3 轮后，`num_tokens=601`，`committed_tokens=600`。部分 chunk 不会生成可交给用户的 token；只有所有已知输入都处理完，`ModelRunner._sample_indices()` 才选中该请求采样。
 
-调度器遇到一个尚未完成的 chunk 后会停止继续从等待队列打包，避免把同一请求存在依赖关系的下一块放入当前 forward。因此它仍可能产生等待队列的队首阻塞。
+同一请求本轮只安排一个 chunk；调度器继续扫描其他等待请求。暂时缺少资源的请求会轮转到队尾，本轮仍可能安排后续请求。
 
 ## 3. 预留、执行、提交是三个阶段
 
@@ -70,7 +70,7 @@ flowchart LR
 
 ### 预留失败：撤销本次新增资源
 
-`Scheduler._reserve_prefill_resources()`记住原有 KV 块数，以及 GDN 槽是否为本次新分配。如果后续分配失败：
+`HybridResources.reserve()`记住原有 KV 块数，以及 GDN 槽是否为本次新分配。如果后续分配失败：
 
 - 只释放新增加的 KV 尾部；
 - 只释放本次新拿到的 GDN 槽；
@@ -80,11 +80,10 @@ flowchart LR
 
 ### 执行成功：推进一个共同边界
 
-`postprocess()`先检查传入快照的类型和 token 边界，然后推进：
+`postprocess()`先检查整个批次的采样结果、快照及计划边界，然后推进：
 
 ```text
-committed_tokens += num_scheduled_tokens
-num_scheduled_tokens = 0
+committed_tokens = ScheduledChunk.end
 ```
 
 若需要发布前缀，先发布该边界的条目，再追加本次采样得到的 token。因为新生成的 token 尚未执行，它不属于刚提交的 KV/GDN 前缀。
@@ -97,11 +96,11 @@ decode 缺少 KV 容量时，调度器先尝试淘汰前缀缓存条目。若仍
 
 ```text
 从原队列移除请求
-  → 清空本轮安排与待恢复快照
+  → 清空待恢复快照
   → 释放该请求的 KV 引用
   → 释放 GDN 槽所有权
   → committed_tokens = 0
-  → 放回等待队列前部
+  → 放回等待队列尾部
 ```
 
 `token_ids` 保留，包括已经生成的 token。重新调度时，可以恢复可用的联合前缀，然后重算剩余已知 token；没有命中则从头重算。
@@ -110,7 +109,7 @@ GDN 循环更新通常不能仅凭当前矩阵恢复任意更早状态，因此�
 
 ## 5. 执行失败与预留失败的区别
 
-模型前向或快照捕获抛出异常时，物理 KV/GDN 张量可能已经更新了一部分。只把 `num_scheduled_tokens` 清零不能撤销这些写入。
+模型前向或快照捕获抛出异常时，物理 KV/GDN 张量可能已经更新了一部分。丢弃本轮计划也不能撤销这些写入。
 
 [LLMEngine._run_batch()](../nanovllm/engine/llm_engine.py)在这类异常中调用 `recover_failed_step()`，联合释放可能已被修改的请求历史，重置边界，并将异常继续抛给调用方。
 
@@ -129,7 +128,7 @@ GDN 循环更新通常不能仅凭当前矩阵恢复任意更早状态，因此�
 | `num_tokens` | 给出共同的历史边界 |
 | `GDNStateSnapshot` | 保存同一边界处所有 GDN 层的卷积和循环状态 |
 
-[PrefixRuntime](../nanovllm/engine/prefix_runtime.py)负责 `try_restore()`、`should_snapshot_after_step()`、`publish()`、`evict_one()`，把前缀生命周期与调度队列策略分开。
+[PrefixRuntime](../nanovllm/engine/prefix_runtime.py)负责前缀命中、快照条件、发布和淘汰；[HybridResources](../nanovllm/engine/hybrid_resources.py)负责请求的联合预留、恢复和释放。调度器决定何时调用它们，并把快照需求写入本轮计划。
 
 ### 什么时候能发布
 

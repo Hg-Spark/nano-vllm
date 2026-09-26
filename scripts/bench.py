@@ -101,18 +101,18 @@ def run_benchmark(
         step_prefill_tokens = scheduled.prefill_tokens
         steps += 1
 
-        if scheduled.decode_seqs:
+        if scheduled.decode_chunks:
             torch.cuda.synchronize()
             phase_start = time.perf_counter()
             try:
                 llm._run_batch(
-                    scheduled.decode_seqs,
+                    scheduled.decode_chunks,
                     False,
                 )
             except Exception:
-                if scheduled.prefill_seqs:
+                if scheduled.prefill_chunks:
                     llm.scheduler.recover_failed_step(
-                        scheduled.prefill_seqs
+                        scheduled.prefill_chunks
                     )
                 raise
             torch.cuda.synchronize()
@@ -121,11 +121,11 @@ def run_benchmark(
             decode_seconds += phase_end - phase_start
             record_request_times(phase_end)
 
-        if scheduled.prefill_seqs:
+        if scheduled.prefill_chunks:
             torch.cuda.synchronize()
             phase_start = time.perf_counter()
             llm._run_batch(
-                scheduled.prefill_seqs,
+                scheduled.prefill_chunks,
                 True,
             )
             torch.cuda.synchronize()

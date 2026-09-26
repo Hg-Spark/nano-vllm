@@ -81,16 +81,34 @@ class BlockManager:
         self.retain_blocks(block_ids)
         seq.block_table.extend(block_ids)
 
+    def additional_blocks_needed(
+        self,
+        seq: Sequence,
+        target_tokens: int,
+    ) -> int:
+        """Return extra KV blocks needed to back target_tokens."""
+        if target_tokens < 0:
+            raise ValueError("target_tokens must be non-negative")
+        required = self._required_blocks(target_tokens)
+        return max(0, required - len(seq.block_table))
+
     def max_schedulable_tokens(
         self,
         seq: Sequence,
         requested_tokens: int,
+        reserved_free_blocks: int = 0,
     ) -> int:
-        """Return how many new tokens can be backed by current + free blocks."""
+        """Return tokens backed without consuming reserved free blocks."""
         if requested_tokens <= 0:
             return 0
+        if reserved_free_blocks < 0:
+            raise ValueError("reserved_free_blocks must be non-negative")
+        usable_free_blocks = max(
+            0,
+            len(self.free_block_ids) - reserved_free_blocks,
+        )
         max_backed_tokens = (
-            len(seq.block_table) + len(self.free_block_ids)
+            len(seq.block_table) + usable_free_blocks
         ) * self.block_size
         available = max_backed_tokens - seq.committed_tokens
         return max(0, min(requested_tokens, available))

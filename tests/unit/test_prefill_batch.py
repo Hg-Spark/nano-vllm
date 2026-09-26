@@ -1,6 +1,7 @@
 import unittest
 
 from nanovllm.engine.batch import build_prefill_batch_layout
+from nanovllm.engine.schedule import ScheduledChunk
 from nanovllm.engine.sequence import Sequence
 
 
@@ -11,15 +12,16 @@ class PrefillBatchLayoutTest(unittest.TestCase):
         first.block_table = [7, 9]
         first.state_slot = 4
         first.committed_tokens = 2
-        first.num_scheduled_tokens = 3
 
         second = Sequence([10, 11])
         second.block_table = [3]
         second.state_slot = 1
-        second.num_scheduled_tokens = 2
 
         layout = build_prefill_batch_layout(
-            [first, second],
+            (
+                ScheduledChunk(first, 2, 5),
+                ScheduledChunk(second, 0, 2),
+            ),
             block_size=4,
         )
 
@@ -47,15 +49,16 @@ class PrefillBatchLayoutTest(unittest.TestCase):
         first = Sequence([1, 2])
         first.block_table = [1]
         first.state_slot = 0
-        first.num_scheduled_tokens = 2
 
         second = Sequence([3, 4, 5])
         second.block_table = [2]
         second.state_slot = 1
-        second.num_scheduled_tokens = 3
 
         layout = build_prefill_batch_layout(
-            [first, second],
+            (
+                ScheduledChunk(first, 0, 2),
+                ScheduledChunk(second, 0, 3),
+            ),
             block_size=4,
         )
 
@@ -67,10 +70,9 @@ class PrefillBatchLayoutTest(unittest.TestCase):
 
     def test_warmup_without_persistent_caches_is_supported(self):
         seq = Sequence([0, 0, 0])
-        seq.num_scheduled_tokens = 3
 
         layout = build_prefill_batch_layout(
-            [seq],
+            (ScheduledChunk(seq, 0, 3),),
             block_size=4,
         )
 
@@ -84,33 +86,33 @@ class PrefillBatchLayoutTest(unittest.TestCase):
         first = Sequence([1])
         first.block_table = [0]
         first.state_slot = 2
-        first.num_scheduled_tokens = 1
 
         second = Sequence([2])
         second.block_table = [1]
         second.state_slot = 2
-        second.num_scheduled_tokens = 1
 
         with self.assertRaisesRegex(
             RuntimeError,
             "duplicate state slot",
         ):
             build_prefill_batch_layout(
-                [first, second],
+                (
+                    ScheduledChunk(first, 0, 1),
+                    ScheduledChunk(second, 0, 1),
+                ),
                 block_size=4,
             )
 
     def test_state_slot_without_kv_blocks_is_rejected(self):
         seq = Sequence([1, 2, 3])
         seq.state_slot = 0
-        seq.num_scheduled_tokens = 3
 
         with self.assertRaisesRegex(
             RuntimeError,
             "state slot without KV blocks",
         ):
             build_prefill_batch_layout(
-                [seq],
+                (ScheduledChunk(seq, 0, 3),),
                 block_size=4,
             )
 

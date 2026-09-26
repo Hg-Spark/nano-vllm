@@ -176,8 +176,6 @@ class Qwen35MoeTest(unittest.TestCase):
             config = Config("/tmp/qwen35-moe")
 
         self.assertIs(config.text_config, self.config)
-        self.assertEqual(config.tensor_parallel_size, 1)
-        self.assertTrue(config.enforce_eager)
 
     def test_sequence_capacity_is_single_active_request_limit(self):
         root = SimpleNamespace(

@@ -4,6 +4,7 @@ import torch
 from torch.profiler import record_function
 
 from nanovllm.config import Config
+from nanovllm.engine.schedule import ScheduledChunk
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
 
@@ -115,20 +116,16 @@ def allocate_runtime_caches(
 
 def capture_gdn_state(
     model,
-    seq: Sequence,
-    prefix_tokens: int,
+    chunk: ScheduledChunk,
 ) -> GDNStateSnapshot:
+    seq = chunk.seq
     if seq.state_slot < 0:
         raise RuntimeError(
             f"sequence {seq.seq_id} has no state slot to snapshot"
         )
-    physical_prefix = (
-        seq.committed_tokens + seq.num_scheduled_tokens
-    )
-    if prefix_tokens != physical_prefix:
+    if chunk.start != seq.committed_tokens or chunk.end > len(seq):
         raise RuntimeError(
-            f"sequence {seq.seq_id} snapshot boundary mismatch: "
-            f"requested={prefix_tokens}, physical={physical_prefix}"
+            f"sequence {seq.seq_id} snapshot boundary mismatch"
         )
 
     with record_function("nanovllm::gdn_snapshot_d2h"):
@@ -138,7 +135,7 @@ def capture_gdn_state(
         )
 
     return GDNStateSnapshot(
-        num_tokens=prefix_tokens,
+        num_tokens=chunk.end,
         layers=layers,
     )
 

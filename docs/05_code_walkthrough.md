@@ -13,6 +13,7 @@
 | 3 | [Config](../nanovllm/config.py) | 支持范围、参数检查与上下文上限 |
 | 4 | [Sequence](../nanovllm/engine/sequence.py) | 已知 token 和已提交历史的区别 |
 | 5 | [Scheduler.schedule()](../nanovllm/engine/scheduler.py) | 本轮安排多少 token，资源从哪里来 |
+| 5a | [ScheduledChunk](../nanovllm/engine/schedule.py) | 每个请求本轮的 `[start,end)` 与快照需求 |
 | 6 | [ModelRunner.run()](../nanovllm/engine/model_runner.py) | 待恢复状态、prefill/decode 分支、采样位置 |
 | 7 | [batch.py](../nanovllm/engine/batch.py) | token、绝对位置、块表、query 偏移与状态槽的对齐 |
 | 8 | [模型 forward](../nanovllm/models/qwen3_5_moe.py) | embedding → decoder 层 → norm → 所需位置的 logits |
@@ -25,14 +26,14 @@
 
 下面仅表示逻辑状态，假设资源充足、没有命中前缀缓存、每轮只处理该请求，prompt 是 `[a,b,c]`，最多生成 2 个 token，且没有提前命中 EOS：
 
-| 时刻 | token_ids | committed_tokens | 本轮安排 | 动作 |
+| 时刻 | token_ids | committed_tokens | 本轮区间 | 动作 |
 | --- | --- | ---: | ---: | --- |
-| 入队 | `[a,b,c]` | 0 | 0 | 等待执行 |
-| 安排 prefill | `[a,b,c]` | 0 | 3 | 预留 KV 与 GDN 槽 |
-| 前向完成 | `[a,b,c]` | 0 | 3 | 物理状态已覆盖 a/b/c，逻辑尚未提交 |
-| 后处理 | `[a,b,c,d]` | 3 | 0 | 提交 3 个 token，追加预测 d |
-| 安排 decode | `[a,b,c,d]` | 3 | 1 | 输入 d，计算后预测 e |
-| 完成请求 | `[a,b,c,d,e]` | 0 | 0 | 达到输出上限，释放请求资源并重置边界 |
+| 入队 | `[a,b,c]` | 0 | — | 等待执行 |
+| 安排 prefill | `[a,b,c]` | 0 | `[0,3)` | 预留 KV 与 GDN 槽 |
+| 前向完成 | `[a,b,c]` | 0 | `[0,3)` | 物理状态已覆盖 a/b/c，逻辑尚未提交 |
+| 后处理 | `[a,b,c,d]` | 3 | — | 提交 3 个 token，追加预测 d |
+| 安排 decode | `[a,b,c,d]` | 3 | `[3,4)` | 输入 d，计算后预测 e |
+| 完成请求 | `[a,b,c,d,e]` | 0 | — | 达到输出上限，释放请求资源并重置边界 |
 
 最后一行的 `committed_tokens=0` 来自完成后的资源回收，不表示此前没有计算。e 已经成为返回结果，但这个请求不再继续生成，因此不必再为 e 做一次 forward。
 
@@ -60,12 +61,12 @@ q_offsets 与 k_offsets
 
 | 场景 | 阅读路径 | 应能解释的结果 |
 | --- | --- | --- |
-| 增量预留失败 | `Scheduler._reserve_prefill_resources()` | 只撤销本次新增资源，原有历史可保留 |
+| 增量预留失败 | `HybridResources.reserve()` | 只撤销本次新增资源，原有历史可保留 |
 | 前向抛出异常 | `LLMEngine._run_batch()` → `recover_failed_step()` | 可能被修改的请求历史必须丢弃，异常向上抛出 |
 | KV 不足触发抢占 | `schedule()` → `preempt()` → `_reset_to_waiting()` | 保留 token 列表，释放两种历史，之后恢复或重算 |
 | 前缀缓存命中 | `PrefixRuntime.try_restore()` → `restore_pending_states()` | 共享 KV 与独占 GDN 槽恢复到同一边界 |
 
-相关文件：[scheduler.py](../nanovllm/engine/scheduler.py)、[llm_engine.py](../nanovllm/engine/llm_engine.py)、[prefix_runtime.py](../nanovllm/engine/prefix_runtime.py)、[cache_runtime.py](../nanovllm/engine/cache_runtime.py)。
+相关文件：[scheduler.py](../nanovllm/engine/scheduler.py)、[hybrid_resources.py](../nanovllm/engine/hybrid_resources.py)、[llm_engine.py](../nanovllm/engine/llm_engine.py)、[prefix_runtime.py](../nanovllm/engine/prefix_runtime.py)、[cache_runtime.py](../nanovllm/engine/cache_runtime.py)。
 
 特别区分“释放请求拥有的 KV 引用”和“物理 KV 块变空闲”。前缀缓存或其他请求仍持有引用时，物理块不会释放。
 
