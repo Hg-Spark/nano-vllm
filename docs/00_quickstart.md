@@ -120,7 +120,7 @@ finally:
 | `max_model_len` | `4096` | 单请求输入与最大输出的总 token 上限，还会被模型位置上限截断 |
 | `gpu_memory_utilization` | `0.9` | KV 容量估算使用的显存预算比例，范围 `(0,1]`；不是权重加载的硬上限 |
 | `kvcache_block_size` | `16` | FlashInfer page size；当前允许 `16/32/64/128`，基线使用 16 |
-| `max_prefix_cache_entries` | `16` | 联合前缀条目数上限；`0` 关闭前缀缓存，不关闭请求自身的 KV/GDN 状态 |
+| `max_prefix_cache_entries` | `0` | 联合前缀缓存默认关闭；设为正数后限制缓存条目数，不影响请求自身的 KV/GDN 状态 |
 | `kv_cache_dtype` | `"auto"` | `auto` 跟随模型 dtype；`fp8_e4m3` 使用 FP8 KV 存储 |
 | `kv_cache_k_scale` | `1.0` | FP8 K 的全局标量缩放系数，必须有限且大于零 |
 | `kv_cache_v_scale` | `1.0` | FP8 V 的全局标量缩放系数，必须有限且大于零 |

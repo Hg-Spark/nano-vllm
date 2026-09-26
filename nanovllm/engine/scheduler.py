@@ -51,21 +51,10 @@ class Scheduler:
         self.waiting.append(seq)
 
     def _validate_committed_prefix(self, seq: Sequence) -> None:
+        # Keep this hot-path check O(1). Full KV refcount/free-list validation
+        # belongs to validate_resource_accounting(), which runs off the decode
+        # critical path.
         if seq.block_table:
-            if len(seq.block_table) != len(set(seq.block_table)):
-                raise RuntimeError(
-                    f"sequence {seq.seq_id} contains duplicate KV blocks"
-                )
-            for block_id in seq.block_table:
-                if not 0 <= block_id < len(
-                    self.block_manager.block_refcounts
-                ):
-                    raise RuntimeError(f"invalid KV block {block_id}")
-                if self.block_manager.block_refcounts[block_id] <= 0:
-                    raise RuntimeError(
-                        f"sequence {seq.seq_id} references free KV block "
-                        f"{block_id}"
-                    )
             self.state_manager.validate(seq)
         elif seq.state_slot >= 0:
             raise RuntimeError(

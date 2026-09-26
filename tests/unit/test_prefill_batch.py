@@ -28,11 +28,9 @@ class PrefillBatchLayoutTest(unittest.TestCase):
         self.assertEqual(layout.input_ids, (2, 3, 4, 10, 11))
         self.assertEqual(layout.positions, (2, 3, 4, 0, 1))
         self.assertEqual(layout.q_offsets, (0, 3, 5))
-        self.assertEqual(layout.kv_lens, (5, 2))
         self.assertEqual(layout.state_slots, (4, 1))
         self.assertEqual(layout.state_prefix_lens, (2, 0))
         self.assertEqual(layout.slot_mapping, (30, 31, 36, 12, 13))
-        self.assertTrue(layout.use_paged_kv)
         self.assertEqual(layout.paged_kv_indptr, (0, 2, 3))
         self.assertEqual(layout.paged_kv_indices, (7, 9, 3))
         self.assertEqual(layout.paged_kv_last_page_len, (1, 2))
@@ -55,9 +53,7 @@ class PrefillBatchLayoutTest(unittest.TestCase):
         )
 
         self.assertEqual(layout.q_offsets, (0, 2, 5))
-        self.assertEqual(layout.kv_lens, (2, 3))
         self.assertEqual(layout.state_prefix_lens, (0, 0))
-        self.assertTrue(layout.use_paged_kv)
         self.assertEqual(layout.paged_kv_indptr, (0, 1, 2))
         self.assertEqual(layout.paged_kv_indices, (1, 2))
         self.assertEqual(layout.paged_kv_last_page_len, (2, 3))
@@ -75,7 +71,6 @@ class PrefillBatchLayoutTest(unittest.TestCase):
         self.assertEqual(layout.state_slots, (-1,))
         self.assertEqual(layout.state_prefix_lens, (0,))
         self.assertEqual(layout.slot_mapping, ())
-        self.assertFalse(layout.use_paged_kv)
         self.assertEqual(layout.paged_kv_indices, ())
 
     def test_duplicate_state_slots_are_rejected(self):

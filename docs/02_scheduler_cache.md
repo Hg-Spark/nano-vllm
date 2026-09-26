@@ -131,7 +131,7 @@ GDN 循环更新通常不能仅凭当前矩阵恢复任意更早状态，因此�
 | `num_tokens` | 给出共同的历史边界 |
 | `GDNStateSnapshot` | 保存同一边界处所有 GDN 层的卷积和循环状态 |
 
-[PrefixRuntime](../nanovllm/engine/prefix_runtime.py)负责前缀命中、快照条件、发布和淘汰；[HybridResources](../nanovllm/engine/hybrid_resources.py)负责请求的联合预留、恢复和释放。调度器决定何时调用它们，并把快照需求写入本轮计划。
+[PrefixRuntime](../nanovllm/engine/prefix_runtime.py)负责前缀命中、快照条件、发布和淘汰；[HybridResources](../nanovllm/engine/hybrid_resources.py)负责请求的联合预留、恢复和释放。调度器决定何时调用它们，并把快照需求写入本轮计划。联合前缀缓存默认关闭（`max_prefix_cache_entries=0`），用于显式验证/实验时再开启，避免默认承担 GDN 快照的 D2H 成本。
 
 ### 什么时候能发布
 

@@ -16,7 +16,7 @@ class Config:
     max_model_len: int = 4096
     gpu_memory_utilization: float = 0.9
     kvcache_block_size: int = 16
-    max_prefix_cache_entries: int = 16
+    max_prefix_cache_entries: int = 0
     kv_cache_dtype: str = "auto"
     kv_cache_k_scale: float = 1.0
     kv_cache_v_scale: float = 1.0

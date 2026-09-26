@@ -21,14 +21,12 @@ class PrefillBatchLayout:
     input_ids: tuple[int, ...]
     positions: tuple[int, ...]
     q_offsets: tuple[int, ...]
-    kv_lens: tuple[int, ...]
     slot_mapping: tuple[int, ...]
     state_slots: tuple[int, ...]
     state_prefix_lens: tuple[int, ...]
     paged_kv_indptr: tuple[int, ...]
     paged_kv_indices: tuple[int, ...]
     paged_kv_last_page_len: tuple[int, ...]
-    use_paged_kv: bool
 
 
 def _paged_kv_metadata(
@@ -147,13 +145,13 @@ def build_prefill_batch_layout(
                 slot_end = physical_block * block_size + block_size
             slot_mapping.extend(range(slot_start, slot_end))
 
-    use_paged_kv = all(has_block_tables)
-    if use_paged_kv and len(slot_mapping) != len(input_ids):
+    has_paged_kv = all(has_block_tables)
+    if has_paged_kv and len(slot_mapping) != len(input_ids):
         raise RuntimeError(
             "prefill slot mapping must contain one entry per packed token"
         )
 
-    if use_paged_kv:
+    if has_paged_kv:
         paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len = (
             _paged_kv_metadata(
                 [chunk.seq for chunk in chunks],
@@ -170,14 +168,12 @@ def build_prefill_batch_layout(
         input_ids=tuple(input_ids),
         positions=tuple(positions),
         q_offsets=tuple(q_offsets),
-        kv_lens=tuple(kv_lens),
         slot_mapping=tuple(slot_mapping),
         state_slots=tuple(state_slots),
         state_prefix_lens=tuple(state_prefix_lens),
         paged_kv_indptr=paged_kv_indptr,
         paged_kv_indices=paged_kv_indices,
         paged_kv_last_page_len=paged_kv_last_page_len,
-        use_paged_kv=use_paged_kv,
     )
 
 
@@ -195,23 +191,24 @@ def prepare_prefill(
 ) -> PreparedBatch:
     layout = build_prefill_batch_layout(chunks, block_size)
 
+    has_paged_kv = bool(layout.paged_kv_indptr)
     context = Context(
         is_prefill=True,
         slot_mapping=_cuda_int32(layout.slot_mapping),
         qo_indptr=_cuda_int32(layout.q_offsets),
         paged_kv_indptr=(
             _cuda_int32(layout.paged_kv_indptr)
-            if layout.use_paged_kv
+            if has_paged_kv
             else None
         ),
         paged_kv_indices=(
             _cuda_int32(layout.paged_kv_indices)
-            if layout.use_paged_kv
+            if has_paged_kv
             else None
         ),
         paged_kv_last_page_len=(
             _cuda_int32(layout.paged_kv_last_page_len)
-            if layout.use_paged_kv
+            if has_paged_kv
             else None
         ),
         state_slots=layout.state_slots,
