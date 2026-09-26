@@ -13,9 +13,9 @@ python -m pip install -e ".[dev]"
 python -m pytest tests/unit
 ```
 
-单元测试不下载真实权重，但会导入项目运行时。即使某条测试只操作 CPU 数据，收集测试时也可能需要 torch、Transformers、Triton 和 FlashAttention。不能把整个测试集描述为无需 CUDA 软件依赖的纯 CPU 套件。
+单元测试不下载真实权重，但会导入项目运行时。即使某条测试只操作 CPU 数据，收集测试时也可能需要 torch、Transformers、Triton 和 FlashInfer。不能把整个测试集描述为无需 CUDA 软件依赖的纯 CPU 套件。
 
-[test_fp8_kv_cache.py](unit/test_fp8_kv_cache.py)中的 GPU 读写测试带 CUDA 可用性检查，无可用 CUDA 时会跳过。报告结果时分别列出通过、失败和跳过数量；导入失败不是测试通过。
+[test_fp8_kv_cache.py](unit/test_fp8_kv_cache.py)中的 FP8 KV 写入测试带 CUDA 可用性检查，无可用 CUDA 时会跳过。报告结果时分别列出通过、失败和跳过数量；导入失败不是测试通过。
 
 ## 单元测试覆盖
 
@@ -30,7 +30,7 @@ python -m pytest tests/unit
 | [test_scheduler.py](unit/test_scheduler.py) | 预算、decode 轮转、增量 KV、分块与抢占 |
 | [test_prefix_cache.py](unit/test_prefix_cache.py) | 精确前缀匹配、LRU、KV 引用与快照边界 |
 | [test_llm_engine.py](unit/test_llm_engine.py) | 请求校验、EOS、批次执行及异常恢复 |
-| [test_fp8_kv_cache.py](unit/test_fp8_kv_cache.py) | dtype、显式 scale、分页物化、多块 GQA 读取 |
+| [test_fp8_kv_cache.py](unit/test_fp8_kv_cache.py) | KV dtype、显式 scale 与 FP8 写入 |
 
 局部运行示例：
 

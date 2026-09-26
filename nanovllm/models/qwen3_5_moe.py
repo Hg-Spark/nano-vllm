@@ -429,7 +429,7 @@ class Qwen3_5MoeForCausalLM(nn.Module):
 
         context = get_context()
         if context.is_prefill:
-            last_indices = context.cu_seqlens_q[1:] - 1
+            last_indices = context.qo_indptr[1:] - 1
             if sequence_indices is not None:
                 last_indices = last_indices[sequence_indices]
             hidden_states = hidden_states[last_indices].contiguous()

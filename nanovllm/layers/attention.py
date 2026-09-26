@@ -1,14 +1,10 @@
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.profiler import record_function
 import triton
 import triton.language as tl
 
-from flash_attn import (
-    flash_attn_varlen_func,
-    flash_attn_with_kvcache,
-)
-from nanovllm.layers.fp8_kv import fp8_paged_attention_reference
 from nanovllm.utils.context import get_context
 
 
@@ -82,6 +78,36 @@ def store_kvcache(
     )
 
 
+def _warmup_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    softmax_scale: float,
+) -> torch.Tensor:
+    """Dense startup-only path used before persistent KV allocation."""
+    if q.size(0) != k.size(0) or k.size(0) != v.size(0):
+        raise RuntimeError("warmup attention expects one dense sequence")
+    if q.size(1) % k.size(1) != 0:
+        raise RuntimeError("query heads must be divisible by KV heads")
+
+    if q.size(1) != k.size(1):
+        repeats = q.size(1) // k.size(1)
+        k = k.repeat_interleave(repeats, dim=1)
+        v = v.repeat_interleave(repeats, dim=1)
+
+    q_t = q.transpose(0, 1).unsqueeze(0)
+    k_t = k.transpose(0, 1).unsqueeze(0)
+    v_t = v.transpose(0, 1).unsqueeze(0)
+    out = F.scaled_dot_product_attention(
+        q_t,
+        k_t,
+        v_t,
+        is_causal=True,
+        scale=softmax_scale,
+    )
+    return out.squeeze(0).transpose(0, 1)
+
+
 class Attention(nn.Module):
 
     def __init__(
@@ -108,12 +134,12 @@ class Attention(nn.Module):
     ):
         context = get_context()
         k_cache, v_cache = self.k_cache, self.v_cache
-        use_fp8_cache = (
-            k_cache.numel()
-            and k_cache.dtype == torch.float8_e4m3fn
-        )
 
         if k_cache.numel() and v_cache.numel():
+            if context.slot_mapping is None:
+                raise RuntimeError(
+                    "paged attention requires KV slot mapping"
+                )
             with record_function("nanovllm::kv_cache_store"):
                 store_kvcache(
                     k,
@@ -125,52 +151,36 @@ class Attention(nn.Module):
                     self.v_scale,
                 )
 
-        if context.is_prefill:
-            if context.block_tables is not None:
-                if use_fp8_cache:
-                    return fp8_paged_attention_reference(
-                        q,
-                        k_cache,
-                        v_cache,
-                        context,
-                        self.scale,
-                        self.k_scale,
-                        self.v_scale,
-                    )
-                k, v = k_cache, v_cache
-            return flash_attn_varlen_func(
-                q,
-                k,
-                v,
-                max_seqlen_q=context.max_seqlen_q,
-                cu_seqlens_q=context.cu_seqlens_q,
-                max_seqlen_k=context.max_seqlen_k,
-                cu_seqlens_k=context.cu_seqlens_k,
-                softmax_scale=self.scale,
-                causal=True,
-                block_table=context.block_tables,
+        wrapper = context.attention_wrapper
+        if wrapper is None:
+            if k_cache.numel() or v_cache.numel():
+                raise RuntimeError(
+                    "persistent KV cache requires a planned FlashInfer wrapper"
+                )
+            if not context.is_prefill:
+                raise RuntimeError(
+                    "decode requires FlashInfer paged attention"
+                )
+            return _warmup_attention(q, k, v, self.scale)
+
+        if not k_cache.numel() or not v_cache.numel():
+            raise RuntimeError(
+                "FlashInfer paged attention requires allocated KV cache"
             )
 
-        with record_function(
-            "nanovllm::full_attention_decode"
-        ):
-            if use_fp8_cache:
-                return fp8_paged_attention_reference(
-                    q,
-                    k_cache,
-                    v_cache,
-                    context,
-                    self.scale,
-                    self.k_scale,
-                    self.v_scale,
-                )
+        run_kwargs = {}
+        if k_cache.dtype == torch.float8_e4m3fn:
+            run_kwargs["k_scale"] = self.k_scale
+            run_kwargs["v_scale"] = self.v_scale
 
-            return flash_attn_with_kvcache(
-                q.unsqueeze(1),
-                k_cache,
-                v_cache,
-                cache_seqlens=context.context_lens,
-                block_table=context.block_tables,
-                softmax_scale=self.scale,
-                causal=True,
-            ).squeeze(1)
+        profile_range = (
+            "nanovllm::full_attention_prefill"
+            if context.is_prefill
+            else "nanovllm::full_attention_decode"
+        )
+        with record_function(profile_range):
+            return wrapper.run(
+                q,
+                (k_cache, v_cache),
+                **run_kwargs,
+            )

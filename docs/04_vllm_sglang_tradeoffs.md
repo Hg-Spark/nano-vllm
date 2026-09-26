@@ -33,7 +33,7 @@ SGLang 的 HiCache 用 GPU、主机内存和存储后端组织多级缓存，以
 | 精确前缀匹配 + 有界 LRU | 命中和引用计数容易检查 | 查找扫描条目，缓存规模小 | 查找规模成为瓶颈后再评估 radix 结构 |
 | BF16 CPU GDN 快照 | 减少快照空间，释放活动槽后仍能复用 | 有精度舍入和设备到主机传输成本 | 精度、命中率和传输开销共同决定存储策略 |
 | GDN/MoE eager 参考实现 | 数学与路由行为可读，便于对照 | Python 循环、多次算子启动及同步开销 | profile 识别主要耗时后引入专用 kernel |
-| FP8 KV 参考读取 | 可以分别检查分页、缩放和数值效果 | 每次读取需 gather 和反量化临时张量 | Attention 份额显著且端到端收益可复现 |
+| FlashInfer 分页 Attention + FP8 KV | 统一 prefill/decode 分页读取，避免自维护 Attention kernel | 依赖 FlashInfer 版本、SM120 kernel 覆盖与实际 workload | 固定版本完成数值与 profile 后再决定是否定制 kernel |
 | prefill/decode 两次 forward | 两种批次元数据较简单 | 重复遍历模型，存在调度和启动成本 | 主要算子优化后，剩余开销值得合并执行 |
 | 暂不使用 CUDA Graph | 无需提前维护固定形状和捕获约束 | 尚不能获得相应启动开销收益 | kernel 与批次存储稳定、可捕获后再实施 |
 
@@ -53,7 +53,7 @@ KV 块按历史长度增长并允许共享；GDN 槽是固定大小的活动请�
 
 ### 为什么不先写一个 Attention kernel
 
-FP8 存储和分页寻址只是存在优化空间，不能证明 Attention 是主要瓶颈。当前 GDN 逐 token 更新、MoE 逐专家执行也有明显的可测开销。
+FlashInfer 已承担 Full Attention 的分页读取与 GQA/FP8 kernel 选择，但这仍不能证明 Attention 是主要瓶颈。当前 GDN 逐 token 更新、MoE 逐专家执行也有明显的可测开销。
 
 应通过 [profile_decode.py](../scripts/profile_decode.py)和端到端基准确定方向。某个 kernel 变快还需要观察是否改善总吞吐或 TPOT，且必须重新进行数值验证。
 

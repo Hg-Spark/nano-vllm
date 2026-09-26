@@ -6,13 +6,13 @@ from nanovllm.config import Config
 
 class ConfigTest(unittest.TestCase):
 
-    def test_kvcache_block_size_must_be_positive(self):
+    def test_kvcache_block_size_must_match_flashinfer_pages(self):
         with tempfile.TemporaryDirectory() as model_dir:
-            for block_size in (0, -256):
+            for block_size in (0, -16, 8, 256):
                 with self.subTest(block_size=block_size):
                     with self.assertRaisesRegex(
                         ValueError,
-                        "positive multiple of 256",
+                        "must be one of",
                     ):
                         Config(
                             model_dir,

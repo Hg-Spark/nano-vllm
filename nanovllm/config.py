@@ -5,6 +5,9 @@ from dataclasses import dataclass, field
 from transformers import AutoConfig, PretrainedConfig
 
 
+_FLASHINFER_PAGE_SIZES = (16, 32, 64, 128)
+
+
 @dataclass(slots=True)
 class Config:
     model: str
@@ -12,7 +15,7 @@ class Config:
     max_num_seqs: int = 4
     max_model_len: int = 4096
     gpu_memory_utilization: float = 0.9
-    kvcache_block_size: int = 256
+    kvcache_block_size: int = 16
     max_prefix_cache_entries: int = 16
     kv_cache_dtype: str = "auto"
     kv_cache_k_scale: float = 1.0
@@ -54,12 +57,10 @@ class Config:
             raise ValueError(
                 "gpu_memory_utilization must be in (0, 1]"
             )
-        if (
-            self.kvcache_block_size <= 0
-            or self.kvcache_block_size % 256 != 0
-        ):
+        if self.kvcache_block_size not in _FLASHINFER_PAGE_SIZES:
             raise ValueError(
-                "kvcache_block_size must be a positive multiple of 256"
+                "kvcache_block_size must be one of "
+                f"{_FLASHINFER_PAGE_SIZES}"
             )
         hf_config = AutoConfig.from_pretrained(self.model)
         self.text_config = getattr(

@@ -21,13 +21,41 @@ class PrefillBatchLayout:
     input_ids: tuple[int, ...]
     positions: tuple[int, ...]
     q_offsets: tuple[int, ...]
-    k_offsets: tuple[int, ...]
-    max_seqlen_q: int
-    max_seqlen_k: int
+    kv_lens: tuple[int, ...]
     slot_mapping: tuple[int, ...]
     state_slots: tuple[int, ...]
     state_prefix_lens: tuple[int, ...]
-    use_block_tables: bool
+    paged_kv_indptr: tuple[int, ...]
+    paged_kv_indices: tuple[int, ...]
+    paged_kv_last_page_len: tuple[int, ...]
+    use_paged_kv: bool
+
+
+def _paged_kv_metadata(
+    seqs: list[Sequence],
+    kv_lens: list[int] | tuple[int, ...],
+    block_size: int,
+) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+    if len(seqs) != len(kv_lens):
+        raise ValueError("sequence/KV-length count mismatch")
+
+    indptr = [0]
+    indices: list[int] = []
+    last_page_len: list[int] = []
+    for seq, kv_len in zip(seqs, kv_lens):
+        if kv_len <= 0:
+            raise RuntimeError("paged KV sequence length must be positive")
+        num_pages = (kv_len + block_size - 1) // block_size
+        if len(seq.block_table) < num_pages:
+            raise RuntimeError(
+                f"sequence {seq.seq_id} block table is too short: "
+                f"need {num_pages}, have {len(seq.block_table)}"
+            )
+        indices.extend(seq.block_table[:num_pages])
+        indptr.append(len(indices))
+        last_page_len.append((kv_len - 1) % block_size + 1)
+
+    return tuple(indptr), tuple(indices), tuple(last_page_len)
 
 
 def build_prefill_batch_layout(
@@ -49,14 +77,11 @@ def build_prefill_batch_layout(
     input_ids: list[int] = []
     positions: list[int] = []
     q_offsets = [0]
-    k_offsets = [0]
+    kv_lens: list[int] = []
     slot_mapping: list[int] = []
     state_slots: list[int] = []
     state_prefix_lens: list[int] = []
     seen_state_slots: set[int] = set()
-    max_seqlen_q = 0
-    max_seqlen_k = 0
-    use_block_tables = False
 
     for chunk in chunks:
         seq = chunk.seq
@@ -97,12 +122,9 @@ def build_prefill_batch_layout(
         input_ids.extend(seq[start:end])
         positions.extend(range(start, end))
         q_offsets.append(q_offsets[-1] + seqlen_q)
-        k_offsets.append(k_offsets[-1] + end)
-        max_seqlen_q = max(max_seqlen_q, seqlen_q)
-        max_seqlen_k = max(max_seqlen_k, end)
+        kv_lens.append(end)
         state_slots.append(seq.state_slot)
         state_prefix_lens.append(seq.committed_tokens)
-        use_block_tables = use_block_tables or start > 0
 
         if not seq.block_table:
             continue
@@ -125,33 +147,43 @@ def build_prefill_batch_layout(
                 slot_end = physical_block * block_size + block_size
             slot_mapping.extend(range(slot_start, slot_end))
 
-    if all(has_block_tables) and len(slot_mapping) != len(input_ids):
+    use_paged_kv = all(has_block_tables)
+    if use_paged_kv and len(slot_mapping) != len(input_ids):
         raise RuntimeError(
             "prefill slot mapping must contain one entry per packed token"
         )
+
+    if use_paged_kv:
+        paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len = (
+            _paged_kv_metadata(
+                [chunk.seq for chunk in chunks],
+                kv_lens,
+                block_size,
+            )
+        )
+    else:
+        paged_kv_indptr = ()
+        paged_kv_indices = ()
+        paged_kv_last_page_len = ()
 
     return PrefillBatchLayout(
         input_ids=tuple(input_ids),
         positions=tuple(positions),
         q_offsets=tuple(q_offsets),
-        k_offsets=tuple(k_offsets),
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_k=max_seqlen_k,
+        kv_lens=tuple(kv_lens),
         slot_mapping=tuple(slot_mapping),
         state_slots=tuple(state_slots),
         state_prefix_lens=tuple(state_prefix_lens),
-        use_block_tables=use_block_tables,
+        paged_kv_indptr=paged_kv_indptr,
+        paged_kv_indices=paged_kv_indices,
+        paged_kv_last_page_len=paged_kv_last_page_len,
+        use_paged_kv=use_paged_kv,
     )
 
 
-def prepare_block_tables(seqs: list[Sequence]) -> torch.Tensor:
-    max_len = max(len(seq.block_table) for seq in seqs)
-    rows = [
-        seq.block_table + [-1] * (max_len - len(seq.block_table))
-        for seq in seqs
-    ]
+def _cuda_int32(values: tuple[int, ...] | list[int]) -> torch.Tensor:
     return torch.tensor(
-        rows,
+        values,
         dtype=torch.int32,
         pin_memory=True,
     ).cuda(non_blocking=True)
@@ -162,33 +194,26 @@ def prepare_prefill(
     block_size: int,
 ) -> PreparedBatch:
     layout = build_prefill_batch_layout(chunks, block_size)
-    seqs = [chunk.seq for chunk in chunks]
-    block_tables = (
-        prepare_block_tables(seqs)
-        if layout.use_block_tables
-        else None
-    )
 
     context = Context(
         is_prefill=True,
-        cu_seqlens_q=torch.tensor(
-            layout.q_offsets,
-            dtype=torch.int32,
-            pin_memory=True,
-        ).cuda(non_blocking=True),
-        cu_seqlens_k=torch.tensor(
-            layout.k_offsets,
-            dtype=torch.int32,
-            pin_memory=True,
-        ).cuda(non_blocking=True),
-        max_seqlen_q=layout.max_seqlen_q,
-        max_seqlen_k=layout.max_seqlen_k,
-        slot_mapping=torch.tensor(
-            layout.slot_mapping,
-            dtype=torch.int32,
-            pin_memory=True,
-        ).cuda(non_blocking=True),
-        block_tables=block_tables,
+        slot_mapping=_cuda_int32(layout.slot_mapping),
+        qo_indptr=_cuda_int32(layout.q_offsets),
+        paged_kv_indptr=(
+            _cuda_int32(layout.paged_kv_indptr)
+            if layout.use_paged_kv
+            else None
+        ),
+        paged_kv_indices=(
+            _cuda_int32(layout.paged_kv_indices)
+            if layout.use_paged_kv
+            else None
+        ),
+        paged_kv_last_page_len=(
+            _cuda_int32(layout.paged_kv_last_page_len)
+            if layout.use_paged_kv
+            else None
+        ),
         state_slots=layout.state_slots,
         state_prefix_lens=layout.state_prefix_lens,
         prefill_q_offsets=layout.q_offsets,
@@ -213,6 +238,9 @@ def prepare_decode(
     chunks: tuple[ScheduledChunk, ...],
     block_size: int,
 ) -> PreparedBatch:
+    if not chunks:
+        raise ValueError("decode batch must not be empty")
+
     seen_slots: set[int] = set()
     seqs = [chunk.seq for chunk in chunks]
     for chunk in chunks:
@@ -235,32 +263,32 @@ def prepare_decode(
             raise RuntimeError(
                 f"duplicate state slot {seq.state_slot} in decode batch"
             )
+        if not seq.block_table:
+            raise RuntimeError(
+                f"sequence {seq.seq_id} decode has no KV blocks"
+            )
         seen_slots.add(seq.state_slot)
 
     input_ids = [seq.last_token for seq in seqs]
     positions = [len(seq) - 1 for seq in seqs]
-    context_lens = [len(seq) for seq in seqs]
+    kv_lens = [len(seq) for seq in seqs]
     state_slots = tuple(seq.state_slot for seq in seqs)
     state_prefix_lens = tuple(seq.committed_tokens for seq in seqs)
     slot_mapping = [
-        seq.block_table[-1] * block_size
+        seq.block_table[(len(seq) - 1) // block_size] * block_size
         + (len(seq) - 1) % block_size
         for seq in seqs
     ]
+    paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len = (
+        _paged_kv_metadata(seqs, kv_lens, block_size)
+    )
 
     context = Context(
         is_prefill=False,
-        slot_mapping=torch.tensor(
-            slot_mapping,
-            dtype=torch.int32,
-            pin_memory=True,
-        ).cuda(non_blocking=True),
-        context_lens=torch.tensor(
-            context_lens,
-            dtype=torch.int32,
-            pin_memory=True,
-        ).cuda(non_blocking=True),
-        block_tables=prepare_block_tables(seqs),
+        slot_mapping=_cuda_int32(slot_mapping),
+        paged_kv_indptr=_cuda_int32(paged_kv_indptr),
+        paged_kv_indices=_cuda_int32(paged_kv_indices),
+        paged_kv_last_page_len=_cuda_int32(paged_kv_last_page_len),
         state_slots=state_slots,
         state_prefix_lens=state_prefix_lens,
     )

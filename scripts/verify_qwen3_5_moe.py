@@ -140,8 +140,10 @@ def run_prefix_resume_probe(
     max_model_len: int,
     block_size: int,
 ) -> None:
-    if block_size <= 0 or block_size % 256 != 0:
-        raise ValueError("prefix block size must be a positive multiple of 256")
+    if block_size not in (16, 32, 64, 128):
+        raise ValueError(
+            "prefix block size must be one of 16, 32, 64, 128"
+        )
 
     tokenizer = AutoTokenizer.from_pretrained(
         model_path,
@@ -278,7 +280,7 @@ def main() -> None:
     parser.add_argument(
         "--prefix-block-size",
         type=int,
-        default=256,
+        default=16,
     )
     args = parser.parse_args()
 

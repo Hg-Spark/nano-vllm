@@ -24,7 +24,7 @@ python -m pytest tests/unit
 
 覆盖内容包括模型结构与权重映射、RoPE、采样、GDN 分块连续性、变长打包、状态槽所有权、decode 优先调度、KV 增量分配、联合抢占、失败恢复、请求长度检查、前缀引用计数和 FP8 KV 读写。
 
-部分用例不执行 GPU 运算，但测试模块导入可能仍依赖 torch、Transformers、Triton 和 FlashAttention。FP8 GPU 用例在无 CUDA 时跳过；“有 CPU 级测试”不意味着未安装项目依赖的纯 CPU 环境能收集整个测试集。详见[测试说明](../tests/README.md)。
+部分用例不执行 GPU 运算，但测试模块导入可能仍依赖 torch、Transformers、Triton 和 FlashInfer。FP8 GPU 用例在无 CUDA 时跳过；“有 CPU 级测试”不意味着未安装项目依赖的纯 CPU 环境能收集整个测试集。详见[测试说明](../tests/README.md)。
 
 ## 3. 比较真实权重的生成结果
 
@@ -74,7 +74,7 @@ relative_rms = RMS(nano - HF) / max(RMS(HF), 1e-12)
 python scripts/verify_qwen3_5_moe.py "$NANOVLLM_MODEL" \
   --max-new-tokens 32 \
   --check-prefix-resume \
-  --prefix-block-size 256
+  --prefix-block-size 16
 ```
 
 只有 HF 与本实现的贪心对齐通过后，脚本才继续做前缀探针：
@@ -136,15 +136,15 @@ K_storage = cast_fp8(clamp(K / K_scale, -448, 448))
 V_storage = cast_fp8(clamp(V / V_scale, -448, 448))
 ```
 
-[读取路径](../nanovllm/layers/fp8_kv.py)按请求查块表，把有效页面收集成连续张量，转回 query dtype 并乘 scale，然后调用 FlashAttention：
+[读取路径](../nanovllm/layers/attention.py)直接把 FP8 分页 KV 与 `k_scale/v_scale` 交给 FlashInfer wrapper：
 
 ```text
-FP8 分页存储 → gather → 转回计算 dtype × scale → Attention
+FP8 分页存储 → FlashInfer paged attention（按 scale 反量化）
 ```
 
 首次 prefill 没有历史块表时可以直接使用本轮未量化 K/V；后续分块与 decode 读取缓存。精度测试需要覆盖这些续算路径，不能只检查第一次 forward。
 
-此功能改变持久 KV 的存储 dtype，不改变专家权重或 GDN 状态格式。当前读法有 gather、转换与临时张量成本，因此不承诺加速。两个 scale 均为 `1.0` 时会提示未校准告警。
+此功能改变持久 KV 的存储 dtype，不改变专家权重或 GDN 状态格式。读取侧不再物化连续 KV 临时张量。两个 scale 均为 `1.0` 时仍会提示未校准告警；性能收益与数值质量都需要实测。
 
 **现有脚本接口的边界：** `bench.py` 和 `verify_qwen3_5_moe.py` 没有 KV dtype/scale 命令行选项；不能给它们传不存在的参数。`profile_decode.py` 支持 KV dtype，但没有 K/V scale 选项，因此 FP8 profile 使用默认 scale。校准后精度对比需要通过 Python API 或扩展验证脚本明确传参，不能用默认 BF16 验证替代。
 

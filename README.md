@@ -29,20 +29,22 @@ Gated DeltaNet  → 卷积状态 + 循环矩阵，每个活动请求独占状态
 | --- | --- |
 | 模型 | Qwen3.5-MoE 文本部分，包括 `Qwen3.5-35B-A3B` 对应的模型结构 |
 | 权重与执行 | 非量化 safetensors；BF16 为参考验证路径；仅支持单 GPU eager 执行 |
-| 模型层 | 带门控的 Full Attention、局部维度 RoPE、Gated DeltaNet、Top-K 路由与带门控的共享专家 |
+| 模型层 | FlashInfer 分页 Full Attention、局部维度 RoPE、Gated DeltaNet、Top-K 路由与带门控的共享专家 |
 | 调度 | 变长打包 prefill、连续批处理、分块 prefill、decode 优先的共享 token 预算 |
 | 状态管理 | KV/GDN 联合抢占、执行失败后重算、有容量上限的联合前缀缓存 |
-| 可选缓存 | FP8 E4M3 KV 存储与显式 K/V 缩放系数；读取路径是参考实现 |
+| 可选缓存 | FP8 E4M3 KV 存储与显式 K/V 缩放系数；FlashInfer 直接读取分页 FP8 KV |
 | 生成 | 逐 token 解码、`temperature=0` 的贪心解码、正温度采样、多个 EOS token |
 
 当前不支持 Qwen3、稠密 Qwen3.5、视觉输入、MTP、多模态打包、三轴 mRoPE、量化权重、权重 CPU 卸载、张量/专家并行或 CUDA Graph。融合 GDN、分组/融合 MoE kernel 尚未实现。
 
 ## 最小使用示例
 
-在具有足够显存和可用 CUDA、Triton、FlashAttention 的环境中，从仓库根目录安装：
+在具有足够显存和 CUDA 13.0、Triton、FlashInfer 的环境中，从仓库根目录安装：
 
 ```bash
+python -m pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cu130
 python -m pip install -e ".[dev]"
+flashinfer download-kernels --cuda-version 13.0
 export NANOVLLM_MODEL=/absolute/path/to/Qwen3.5-MoE
 python example.py
 ```
@@ -92,7 +94,7 @@ python scripts/diagnose_qwen3_5_moe.py "$NANOVLLM_MODEL"
 ```text
 nanovllm/
   engine/     请求、调度、打包、KV/GDN 资源与前缀生命周期
-  layers/     Attention、GDN、RoPE、采样与 FP8 KV 参考路径
+  layers/     Attention、GDN、RoPE、采样与 FP8 KV 存储
   models/     Qwen3.5-MoE 模型结构和权重命名规则
   utils/      执行上下文与权重加载
 scripts/      数值对齐、逐层诊断、基准与性能分析

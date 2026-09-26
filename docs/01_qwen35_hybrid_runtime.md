@@ -162,26 +162,29 @@ flowchart TD
 ```text
 input_ids         = [A2, A3, A4, B0, B1]   # 下标从 0 开始
 positions         = [ 2,  3,  4,  0,  1]
-q_offsets         = [0, 3, 5]
-k_offsets         = [0, 5, 7]
-state_prefix_lens = [2, 0]
-state_slots       = [A 的槽号, B 的槽号]
+q_offsets                = [0, 3, 5]
+kv_lens                  = [5, 2]
+paged_kv_indptr          = [0, 2, 3]      # 假设 page size = 4
+paged_kv_indices         = [A0, A1, B0]   # 物理页号
+paged_kv_last_page_len   = [1, 2]
+state_prefix_lens        = [2, 0]
+state_slots              = [A 的槽号, B 的槽号]
 ```
 
-A 的 query 长度是 3，但它能读取的 key 长度是历史 2 加本轮 3，共 5；B 的 query/key 长度均为 2。`k_offsets` 表示各请求有效 key 长度的累积值，不是物理 KV 地址。
+A 的 query 长度是 3，它能读取的 KV 长度是历史 2 加本轮 3，共 5；B 的 query/KV 长度均为 2。`paged_kv_indptr/indices/last_page_len` 用 CSR 形式描述每个请求实际占用的物理 KV 页。
 
 必须保持下面的第 i 个请求对齐关系：
 
 ```text
 q_offsets[i:i+2]
-    ↔ block_tables[i]
+    ↔ paged_kv_indptr[i:i+2] 对应的物理页
     ↔ state_slots[i]
     ↔ state_prefix_lens[i]
 ```
 
-Attention 用这些元数据隔离不同请求的注意力范围；GDN 用 query 偏移拆出请求片段，并选择各自状态槽。把两个请求直接当成一条长序列计算，会错误地串联历史。
+ModelRunner 每个 batch 只调用一次 FlashInfer `plan()`，各 Full Attention 层复用同一个 wrapper；GDN 继续用 query 偏移拆出请求片段并选择各自状态槽。把两个请求直接当成一条长序列计算，会错误地串联历史。
 
-当任一请求已有历史时，prefill 使用块表读取缓存。新 K/V 的写入位置由 `slot_mapping` 指定。对逻辑 token 位置 p、块容量 B：
+真实请求的 prefill 和 decode 都统一从分页 KV 读取；启动 warmup 在尚未分配持久 KV 时单独走 PyTorch SDPA。新 K/V 的写入位置由 `slot_mapping` 指定。对逻辑 token 位置 p、块容量 B：
 
 ```text
 逻辑块号 = p // B

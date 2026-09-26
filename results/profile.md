@@ -10,7 +10,7 @@
 - 模型与检查点 revision：待填写。
 - 实际 GPU／显存：待填写。
 - nano-vLLM 提交／未提交改动：待填写。
-- Python／PyTorch／CUDA／Triton／Transformers／FlashAttention：待填写。
+- Python／PyTorch／CUDA／Triton／Transformers／FlashInfer：待填写。
 - KV dtype／K scale／V scale：待填写。
 - 配置 batch／测量窗口实际活动请求数：待填写。
 - context／token ID／token 预算：待填写。

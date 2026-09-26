@@ -25,27 +25,19 @@ class PrefillBatchLayoutTest(unittest.TestCase):
             block_size=4,
         )
 
-        self.assertEqual(
-            layout.input_ids,
-            (2, 3, 4, 10, 11),
-        )
-        self.assertEqual(
-            layout.positions,
-            (2, 3, 4, 0, 1),
-        )
+        self.assertEqual(layout.input_ids, (2, 3, 4, 10, 11))
+        self.assertEqual(layout.positions, (2, 3, 4, 0, 1))
         self.assertEqual(layout.q_offsets, (0, 3, 5))
-        self.assertEqual(layout.k_offsets, (0, 5, 7))
-        self.assertEqual(layout.max_seqlen_q, 3)
-        self.assertEqual(layout.max_seqlen_k, 5)
+        self.assertEqual(layout.kv_lens, (5, 2))
         self.assertEqual(layout.state_slots, (4, 1))
         self.assertEqual(layout.state_prefix_lens, (2, 0))
-        self.assertEqual(
-            layout.slot_mapping,
-            (30, 31, 36, 12, 13),
-        )
-        self.assertTrue(layout.use_block_tables)
+        self.assertEqual(layout.slot_mapping, (30, 31, 36, 12, 13))
+        self.assertTrue(layout.use_paged_kv)
+        self.assertEqual(layout.paged_kv_indptr, (0, 2, 3))
+        self.assertEqual(layout.paged_kv_indices, (7, 9, 3))
+        self.assertEqual(layout.paged_kv_last_page_len, (1, 2))
 
-    def test_fresh_variable_lengths_do_not_require_paged_readback(self):
+    def test_fresh_variable_lengths_use_the_same_paged_kv_path(self):
         first = Sequence([1, 2])
         first.block_table = [1]
         first.state_slot = 0
@@ -63,9 +55,12 @@ class PrefillBatchLayoutTest(unittest.TestCase):
         )
 
         self.assertEqual(layout.q_offsets, (0, 2, 5))
-        self.assertEqual(layout.k_offsets, (0, 2, 5))
+        self.assertEqual(layout.kv_lens, (2, 3))
         self.assertEqual(layout.state_prefix_lens, (0, 0))
-        self.assertFalse(layout.use_block_tables)
+        self.assertTrue(layout.use_paged_kv)
+        self.assertEqual(layout.paged_kv_indptr, (0, 1, 2))
+        self.assertEqual(layout.paged_kv_indices, (1, 2))
+        self.assertEqual(layout.paged_kv_last_page_len, (2, 3))
         self.assertEqual(len(layout.slot_mapping), 5)
 
     def test_warmup_without_persistent_caches_is_supported(self):
@@ -80,7 +75,8 @@ class PrefillBatchLayoutTest(unittest.TestCase):
         self.assertEqual(layout.state_slots, (-1,))
         self.assertEqual(layout.state_prefix_lens, (0,))
         self.assertEqual(layout.slot_mapping, ())
-        self.assertFalse(layout.use_block_tables)
+        self.assertFalse(layout.use_paged_kv)
+        self.assertEqual(layout.paged_kv_indices, ())
 
     def test_duplicate_state_slots_are_rejected(self):
         first = Sequence([1])
@@ -91,10 +87,7 @@ class PrefillBatchLayoutTest(unittest.TestCase):
         second.block_table = [1]
         second.state_slot = 2
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "duplicate state slot",
-        ):
+        with self.assertRaisesRegex(RuntimeError, "duplicate state slot"):
             build_prefill_batch_layout(
                 (
                     ScheduledChunk(first, 0, 1),

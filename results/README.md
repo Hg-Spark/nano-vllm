@@ -14,7 +14,7 @@
 
 - 日期、执行人、代码提交及是否有未提交改动。
 - 模型来源、检查点 revision、权重 dtype 与实际加载范围。
-- GPU 型号/显存、PyTorch、CUDA、Triton、Transformers、FlashAttention 版本。
+- GPU 型号/显存、PyTorch、CUDA、Triton、Transformers、FlashInfer 版本。
 - 完整命令、输入或随机种子、生成设置、并发/token/上下文限制。
 - KV dtype、K/V scale、前缀缓存设置、预热与重复次数。
 - 原始输出日志或 trace、失败信息、指标单位和最终结论。

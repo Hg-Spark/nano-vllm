@@ -8,13 +8,17 @@ import torch
 @dataclass(frozen=True, slots=True)
 class Context:
     is_prefill: bool = False
-    cu_seqlens_q: torch.Tensor | None = None
-    cu_seqlens_k: torch.Tensor | None = None
-    max_seqlen_q: int = 0
-    max_seqlen_k: int = 0
     slot_mapping: torch.Tensor | None = None
-    context_lens: torch.Tensor | None = None
-    block_tables: torch.Tensor | None = None
+
+    # FlashInfer paged-attention metadata. qo_indptr is needed only for
+    # packed prefill; decode has one query token per request.
+    qo_indptr: torch.Tensor | None = None
+    paged_kv_indptr: torch.Tensor | None = None
+    paged_kv_indices: torch.Tensor | None = None
+    paged_kv_last_page_len: torch.Tensor | None = None
+    attention_wrapper: object | None = None
+
+    # GDN state metadata stays CPU-side where possible.
     state_slots: tuple[int, ...] | None = None
     state_prefix_lens: tuple[int, ...] | None = None
     prefill_q_offsets: tuple[int, ...] | None = None

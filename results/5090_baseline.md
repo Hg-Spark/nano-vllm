@@ -24,7 +24,7 @@
 | 实际 GPU 型号／显存 | 待填写；原定目标为 NVIDIA GeForce RTX 5090 |
 | Python／PyTorch | 待填写 |
 | CUDA／驱动 | 待填写 |
-| Triton／Transformers／FlashAttention | 待填写 |
+| Triton／Transformers／FlashInfer | 待填写 |
 | nano-vLLM 提交／未提交改动 | 待填写 |
 
 ## 工作负载

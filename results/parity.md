@@ -12,7 +12,7 @@
 | 模型目录／检查点 revision | 待填写 |
 | 权重 dtype／GPU 与显存 | 待填写 |
 | Python／PyTorch／CUDA | 待填写 |
-| Transformers／Triton／FlashAttention | 待填写 |
+| Transformers／Triton／FlashInfer | 待填写 |
 | nano-vLLM 提交／未提交改动 | 待填写 |
 | 输入模板与分词设置 | 待填写 |
 
@@ -43,7 +43,7 @@ python scripts/verify_qwen3_5_moe.py "$NANOVLLM_MODEL" \
 python scripts/verify_qwen3_5_moe.py "$NANOVLLM_MODEL" \
   --max-new-tokens 32 \
   --check-prefix-resume \
-  --prefix-block-size 256
+  --prefix-block-size 16
 ```
 
 | 记录项 | 结果 |

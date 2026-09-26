@@ -11,10 +11,10 @@
 | 项目 | 仓库声明或实际要求 |
 | --- | --- |
 | Python | `>=3.10,<3.13` |
-| PyTorch | `>=2.4.0`，必须能够使用 CUDA |
+| PyTorch | `2.14.0`，使用官方 `cu130` wheel |
 | Triton | `>=3.0.0` |
 | Transformers | `>=5.2.0`，须包含所用 Qwen3.5-MoE 配置与参考模型接口 |
-| FlashAttention | 仓库未固定版本；需提供代码使用的变长、KV cache 和普通 attention 接口 |
+| FlashInfer | `flashinfer-python[cu13]==0.7.0`；Full Attention 统一使用分页 prefill/decode wrapper |
 | 权重 | 本地非量化 Qwen3.5-MoE safetensors，参考验证使用 BF16 |
 | 设备 | 单 GPU，显存须容纳全部已加载权重、KV、GDN 状态和临时张量 |
 
@@ -39,16 +39,20 @@
 ```bash
 git clone --branch feature/qwen35-moe --single-branch https://github.com/Hg-Spark/nano-vllm.git
 cd nano-vllm
+
+# 固定 CUDA 13.0 的 PyTorch wheel，再安装项目依赖。
+python -m pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cu130
 python -m pip install -e ".[dev]"
+flashinfer download-kernels --cuda-version 13.0
 ```
 
 `-e` 表示使用当前目录中的代码，`[dev]` 额外安装 pytest。CUDA 相关包必须与本机环境兼容。安装完成后检查核心依赖能否导入：
 
 ```bash
-python -c 'import torch, triton, transformers; from flash_attn import flash_attn_func, flash_attn_varlen_func, flash_attn_with_kvcache; print("CUDA:", torch.cuda.is_available()); print("PyTorch:", torch.__version__); print("Transformers:", transformers.__version__)'
+python -c 'import torch, flashinfer, triton, transformers; print("CUDA available:", torch.cuda.is_available()); print("PyTorch:", torch.__version__); print("PyTorch CUDA:", torch.version.cuda); print("GPU:", torch.cuda.get_device_name(0)); print("CC:", torch.cuda.get_device_capability(0)); print("FlashInfer:", flashinfer.__version__); print("Transformers:", transformers.__version__)'
 ```
 
-`CUDA: False` 或导入失败时，先修复环境；该运行时不会自动切换到 CPU 推理。
+`CUDA available: False`、`PyTorch CUDA` 不是 `13.0` 或导入失败时，先修复环境；运行时会主动拒绝非 cu130 的 PyTorch。RTX 5090 应显示 compute capability `(12, 0)`。\n\n当前固定 cu130 是本分支的复现实验约束。PyTorch 已宣布从 2026-09-28 起移除 CUDA 13.0 的 nightly/CI 构建，但 2.14 及更早的 cu130 wheel 保留；因此这里固定稳定版 2.14.0，并要求真实权重对齐测试通过后再记录性能结果。
 
 ## 3. 准备本地模型目录
 
@@ -115,7 +119,7 @@ finally:
 | `max_num_seqs` | `4` | 一轮请求数上限，也是活动 GDN 状态槽数量；分块 prefill 也占槽 |
 | `max_model_len` | `4096` | 单请求输入与最大输出的总 token 上限，还会被模型位置上限截断 |
 | `gpu_memory_utilization` | `0.9` | KV 容量估算使用的显存预算比例，范围 `(0,1]`；不是权重加载的硬上限 |
-| `kvcache_block_size` | `256` | 每个 KV 块的 token 容量；使用正的 256 倍数 |
+| `kvcache_block_size` | `16` | FlashInfer page size；当前允许 `16/32/64/128`，基线使用 16 |
 | `max_prefix_cache_entries` | `16` | 联合前缀条目数上限；`0` 关闭前缀缓存，不关闭请求自身的 KV/GDN 状态 |
 | `kv_cache_dtype` | `"auto"` | `auto` 跟随模型 dtype；`fp8_e4m3` 使用 FP8 KV 存储 |
 | `kv_cache_k_scale` | `1.0` | FP8 K 的全局标量缩放系数，必须有限且大于零 |

@@ -46,7 +46,7 @@
 ```text
 每个请求的 start/end
 拼接后的 input_ids 与 positions
-q_offsets 与 k_offsets
+q_offsets 与 FlashInfer page CSR
 各请求 block_table
 各请求 state_slot 与 state_prefix_lens
 ```
@@ -77,7 +77,7 @@ q_offsets 与 k_offsets
 | Top-K 路由、共享专家、权重命名 | [qwen3_5_moe.py](../nanovllm/models/qwen3_5_moe.py) | [test_qwen3_5_moe.py](../tests/unit/test_qwen3_5_moe.py) |
 | GDN 卷积与循环更新 | [gated_delta_net.py](../nanovllm/layers/gated_delta_net.py) | [test_gated_delta_net.py](../tests/unit/test_gated_delta_net.py) |
 | 部分维度 RoPE | [rotary_embedding.py](../nanovllm/layers/rotary_embedding.py) | [test_rotary_embedding.py](../tests/unit/test_rotary_embedding.py) |
-| KV 写入、FP8 分页读取 | [attention.py](../nanovllm/layers/attention.py)、[fp8_kv.py](../nanovllm/layers/fp8_kv.py) | [test_fp8_kv_cache.py](../tests/unit/test_fp8_kv_cache.py) |
+| KV 写入、FlashInfer 分页读取与 FP8 scale | [attention.py](../nanovllm/layers/attention.py)、[model_runner.py](../nanovllm/engine/model_runner.py) | [test_attention.py](../tests/unit/test_attention.py)、[test_fp8_kv_cache.py](../tests/unit/test_fp8_kv_cache.py) |
 | 采样 | [sampler.py](../nanovllm/layers/sampler.py) | [test_sampler.py](../tests/unit/test_sampler.py) |
 
 先用小张量解释形状和更新顺序，再看真实模型参数。局部测试用合成配置降低理解成本；真实检查点是否对齐仍需按[第 3 章](03_validation_performance.md)验证。
@@ -102,5 +102,5 @@ q_offsets 与 k_offsets
 2. 为什么不能只恢复 KV？——GDN 也依赖同一前缀的状态，否则两类层读到的历史不一致。
 3. 为什么跨过一个完整块边界不等于保存了这个边界？——GDN 已经推进到更晚位置，没有自动保留中途状态。
 4. 为什么 MoE 激活参数少仍可能需要很多显存？——当前所有专家权重都常驻，只在计算时选择部分专家。
-5. 为什么 FP8 KV 不保证更快？——参考读取要收集页面并反量化，收益必须用端到端测量确认。
+5. 为什么 FP8 KV 不保证更快？——存储更省显存，但 FlashInfer 的具体 kernel、scale 处理与 workload 会影响速度，仍需端到端测量。
 6. 为什么要同时报告失败路径？——正确输出只是一个场景，资源复用和异常后的历史一致性同样决定运行时是否可信。
