@@ -12,7 +12,7 @@
 export NANOVLLM_MODEL=/absolute/path/to/Qwen3.5-MoE
 ```
 
-模型必须属于 Qwen3.5-MoE，权重非量化。验证脚本使用 Transformers 的 `AutoModelForMultimodalLM` 作为 HF 参考加载入口，但输入只包含文本；本实现不执行视觉部分。
+模型必须属于 Qwen3.5-MoE，权重非量化。验证脚本使用 Transformers 的 `AutoModelForCausalLM` 作为 text-only HF 参考加载入口，与本分支的实现范围一致。
 
 ## 验证顺序
 
@@ -44,3 +44,14 @@ python scripts/profile_decode.py "$NANOVLLM_MODEL" \
 - 无法加载、依赖不匹配、数值失败分别记录；没有运行的实验保持“待验证”。
 
 `verify` 和 `bench` 当前未提供 FP8 dtype/scale 参数，不能把这些命令的通过结果用于证明 FP8 路径。相关接口限制见[验证与性能分析](../../docs/03_validation_performance.md)。
+
+
+## FlashInfer GPU 集成测试
+
+在 CUDA 13.0 环境中可单独验证真实分页 Attention kernel：
+
+```bash
+python -m pytest tests/integration/test_flashinfer_attention.py -q
+```
+
+该测试使用 Qwen3.5-MoE 的 Full Attention 几何（16 个 Q heads、2 个 KV heads、head_dim 256），比较 FlashInfer paged prefill/decode 与 PyTorch reference；SM120 还会覆盖 FP8 KV scale 路径。

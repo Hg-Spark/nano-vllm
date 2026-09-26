@@ -1,3 +1,4 @@
+import math
 import unittest
 
 import torch
@@ -25,6 +26,12 @@ class SamplingTest(unittest.TestCase):
     def test_negative_temperature_is_rejected(self):
         with self.assertRaises(ValueError):
             SamplingParams(temperature=-0.1)
+
+    def test_non_finite_temperature_is_rejected(self):
+        for temperature in (math.nan, math.inf, -math.inf):
+            with self.subTest(temperature=temperature):
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    SamplingParams(temperature=temperature)
 
     def test_non_positive_max_tokens_is_rejected(self):
         with self.assertRaises(ValueError):

@@ -54,6 +54,12 @@ class ModelRunner:
         self.config = config
         self.block_size = config.kvcache_block_size
         self._closed = False
+        self.model = None
+        self.sampler = None
+        self.kv_cache = None
+        self.attention_workspace = None
+        self.prefill_wrapper = None
+        self.decode_wrapper = None
 
         _validate_cuda_runtime()
         torch.cuda.set_device(0)
@@ -99,16 +105,14 @@ class ModelRunner:
                 self.model,
                 config,
             )
+        except Exception:
+            self._release_cuda_resources()
+            raise
         finally:
             torch.set_default_device("cpu")
             torch.set_default_dtype(default_dtype)
 
-    def exit(self):
-        if self._closed:
-            return
-        self._closed = True
-
-        torch.cuda.synchronize()
+    def _release_cuda_resources(self):
         self.kv_cache = None
         self.prefill_wrapper = None
         self.decode_wrapper = None
@@ -117,18 +121,35 @@ class ModelRunner:
         self.sampler = None
         torch.cuda.empty_cache()
 
+    def exit(self):
+        if self._closed:
+            return
+        self._closed = True
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        self._release_cuda_resources()
+
     def warmup_model(self):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
-        seq_len = min(
+
+        token_budget = min(
             self.config.max_num_batched_tokens,
-            self.config.max_model_len,
-            32,
+            self.config.max_model_len * self.config.max_num_seqs,
         )
-        if seq_len <= 0:
-            raise ValueError("warmup sequence length must be positive")
-        seq = Sequence([0] * seq_len)
-        self.run((ScheduledChunk(seq, 0, seq_len),), True)
+        if token_budget <= 0:
+            raise ValueError("warmup token budget must be positive")
+
+        chunks = []
+        remaining = token_budget
+        while remaining > 0 and len(chunks) < self.config.max_num_seqs:
+            seq_len = min(self.config.max_model_len, remaining)
+            seq = Sequence([0] * seq_len)
+            chunks.append(ScheduledChunk(seq, 0, seq_len))
+            remaining -= seq_len
+
+        self.run(tuple(chunks), True)
         torch.cuda.empty_cache()
 
     def _plan_attention(self, context: Context) -> Context:

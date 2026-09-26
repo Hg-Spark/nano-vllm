@@ -80,13 +80,16 @@ flowchart LR
 
 ### 执行成功：推进一个共同边界
 
-`postprocess()`先检查整个批次的采样结果、快照及计划边界，然后推进：
+`postprocess()`先检查整个批次的采样结果、快照、资源所有权及计划边界。若需要发布联合前缀，会先为所有快照建立独立缓存引用；全部发布成功后，才统一推进请求的逻辑边界：
 
 ```text
-committed_tokens = ScheduledChunk.end
+validate whole batch
+  → publish reusable KV/GDN prefixes
+  → committed_tokens = ScheduledChunk.end
+  → append sampled token
 ```
 
-若需要发布前缀，先发布该边界的条目，再追加本次采样得到的 token。因为新生成的 token 尚未执行，它不属于刚提交的 KV/GDN 前缀。
+因此前缀发布失败时，请求本身仍未提交，可以联合释放 KV/GDN 请求状态并重放。新生成的 token 尚未执行，所以不属于刚发布的 KV/GDN 前缀。
 
 ## 4. 抢占时为什么必须同时处理两种状态
 

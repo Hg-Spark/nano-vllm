@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 
 
@@ -8,6 +9,8 @@ class SamplingParams:
     ignore_eos: bool = False
 
     def __post_init__(self):
+        if not math.isfinite(self.temperature):
+            raise ValueError("temperature must be finite")
         if self.temperature < 0.0:
             raise ValueError("temperature must be non-negative")
         if self.max_tokens <= 0:

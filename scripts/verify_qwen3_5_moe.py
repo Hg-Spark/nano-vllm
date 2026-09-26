@@ -5,7 +5,7 @@ import os
 import torch
 from transformers import (
     AutoConfig,
-    AutoModelForMultimodalLM,
+    AutoModelForCausalLM,
     AutoTokenizer,
 )
 
@@ -52,7 +52,7 @@ def run_hf(
         return_tensors="pt",
     ).input_ids.cuda()
 
-    model = AutoModelForMultimodalLM.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         model_path,
         dtype=torch.bfloat16,
     ).cuda()

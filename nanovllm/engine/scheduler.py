@@ -52,6 +52,20 @@ class Scheduler:
 
     def _validate_committed_prefix(self, seq: Sequence) -> None:
         if seq.block_table:
+            if len(seq.block_table) != len(set(seq.block_table)):
+                raise RuntimeError(
+                    f"sequence {seq.seq_id} contains duplicate KV blocks"
+                )
+            for block_id in seq.block_table:
+                if not 0 <= block_id < len(
+                    self.block_manager.block_refcounts
+                ):
+                    raise RuntimeError(f"invalid KV block {block_id}")
+                if self.block_manager.block_refcounts[block_id] <= 0:
+                    raise RuntimeError(
+                        f"sequence {seq.seq_id} references free KV block "
+                        f"{block_id}"
+                    )
             self.state_manager.validate(seq)
         elif seq.state_slot >= 0:
             raise RuntimeError(
@@ -452,6 +466,10 @@ class Scheduler:
                 raise RuntimeError(
                     "completed model step did not produce a token"
                 )
+            if not partial_prefill and seq not in self.running:
+                raise RuntimeError(
+                    "completed request is missing from the running queue"
+                )
             snapshot = prefix_snapshots.get(seq.seq_id)
             if snapshot is None:
                 continue
@@ -466,13 +484,21 @@ class Scheduler:
                     "GDN snapshot boundary does not match scheduled prefix"
                 )
 
+        # Publish all reusable prefixes before moving any request's logical
+        # boundary. A publish failure therefore leaves the whole batch
+        # uncommitted and replayable.
+        for chunk in chunks:
+            snapshot = prefix_snapshots.get(chunk.seq.seq_id)
+            if snapshot is not None:
+                self.prefix_runtime.publish(
+                    chunk.seq,
+                    snapshot,
+                    chunk.end,
+                )
+
         for chunk, token_id in zip(chunks, token_ids):
             seq = chunk.seq
             seq.committed_tokens = chunk.end
-
-            snapshot = prefix_snapshots.get(seq.seq_id)
-            if snapshot is not None:
-                self.prefix_runtime.publish(seq, snapshot)
 
             if is_prefill and chunk.end < len(seq):
                 continue

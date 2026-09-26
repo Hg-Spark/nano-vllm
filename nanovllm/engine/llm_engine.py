@@ -43,46 +43,55 @@ class LLMEngine:
             raise TypeError(f"unsupported runtime options: {names}")
         config = Config(model, **kwargs)
         self.max_model_len = config.max_model_len
-
-        self.model_runner = ModelRunner(config)
-        self.max_kv_tokens = (
-            self.model_runner.num_kvcache_blocks
-            * config.kvcache_block_size
-        )
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            config.model,
-            use_fast=True,
-        )
+        self.model_runner = None
+        self._closed = False
+        self._atexit_handler = None
 
         try:
-            generation_config = GenerationConfig.from_pretrained(
-                config.model
+            self.model_runner = ModelRunner(config)
+            self.max_kv_tokens = (
+                self.model_runner.num_kvcache_blocks
+                * config.kvcache_block_size
             )
-            eos_token_ids = _normalize_eos_token_ids(
-                generation_config.eos_token_id
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                config.model,
+                use_fast=True,
             )
-        except (OSError, ValueError):
-            eos_token_ids = ()
 
-        if not eos_token_ids:
-            eos_token_ids = _normalize_eos_token_ids(
-                self.tokenizer.eos_token_id
-            )
-        if not eos_token_ids:
-            eos_token_ids = _normalize_eos_token_ids(
-                getattr(
-                    config.text_config,
-                    "eos_token_id",
-                    None,
+            try:
+                generation_config = GenerationConfig.from_pretrained(
+                    config.model
                 )
-            )
-        config.eos_token_ids = eos_token_ids
+                eos_token_ids = _normalize_eos_token_ids(
+                    generation_config.eos_token_id
+                )
+            except (OSError, ValueError):
+                eos_token_ids = ()
 
-        self.scheduler = Scheduler(
-            config,
-            self.model_runner.num_kvcache_blocks,
-        )
-        self._closed = False
+            if not eos_token_ids:
+                eos_token_ids = _normalize_eos_token_ids(
+                    self.tokenizer.eos_token_id
+                )
+            if not eos_token_ids:
+                eos_token_ids = _normalize_eos_token_ids(
+                    getattr(
+                        config.text_config,
+                        "eos_token_id",
+                        None,
+                    )
+                )
+            config.eos_token_ids = eos_token_ids
+
+            self.scheduler = Scheduler(
+                config,
+                self.model_runner.num_kvcache_blocks,
+            )
+        except Exception:
+            if self.model_runner is not None:
+                self.model_runner.exit()
+                self.model_runner = None
+            raise
+
         self._atexit_handler = self.exit
         atexit.register(self._atexit_handler)
 
@@ -96,7 +105,9 @@ class LLMEngine:
         if handler is not None:
             atexit.unregister(handler)
 
-        self.model_runner.exit()
+        if self.model_runner is not None:
+            self.model_runner.exit()
+            self.model_runner = None
 
     def _prepare_request(
         self,
@@ -163,12 +174,19 @@ class LLMEngine:
             self.scheduler.recover_failed_step(chunks)
             raise
         elapsed = perf_counter() - start
-        self.scheduler.postprocess(
-            chunks,
-            result.token_ids,
-            is_prefill,
-            result.prefix_snapshots,
-        )
+        try:
+            self.scheduler.postprocess(
+                chunks,
+                result.token_ids,
+                is_prefill,
+                result.prefix_snapshots,
+            )
+        except Exception:
+            # postprocess validates and publishes reusable prefixes before
+            # logical commit. Request-owned physical state can therefore be
+            # discarded and replayed safely if publication/commit fails.
+            self.scheduler.recover_failed_step(chunks)
+            raise
         outputs = [
             (seq.seq_id, seq.completion_token_ids)
             for seq in (chunk.seq for chunk in chunks)

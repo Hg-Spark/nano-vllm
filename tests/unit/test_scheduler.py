@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 
 from nanovllm.engine.schedule import ScheduledChunk
@@ -11,7 +12,7 @@ def make_scheduler(
     max_num_batched_tokens=4,
     max_num_seqs=4,
     num_blocks=16,
-    block_size=256,
+    block_size=16,
 ):
     config = SimpleNamespace(
         max_num_seqs=max_num_seqs,
@@ -576,6 +577,36 @@ class SchedulerTest(unittest.TestCase):
 
         self.assertEqual(first.committed_tokens, 0)
         self.assertEqual(second.committed_tokens, 0)
+
+    def test_prefix_publish_failure_keeps_batch_uncommitted(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=4,
+            max_num_seqs=2,
+            num_blocks=8,
+            block_size=4,
+        )
+        seq = Sequence([0, 1, 2, 3, 4, 5])
+        scheduler.add(seq)
+        scheduled = scheduler.schedule()
+        snapshot = GDNStateSnapshot(num_tokens=4, layers=())
+
+        with patch.object(
+            scheduler.prefix_runtime,
+            "publish",
+            side_effect=RuntimeError("injected publish failure"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "injected publish failure",
+            ):
+                scheduler.postprocess(
+                    scheduled.prefill_chunks,
+                    [None],
+                    True,
+                    {seq.seq_id: snapshot},
+                )
+
+        self.assertEqual(seq.committed_tokens, 0)
 
     def test_prefill_reservation_rolls_back_kv_and_state_together(self):
         scheduler = make_scheduler(

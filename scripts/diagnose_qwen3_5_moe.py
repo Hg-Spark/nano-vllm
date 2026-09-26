@@ -4,7 +4,7 @@ import os
 
 import torch
 from torch import nn
-from transformers import AutoModelForMultimodalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from nanovllm import LLM, SamplingParams
 from nanovllm.engine.sequence import Sequence
@@ -79,7 +79,7 @@ def capture_hf_layers(
     model_path: str,
     input_ids: list[int],
 ) -> list[torch.Tensor]:
-    model = AutoModelForMultimodalLM.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         model_path,
         dtype=torch.bfloat16,
     ).cuda().eval()

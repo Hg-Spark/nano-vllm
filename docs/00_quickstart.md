@@ -14,7 +14,7 @@
 | PyTorch | `2.14.0`，使用官方 `cu130` wheel |
 | Triton | `>=3.0.0` |
 | Transformers | `>=5.2.0`，须包含所用 Qwen3.5-MoE 配置与参考模型接口 |
-| FlashInfer | `flashinfer-python[cu13]==0.7.0`；Full Attention 统一使用分页 prefill/decode wrapper |
+| FlashInfer | `flashinfer-python==0.7.0`；Full Attention 统一使用分页 prefill/decode wrapper |
 | 权重 | 本地非量化 Qwen3.5-MoE safetensors，参考验证使用 BF16 |
 | 设备 | 单 GPU，显存须容纳全部已加载权重、KV、GDN 状态和临时张量 |
 
@@ -43,7 +43,7 @@ cd nano-vllm
 # 固定 CUDA 13.0 的 PyTorch wheel，再安装项目依赖。
 python -m pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cu130
 python -m pip install -e ".[dev]"
-flashinfer download-kernels --cuda-version 13.0
+flashinfer download-kernels
 ```
 
 `-e` 表示使用当前目录中的代码，`[dev]` 额外安装 pytest。CUDA 相关包必须与本机环境兼容。安装完成后检查核心依赖能否导入：

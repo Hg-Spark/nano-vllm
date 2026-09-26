@@ -22,6 +22,9 @@ class PrefixRuntime:
     def enabled(self) -> bool:
         return self.cache.max_entries > 0
 
+    def __len__(self) -> int:
+        return len(self.cache)
+
     def entries(self) -> tuple[JointPrefixEntry, ...]:
         return self.cache.entries()
 
@@ -81,8 +84,8 @@ class PrefixRuntime:
         self,
         seq: Sequence,
         state_snapshot: GDNStateSnapshot,
+        prefix_tokens: int,
     ) -> None:
-        prefix_tokens = seq.committed_tokens
         if prefix_tokens <= 0:
             raise RuntimeError("cannot cache an empty prefix")
         if prefix_tokens > seq.num_prompt_tokens:

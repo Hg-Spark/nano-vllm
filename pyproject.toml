@@ -15,7 +15,7 @@ dependencies = [
     "torch==2.14.0",
     "triton>=3.0.0",
     "transformers>=5.2.0",
-    "flashinfer-python[cu13]==0.7.0",
+    "flashinfer-python==0.7.0",
     "safetensors",
 ]
 

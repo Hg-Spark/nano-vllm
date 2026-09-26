@@ -44,7 +44,7 @@ Gated DeltaNet  → 卷积状态 + 循环矩阵，每个活动请求独占状态
 ```bash
 python -m pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cu130
 python -m pip install -e ".[dev]"
-flashinfer download-kernels --cuda-version 13.0
+flashinfer download-kernels
 export NANOVLLM_MODEL=/absolute/path/to/Qwen3.5-MoE
 python example.py
 ```

@@ -68,7 +68,8 @@ class LLMEngineStepTest(unittest.TestCase):
         engine = object.__new__(LLMEngine)
         engine._closed = False
         engine._atexit_handler = Mock()
-        engine.model_runner = Mock()
+        runner = Mock()
+        engine.model_runner = runner
 
         with patch(
             "nanovllm.engine.llm_engine.atexit.unregister"
@@ -77,9 +78,36 @@ class LLMEngineStepTest(unittest.TestCase):
             engine.exit()
 
         unregister.assert_called_once()
-        engine.model_runner.exit.assert_called_once()
+        runner.exit.assert_called_once()
         self.assertTrue(engine._closed)
         self.assertIsNone(engine._atexit_handler)
+        self.assertIsNone(engine.model_runner)
+
+    def test_model_runner_warmup_profiles_full_token_budget(self):
+        runner = object.__new__(ModelRunner)
+        runner.config = SimpleNamespace(
+            max_num_batched_tokens=10,
+            max_model_len=4,
+            max_num_seqs=3,
+        )
+        runner.run = Mock()
+
+        with (
+            patch(
+                "nanovllm.engine.model_runner.torch.cuda.empty_cache"
+            ),
+            patch(
+                "nanovllm.engine.model_runner.torch.cuda.reset_peak_memory_stats"
+            ),
+        ):
+            runner.warmup_model()
+
+        chunks, is_prefill = runner.run.call_args.args
+        self.assertTrue(is_prefill)
+        self.assertEqual(
+            [chunk.num_tokens for chunk in chunks],
+            [4, 4, 2],
+        )
 
     def test_model_runner_exit_releases_gpu_owners(self):
         runner = object.__new__(ModelRunner)
@@ -89,6 +117,10 @@ class LLMEngineStepTest(unittest.TestCase):
         runner.sampler = object()
 
         with (
+            patch(
+                "nanovllm.engine.model_runner.torch.cuda.is_available",
+                return_value=True,
+            ),
             patch(
                 "nanovllm.engine.model_runner.torch.cuda.synchronize"
             ) as synchronize,
@@ -135,6 +167,40 @@ class LLMEngineStepTest(unittest.TestCase):
         self.assertEqual(result.prefix_snapshots, {seq.seq_id: snapshot})
         capture.assert_called_once_with(runner.model, chunk)
         self.assertIs(get_context(), previous_context)
+
+    def test_engine_init_failure_releases_model_runner(self):
+        config = SimpleNamespace(
+            max_model_len=16,
+            kvcache_block_size=16,
+            model="/tmp/model",
+        )
+        runner = Mock(num_kvcache_blocks=4)
+
+        with (
+            patch(
+                "nanovllm.engine.llm_engine.fields",
+                return_value=(),
+            ),
+            patch(
+                "nanovllm.engine.llm_engine.Config",
+                return_value=config,
+            ),
+            patch(
+                "nanovllm.engine.llm_engine.ModelRunner",
+                return_value=runner,
+            ),
+            patch(
+                "nanovllm.engine.llm_engine.AutoTokenizer.from_pretrained",
+                side_effect=RuntimeError("tokenizer init failed"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "tokenizer init failed",
+            ):
+                LLMEngine("/tmp/model")
+
+        runner.exit.assert_called_once()
 
     def test_add_request_accepts_exact_context_boundary(self):
         engine = object.__new__(LLMEngine)
@@ -270,6 +336,40 @@ class LLMEngineStepTest(unittest.TestCase):
             self.assertEqual(seq.committed_tokens, 0)
             self.assertEqual(seq.state_slot, -1)
             self.assertFalse(seq.block_table)
+
+    def test_postprocess_failure_recovers_mutated_request_state(self):
+        scheduler = make_scheduler()
+        seq = Sequence([0, 1, 2, 3, 4, 5])
+        scheduler.add(seq)
+        scheduled = scheduler.schedule()
+        snapshot = GDNStateSnapshot(
+            num_tokens=scheduled.prefill_chunks[0].end,
+            layers=(),
+        )
+
+        engine = object.__new__(LLMEngine)
+        engine.scheduler = scheduler
+        engine.model_runner = Mock()
+        engine.model_runner.run.return_value = BatchResult(
+            [None],
+            {seq.seq_id: snapshot},
+        )
+
+        with patch.object(
+            scheduler.prefix_runtime,
+            "publish",
+            side_effect=RuntimeError("publish failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "publish failed"):
+                engine._run_batch(
+                    scheduled.prefill_chunks,
+                    True,
+                )
+
+        self.assertEqual(seq.committed_tokens, 0)
+        self.assertEqual(seq.state_slot, -1)
+        self.assertFalse(seq.block_table)
+        self.assertIn(seq, scheduler.waiting)
 
     def test_step_commits_runner_result_from_scheduled_chunks(self):
         scheduler = make_scheduler()
