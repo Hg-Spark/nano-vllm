@@ -1,92 +1,471 @@
 from collections import deque
+from dataclasses import replace
 
 from nanovllm.config import Config
-from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.engine.block_manager import BlockManager
-
+from nanovllm.engine.hybrid_resources import HybridResources
+from nanovllm.engine.schedule import ScheduledChunk, SchedulerOutput
+from nanovllm.engine.sequence import Sequence, SequenceStatus
+from nanovllm.engine.state_manager import (
+    GDNStateSnapshot,
+    StateSlotManager,
+)
 
 class Scheduler:
 
-    def __init__(self, config: Config):
+    def __init__(
+        self,
+        config: Config,
+        num_kvcache_blocks: int,
+    ):
         self.max_num_seqs = config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
-        self.eos = config.eos
-        self.block_size = config.kvcache_block_size
-        self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
+        self.eos_token_ids = set(config.eos_token_ids)
+        self.block_manager = BlockManager(
+            num_kvcache_blocks,
+            config.kvcache_block_size,
+            max_prefix_entries=config.max_prefix_cache_entries,
+        )
+        self.state_manager = StateSlotManager(
+            config.max_num_seqs
+        )
+        self.resources = HybridResources(
+            self.block_manager,
+            self.state_manager,
+        )
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
 
     def is_finished(self):
-        return not self.waiting and not self.running
+        if self.waiting or self.running:
+            return False
+        self.validate_resource_accounting()
+        return True
 
     def add(self, seq: Sequence):
         self.waiting.append(seq)
 
-    def schedule(self) -> tuple[list[Sequence], bool]:
-        scheduled_seqs = []
-        num_batched_tokens = 0
+    def _validate_committed_prefix(self, seq: Sequence) -> None:
+        self.resources.validate_request(seq)
 
-        # prefill
-        while self.waiting and len(scheduled_seqs) < self.max_num_seqs:
-            seq = self.waiting[0]
-            remaining = self.max_num_batched_tokens - num_batched_tokens
-            if remaining == 0:
-                break
-            if not seq.block_table:
-                num_cached_blocks = self.block_manager.can_allocate(seq)
-                if num_cached_blocks == -1:
-                    break
-                num_tokens = seq.num_tokens - num_cached_blocks * self.block_size
+    def validate_resource_accounting(self) -> None:
+        self.resources.validate_accounting(
+            [*self.waiting, *self.running]
+        )
+
+    def _try_restore_prefix(self, seq: Sequence) -> bool:
+        if (
+            seq.committed_tokens != 0
+            or seq.block_table
+            or seq.state_slot >= 0
+        ):
+            return False
+
+        entry = self.block_manager.find_prefix(
+            seq,
+            max_tokens=max(0, seq.num_tokens - 1),
+        )
+        if entry is None or not self.state_manager.can_allocate(seq):
+            return False
+
+        self.resources.restore_prefix(
+            seq,
+            entry.block_ids,
+            entry.num_tokens,
+            entry.state_snapshot,
+        )
+        return True
+
+    def _decode_headroom_blocks(
+        self,
+        scheduled_decode: list[ScheduledChunk],
+    ) -> int:
+        """Reserve exactly the KV growth needed by the next decode step."""
+        scheduled_ids = {
+            chunk.seq.seq_id for chunk in scheduled_decode
+        }
+        reserved = 0
+        for seq in self.running:
+            if seq.seq_id in scheduled_ids:
+                if seq.num_completion_tokens + 1 >= seq.max_tokens:
+                    continue
+                target_tokens = len(seq) + 1
             else:
-                num_tokens = seq.num_tokens - seq.num_cached_tokens
-            if remaining < num_tokens and scheduled_seqs:  # only allow chunked prefill for the first seq
+                target_tokens = len(seq)
+            reserved += self.block_manager.additional_blocks_needed(
+                seq,
+                target_tokens,
+            )
+        return reserved
+
+    def _find_waiting_resource_victim(
+        self,
+        exclude: Sequence | None = None,
+        exclude_seq_ids: set[int] | None = None,
+    ) -> Sequence | None:
+        """Find an idle partial-prefill request that can release resources."""
+        for candidate in reversed(self.waiting):
+            if candidate is exclude:
+                continue
+            if (
+                exclude_seq_ids is not None
+                and candidate.seq_id in exclude_seq_ids
+            ):
+                continue
+            if candidate.block_table or candidate.state_slot >= 0:
+                return candidate
+        return None
+
+    def _schedule_prefill_pass(
+        self,
+        prefill_chunks: list[ScheduledChunk],
+        decode_count: int,
+        num_batched_tokens: int,
+        *,
+        reserved_free_blocks: int = 0,
+        max_new_seqs: int | None = None,
+        excluded_seq_ids: set[int] | None = None,
+    ) -> int:
+        """Scan each waiter once without consuming decode headroom."""
+        max_prefill_seqs = self.max_num_seqs - decode_count
+        initial_prefill_count = len(prefill_chunks)
+        num_waiting_to_scan = len(self.waiting)
+        for _ in range(num_waiting_to_scan):
+            if (
+                not self.waiting
+                or len(prefill_chunks) >= max_prefill_seqs
+            ):
                 break
-            if not seq.block_table:
-                self.block_manager.allocate(seq, num_cached_blocks)
-            seq.num_scheduled_tokens = min(num_tokens, remaining)
-            num_batched_tokens += seq.num_scheduled_tokens
-            if seq.num_cached_tokens + seq.num_scheduled_tokens == seq.num_tokens:
+            if (
+                max_new_seqs is not None
+                and (
+                    len(prefill_chunks) - initial_prefill_count
+                    >= max_new_seqs
+                )
+            ):
+                break
+
+            remaining_tokens = (
+                self.max_num_batched_tokens
+                - num_batched_tokens
+            )
+            if remaining_tokens == 0:
+                break
+
+            seq = self.waiting[0]
+            if (
+                excluded_seq_ids is not None
+                and seq.seq_id in excluded_seq_ids
+            ):
+                self.waiting.rotate(-1)
+                continue
+
+            self._validate_committed_prefix(seq)
+            if seq.committed_tokens == 0:
+                self._try_restore_prefix(seq)
+                self._validate_committed_prefix(seq)
+
+            num_remaining = (
+                seq.num_tokens - seq.committed_tokens
+            )
+            if num_remaining <= 0:
+                raise RuntimeError(
+                    f"sequence {seq.seq_id} has no remaining prefill tokens"
+                )
+
+            requested_tokens = min(
+                num_remaining,
+                remaining_tokens,
+            )
+            scheduled_tokens = (
+                self.block_manager.max_schedulable_tokens(
+                    seq,
+                    requested_tokens,
+                    reserved_free_blocks,
+                )
+            )
+            while (
+                scheduled_tokens == 0
+                and self.block_manager.evict_prefix()
+            ):
+                scheduled_tokens = (
+                    self.block_manager.max_schedulable_tokens(
+                        seq,
+                        requested_tokens,
+                        reserved_free_blocks,
+                    )
+                )
+            if scheduled_tokens == 0:
+                self.waiting.rotate(-1)
+                continue
+
+            if (
+                seq.state_slot < 0
+                and not self.state_manager.can_allocate(seq)
+            ):
+                self.waiting.rotate(-1)
+                continue
+
+            target_tokens = (
+                seq.committed_tokens + scheduled_tokens
+            )
+            self.resources.reserve(
+                seq,
+                target_tokens,
+            )
+
+            admitted = self.waiting.popleft()
+            if admitted is not seq:
+                raise RuntimeError("waiting queue changed during admission")
+
+            num_batched_tokens += scheduled_tokens
+            prefill_chunks.append(
+                ScheduledChunk(
+                    seq,
+                    seq.committed_tokens,
+                    target_tokens,
+                )
+            )
+
+            if target_tokens == seq.num_tokens:
                 seq.status = SequenceStatus.RUNNING
-                self.waiting.popleft()
                 self.running.append(seq)
-            scheduled_seqs.append(seq)
+            else:
+                self.waiting.append(seq)
 
-        if scheduled_seqs:
-            return scheduled_seqs, True
+        return num_batched_tokens
 
-        # decode
-        while self.running and len(scheduled_seqs) < self.max_num_seqs:
-            seq = self.running.popleft()
-            while not self.block_manager.can_append(seq):
+    def _release_runtime_state(self, seq: Sequence) -> None:
+        seq.pending_state_snapshot = None
+        self.resources.release(seq)
+        seq.committed_tokens = 0
+        seq.clear_runtime_features()
+
+    def schedule(self) -> SchedulerOutput:
+        decode_chunks: list[ScheduledChunk] = []
+        prefill_chunks: list[ScheduledChunk] = []
+        num_batched_tokens = 0
+        preempted_this_step = False
+
+        # Decode consumes the shared token budget first. Rotating selected
+        # requests prevents starvation when the budget is smaller than the
+        # number of active requests.
+        while (
+            self.running
+            and len(decode_chunks) < self.max_num_seqs
+            and num_batched_tokens < self.max_num_batched_tokens
+        ):
+            seq = self.running[0]
+            self._validate_committed_prefix(seq)
+            if seq.committed_tokens != len(seq) - 1:
+                raise RuntimeError(
+                    f"sequence {seq.seq_id} decode prefix mismatch"
+                )
+            self.running.popleft()
+
+            while (
+                self.block_manager.max_schedulable_tokens(seq, 1) == 0
+            ):
+                if self.block_manager.evict_prefix():
+                    continue
+
+                victim = self._find_waiting_resource_victim()
+                if victim is not None:
+                    self.preempt(victim)
+                    preempted_this_step = True
+                    continue
+
                 if self.running:
                     self.preempt(self.running.pop())
+                    preempted_this_step = True
                 else:
                     self.preempt(seq)
+                    preempted_this_step = True
+                    seq = None
                     break
-            else:
-                seq.num_scheduled_tokens = 1
-                seq.is_prefill = False
-                self.block_manager.may_append(seq)
-                scheduled_seqs.append(seq)
-        assert scheduled_seqs
-        self.running.extendleft(reversed(scheduled_seqs))
-        return scheduled_seqs, False
+
+            if seq is None:
+                break
+
+            self.block_manager.ensure_capacity(seq, len(seq))
+            decode_chunks.append(
+                ScheduledChunk(seq, seq.committed_tokens, len(seq))
+            )
+            num_batched_tokens += 1
+
+        self.running.extend(chunk.seq for chunk in decode_chunks)
+        if preempted_this_step:
+            return SchedulerOutput(decode_chunks=tuple(decode_chunks))
+
+        decode_headroom_blocks = self._decode_headroom_blocks(
+            decode_chunks
+        )
+        num_batched_tokens = self._schedule_prefill_pass(
+            prefill_chunks,
+            len(decode_chunks),
+            num_batched_tokens,
+            reserved_free_blocks=decode_headroom_blocks,
+        )
+
+        # If only waiting requests remain and every one is blocked by resources
+        # held by another waiter, keep releasing distinct holders until one
+        # request can advance. Shared prefix blocks may need several request
+        # references dropped before any physical KV page becomes free.
+        if not decode_chunks and not prefill_chunks:
+            preempted_waiters: set[int] = set()
+            for _ in range(len(self.waiting)):
+                victim = self._find_waiting_resource_victim(
+                    exclude_seq_ids=preempted_waiters,
+                )
+                if victim is None or len(self.waiting) <= 1:
+                    break
+
+                preempted_waiters.add(victim.seq_id)
+                self.preempt(victim)
+                num_batched_tokens = self._schedule_prefill_pass(
+                    prefill_chunks,
+                    len(decode_chunks),
+                    num_batched_tokens,
+                    max_new_seqs=1,
+                    excluded_seq_ids=preempted_waiters,
+                )
+                if prefill_chunks:
+                    break
+
+        if not decode_chunks and not prefill_chunks:
+            raise RuntimeError("scheduler could not make progress")
+        return SchedulerOutput(
+            decode_chunks=tuple(decode_chunks),
+            prefill_chunks=tuple(
+                replace(
+                    chunk,
+                    capture_snapshot=(
+                        self.block_manager.should_cache_prefix(
+                            chunk.seq,
+                            chunk.end,
+                        )
+                    ),
+                )
+                for chunk in prefill_chunks
+            ),
+        )
+
+    def _reset_to_waiting(
+        self,
+        seq: Sequence,
+        *,
+        front: bool,
+    ) -> None:
+        """Release hybrid history and replay the request from a valid prefix."""
+        self._validate_committed_prefix(seq)
+        if seq in self.running:
+            self.running.remove(seq)
+        if seq in self.waiting:
+            self.waiting.remove(seq)
+        seq.status = SequenceStatus.WAITING
+        self._release_runtime_state(seq)
+        if front:
+            self.waiting.appendleft(seq)
+        else:
+            self.waiting.append(seq)
+
+    def recover_failed_step(
+        self,
+        chunks: tuple[ScheduledChunk, ...],
+    ) -> None:
+        """Discard possibly mutated physical state and replay from history."""
+        for chunk in reversed(chunks):
+            self._reset_to_waiting(chunk.seq, front=True)
 
     def preempt(self, seq: Sequence):
-        seq.status = SequenceStatus.WAITING
-        seq.is_prefill = True
-        self.block_manager.deallocate(seq)
-        self.waiting.appendleft(seq)
+        """Release resources and replay the preempted request after its peers."""
+        self._reset_to_waiting(seq, front=False)
 
-    def postprocess(self, seqs: list[Sequence], token_ids: list[int], is_prefill: bool):
-        for seq, token_id in zip(seqs, token_ids):
-            self.block_manager.hash_blocks(seq)
-            seq.num_cached_tokens += seq.num_scheduled_tokens
-            seq.num_scheduled_tokens = 0
-            if is_prefill and seq.num_cached_tokens < seq.num_tokens:
+    def postprocess(
+        self,
+        chunks: tuple[ScheduledChunk, ...],
+        token_ids: list[int | None],
+        is_prefill: bool,
+        prefix_snapshots: dict[int, GDNStateSnapshot] | None = None,
+    ):
+        prefix_snapshots = prefix_snapshots or {}
+        if len(chunks) != len(token_ids):
+            raise RuntimeError(
+                "model result count does not match scheduled sequence count"
+            )
+
+        # Validate the whole batch before changing any logical boundary.
+        for chunk, token_id in zip(chunks, token_ids):
+            seq = chunk.seq
+            self._validate_committed_prefix(seq)
+            if seq.committed_tokens != chunk.start:
+                raise RuntimeError(
+                    f"sequence {seq.seq_id} scheduled prefix changed"
+                )
+            if chunk.end > len(seq):
+                raise RuntimeError(
+                    f"sequence {seq.seq_id} scheduled past known tokens"
+                )
+            if not is_prefill and (
+                chunk.num_tokens != 1 or chunk.end != len(seq)
+            ):
+                raise RuntimeError("decode must schedule the final token")
+            partial_prefill = is_prefill and chunk.end < len(seq)
+            if partial_prefill and token_id is not None:
+                raise RuntimeError(
+                    "partial prefill produced an unexpected sample"
+                )
+            if not partial_prefill and token_id is None:
+                raise RuntimeError(
+                    "completed model step did not produce a token"
+                )
+            if not partial_prefill and seq not in self.running:
+                raise RuntimeError(
+                    "completed request is missing from the running queue"
+                )
+            snapshot = prefix_snapshots.get(seq.seq_id)
+            if snapshot is None:
                 continue
+            if not is_prefill:
+                raise RuntimeError(
+                    "joint prefix snapshots are valid only for prefill"
+                )
+            if not isinstance(snapshot, GDNStateSnapshot):
+                raise RuntimeError("invalid GDN state snapshot")
+            if snapshot.num_tokens != chunk.end:
+                raise RuntimeError(
+                    "GDN snapshot boundary does not match scheduled prefix"
+                )
+
+        # Publish all reusable prefixes before moving any request's logical
+        # boundary. A publish failure therefore leaves the whole batch
+        # uncommitted and replayable.
+        for chunk in chunks:
+            snapshot = prefix_snapshots.get(chunk.seq.seq_id)
+            if snapshot is not None:
+                self.block_manager.publish_prefix(
+                    chunk.seq,
+                    snapshot,
+                    chunk.end,
+                )
+
+        for chunk, token_id in zip(chunks, token_ids):
+            seq = chunk.seq
+            seq.committed_tokens = chunk.end
+
+            if is_prefill and chunk.end < len(seq):
+                continue
+
             seq.append_token(token_id)
-            if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
+
+            hit_eos = (
+                not seq.ignore_eos
+                and token_id in self.eos_token_ids
+            )
+            if (
+                hit_eos
+                or seq.num_completion_tokens == seq.max_tokens
+            ):
                 seq.status = SequenceStatus.FINISHED
-                self.block_manager.deallocate(seq)
+                self._release_runtime_state(seq)
                 self.running.remove(seq)
