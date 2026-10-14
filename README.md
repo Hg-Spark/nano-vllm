@@ -1,66 +1,51 @@
-<p align="center">
-<img width="300" src="assets/logo.png">
-</p>
+# nano-vLLM — Qwen3.5 Hybrid Runtime
 
-<p align="center">
-<a href="https://trendshift.io/repositories/15323" target="_blank"><img src="https://trendshift.io/api/badge/repositories/15323" alt="GeeeekExplorer%2Fnano-vllm | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-</p>
+面向 **Qwen3.5 Dense / MoE** 的单 GPU 推理实验实现。运行时同时管理 Full Attention 的 Paged KV 与 Gated DeltaNet 的 Conv / Recurrent State，支持 Dense SwiGLU 或 FlashInfer CUTLASS Fused MoE。
 
-# Nano-vLLM
+## 支持范围
 
-A lightweight vLLM implementation built from scratch.
+| 模块 | 当前实现 |
+| --- | --- |
+| 模型 | Qwen3.5 Dense / MoE、非量化完整 safetensors、单 GPU；不支持 Qwen3、TP/EP、CPU 卸载、量化权重 |
+| 计算 | FlashInfer Paged Attention；SM90+ FlashInfer Packed GDN Prefill / Indexed Decode；旧 GPU PyTorch FP32 Chunked GDN；打包 Dense FFN / FlashInfer CUTLASS MoE |
+| 调度 | Continuous Batching、Decode-first token budget、State-aware Chunked Prefill |
+| 状态 | Paged KV、GDN State Slot、联合抢占/恢复、可选 Prefix Cache |
+| 输入 | 文本与单图（Processor / 视觉塔），不支持多图/视频 |
+| 可选 | FP8 E4M3 KV、固定 Decode CUDA Graph bucket；Prefill Eager |
 
-## Key Features
+GDN 循环矩阵及快照保持 FP32 `[V,K]` 布局；SM90+ 直接在 State Pool 上执行 FlashInfer，旧 GPU 使用 PyTorch 路径。输入投影和 Dense MLP 的 Gate/Up 权重在 checkpoint 加载后打包。MoE Prefill / Decode 统一使用 FlashInfer CUTLASS，SM75（例如 RTX 2080 Ti）不支持该 MoE 后端。模型 dtype 必须显式为 `float16` 或 `bfloat16`。
 
-* 🚀 **Fast offline inference** - Comparable inference speeds to vLLM
-* 📖 **Readable codebase** - Clean implementation in ~ 1,200 lines of Python code
-* ⚡ **Optimization Suite** - Prefix caching, Tensor Parallelism, Torch compilation, CUDA graph, etc.
+**执行边界：** Prefill 使用 FlashInfer Paged Attention Eager；Decode 根据 Batch size 选择固定 CUDA Graph 或 Eager。启动时以 `gpu_memory_utilization=0.8`（默认）进行静态 KV 定容，**不执行无缓存 Attention/GDN Profiling Warmup**；启用 Decode Graph 时仍需预执行、捕获并清理临时写入的状态。物理 KV Pool 启动时预分配，逻辑 Block 在请求运行期间按需分配。显存余量不是任意负载均不会 OOM 的保证。`max_visual_tokens_per_request` 可显式限制图像请求视觉 Token 数量并减少相应的 KV 定容扣减；未设置时沿用保守上限。启用 Graph 后记录每个 Bucket 的显存变化。
 
-## Installation
+## 最小运行
 
 ```bash
-pip install git+https://github.com/GeeeekExplorer/nano-vllm.git
+git clone --branch qwen3.5 --single-branch https://github.com/Hg-Spark/nano-vllm.git
+cd nano-vllm
+python -m pip install -e ".[dev]"
+flashinfer download-kernels
+export NANOVLLM_MODEL=/absolute/path/to/Qwen3.5
+export NANOVLLM_DTYPE=float16
+python example.py
+python -m scripts.chat "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE"
 ```
 
-## Model Download
+依赖以 [pyproject.toml](pyproject.toml) 为准；FlashInfer 固定 0.7.0。完整说明见 [安装与运行](docs/getting-started.md)。
 
-To download the model weights manually, use the following command:
-```bash
-huggingface-cli download --resume-download Qwen/Qwen3-0.6B \
-  --local-dir ~/huggingface/Qwen3-0.6B/ \
-  --local-dir-use-symlinks False
-```
+## 文档
 
-## Quick Start
+- [模型与运行时](docs/runtime.md)：模型数学、批次布局、Forward 与代码入口。
+- [调度与缓存](docs/scheduling.md)：KV/GDN 状态不变量、提交、抢占、恢复与前缀缓存。
+- [验证与性能](docs/validation.md)：测试、数值对齐、Benchmark、Profile 和证据边界。
+- [设计取舍](docs/design-decisions.md)：vLLM / SGLang 参考与简化的理由。
+- [路线图](ROADMAP.md) 与 [实验记录](results/README.md)。
 
-See `example.py` for usage. The API mirrors vLLM's interface with minor differences in the `LLM.generate` method:
-```python
-from nanovllm import LLM, SamplingParams
-llm = LLM("/YOUR/MODEL/PATH", enforce_eager=True, tensor_parallel_size=1)
-sampling_params = SamplingParams(temperature=0.6, max_tokens=256)
-prompts = ["Hello, Nano-vLLM."]
-outputs = llm.generate(prompts, sampling_params)
-outputs[0]["text"]
-```
+## 提交与源码导读
 
-## Benchmark
+相对 `main` 的重构历史按职责整理为主题提交（后续修改也继续按主题提交）：`feat(model/cache/runtime)` 构成模型与执行主链；`feat(cli/validation)` 提供实验入口；`test(model/kernels/scheduler/engine/cli)` 验证模块契约；`docs` 收录设计与证据。可在 [qwen3.5 提交历史](https://github.com/Hg-Spark/nano-vllm/commits/qwen3.5/)查看最新顺序；若本地也已获取 `main` 引用，可运行 `git log --oneline main..qwen3.5`。旧版 Warmup、参考后端与重复实现均未作为独立路径保留。
 
-See `bench.py` for benchmark.
+建议依次阅读 [模型与运行时](docs/runtime.md) → [调度与缓存](docs/scheduling.md) → [设计取舍](docs/design-decisions.md) → [验证与性能](docs/validation.md)，避免把未运行的 GPU 验证当作功能已经通过实测。
 
-**Test Configuration:**
-- Hardware: RTX 4070 Laptop (8GB)
-- Model: Qwen3-0.6B
-- Total Requests: 256 sequences
-- Input Length: Randomly sampled between 100–1024 tokens
-- Output Length: Randomly sampled between 100–1024 tokens
+**实测边界：** [2026-10-13 Dense 2B FP16 历史记录](results/2026-10-13_dense-2b_fp16.md)中 2080 Ti 上 6 个请求、15 个生成 token 与 HF 一致，使用旧提交及当时未提交的修改。不能据此声称当前 HEAD 的 MoE、长上下文、Graph、多模态与性能完成验证。
 
-**Performance Results:**
-| Inference Engine | Output Tokens | Time (s) | Throughput (tokens/s) |
-|----------------|-------------|----------|-----------------------|
-| vLLM           | 133,966     | 98.37    | 1361.84               |
-| Nano-vLLM      | 133,966     | 93.41    | 1434.13               |
-
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=GeeeekExplorer/nano-vllm&type=Date)](https://www.star-history.com/#GeeeekExplorer/nano-vllm&Date)
+本项目沿用 [MIT 许可证](LICENSE)。
