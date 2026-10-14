@@ -194,3 +194,7 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Local A/B benchmark outputs (keep raw measurements out of source commits)
+/results/ab_*/
+/results/preempt_*/
