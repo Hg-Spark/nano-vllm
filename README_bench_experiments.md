@@ -130,3 +130,5 @@ include decode and prefill work in the step. They do not isolate GPU kernel time
 Results must be preceded by passing correctness tests for the actual GPU, model and
 runtime configuration. The package has been Python/Shell syntax-checked and its
 summarizer smoke-tested with synthetic JSON; **CUDA execution is not yet verified**.
+
+> Fixed Decode timing: `cuda_event_step_window_seconds` brackets the Engine step on the CUDA stream and may include host submission gaps; it is **not** isolated kernel GPU execution time. Preemption sweep rejects zero observed preemptions.

@@ -145,7 +145,6 @@ def run_fixed_decode(engine, a, graph_replays):
 
     def step(phase):
         _, stats = engine.step()
-        torch.cuda.synchronize()
         if stats.prefill_tokens or stats.decode_tokens != a.max_num_seqs:
             raise RuntimeError(
                 f"{phase} batch drift: prefill={stats.prefill_tokens}, "
@@ -160,10 +159,10 @@ def run_fixed_decode(engine, a, graph_replays):
     replay_before = graph_replays()
     step_durations = []
     gpu_step_durations = []
+    start_ev = torch.cuda.Event(enable_timing=True)
+    end_ev = torch.cuda.Event(enable_timing=True)
     t_begin = perf_counter()
     for _ in range(a.measure_steps):
-        start_ev = torch.cuda.Event(enable_timing=True)
-        end_ev = torch.cuda.Event(enable_timing=True)
         t0 = perf_counter()
         start_ev.record()
         step("measurement")
@@ -178,6 +177,7 @@ def run_fixed_decode(engine, a, graph_replays):
         raise RuntimeError(f"expected {a.measure_steps} measured graph replays, got {replays}")
     if not a.graph_sizes and replays:
         raise RuntimeError("Eager unexpectedly used a graph")
+    # CUDA event elapsed time includes host submission gaps, not pure kernel time.
     seqs = list(engine.scheduler.running)
     if len(seqs) != a.max_num_seqs:
         raise RuntimeError("fixed decode batch lost running requests")
@@ -188,7 +188,7 @@ def run_fixed_decode(engine, a, graph_replays):
         "elapsed_seconds": duration,
         "output_throughput_tok_s": a.max_num_seqs * a.measure_steps / duration,
         "step_latency_seconds": summarize(step_durations),
-        "gpu_step_latency_seconds": summarize(gpu_step_durations),
+        "cuda_event_step_window_seconds": summarize(gpu_step_durations),
         "tpot_seconds": summarize(step_durations),
         "peak_cuda_memory_gib": torch.cuda.max_memory_allocated() / 1024**3,
         "peak_cuda_reserved_gib": torch.cuda.max_memory_reserved() / 1024**3,

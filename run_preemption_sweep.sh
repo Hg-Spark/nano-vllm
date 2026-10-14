@@ -12,7 +12,7 @@ for ((r=1; r<=REPEATS; r++)); do
       --scenario preemption --max-model-len 4096 \
       --input-len 1024 --output-len 256 --num-requests 32 \
       --max-num-seqs 8 --budget 512 --cache-entries 0 \
-      --gpu-memory-utilization "$utilization" \
+      --gpu-memory-utilization "$utilization" --require-preemptions \
       --out "$RESULT_DIR/preempt_${utilization}_r${r}.json"
   done
 done
