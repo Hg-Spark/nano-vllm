@@ -1,0 +1,164 @@
+import math
+from dataclasses import dataclass
+
+import flashinfer
+import torch
+
+from nanovllm.engine.batch_common import DecodeBatchLayout, _pinned_cpu_tensor
+from nanovllm.layers.attention import flashinfer_attention_spec
+from nanovllm.utils.context import Context, use_context
+
+FLASHINFER_GRAPH_WORKSPACE_BYTES = 128 * 1024 * 1024
+
+
+@dataclass
+class DecodeGraphBucket:
+    batch_size: int
+    max_model_len: int
+    block_size: int
+    model_config: object
+    workspace_bytes: int = FLASHINFER_GRAPH_WORKSPACE_BYTES
+
+    def __post_init__(self) -> None:
+        if self.batch_size <= 0 or self.block_size <= 0:
+            raise ValueError("decode graph batch_size and block_size must be positive")
+
+        self.max_page_indices = self.batch_size * math.ceil(self.max_model_len / self.block_size)
+        self.workspace = torch.zeros(self.workspace_bytes, dtype=torch.uint8, device="cuda")
+        self.input_ids = torch.zeros(self.batch_size, dtype=torch.int64, device="cuda")
+        self.rope_positions = torch.zeros(3, self.batch_size, dtype=torch.int64, device="cuda")
+        self.slot_mapping = torch.zeros(self.batch_size, dtype=torch.int32, device="cuda")
+        self.state_slot_ids = torch.zeros(self.batch_size, dtype=torch.int32, device="cuda")
+        self.paged_kv_indptr = torch.arange(self.batch_size + 1, dtype=torch.int32, device="cuda")
+        self.paged_kv_indices = torch.zeros(self.max_page_indices, dtype=torch.int32, device="cuda")
+        self.paged_kv_last_page_len = torch.ones(self.batch_size, dtype=torch.int32, device="cuda")
+        self.wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+            self.workspace,
+            kv_layout="NHD",
+            use_cuda_graph=True,
+            paged_kv_indptr_buffer=self.paged_kv_indptr,
+            paged_kv_indices_buffer=self.paged_kv_indices,
+            paged_kv_last_page_len_buffer=self.paged_kv_last_page_len,
+            backend="auto",
+        )
+        self.context = Context(
+            is_prefill=False,
+            slot_mapping=self.slot_mapping,
+            paged_kv_indptr=self.paged_kv_indptr,
+            paged_kv_indices=self.paged_kv_indices,
+            paged_kv_last_page_len=self.paged_kv_last_page_len,
+            attention_wrapper=self.wrapper,
+            state_slot_ids=self.state_slot_ids,
+        )
+        self.graph: torch.cuda.CUDAGraph | None = None
+        self.logits: torch.Tensor | None = None
+
+    @property
+    def captured(self) -> bool:
+        return self.graph is not None and self.logits is not None
+
+    def can_run(self, layout: DecodeBatchLayout) -> bool:
+        return (
+            len(layout.input_ids) == self.batch_size
+            and len(layout.paged_kv_indices) <= self.max_page_indices
+        )
+
+    @staticmethod
+    def _copy_layout(destination: torch.Tensor, values) -> None:
+        destination.copy_(_pinned_cpu_tensor(values, destination.dtype), non_blocking=True)
+
+    def load(self, layout: DecodeBatchLayout) -> None:
+        if not self.can_run(layout):
+            raise ValueError("decode layout does not fit graph bucket")
+        self._copy_layout(self.input_ids, layout.input_ids)
+        self._copy_layout(self.rope_positions, layout.rope_positions)
+        self._copy_layout(self.slot_mapping, layout.slot_mapping)
+        self._copy_layout(self.state_slot_ids, layout.state_slots)
+        self._copy_layout(self.paged_kv_indptr, layout.paged_kv_indptr)
+        num_indices = len(layout.paged_kv_indices)
+        self._copy_layout(self.paged_kv_indices[:num_indices], layout.paged_kv_indices)
+        self._copy_layout(self.paged_kv_last_page_len, layout.paged_kv_last_page_len)
+
+    def _plan(self, num_page_indices: int, model, kv_cache: torch.Tensor) -> None:
+        model_dtype = next(model.parameters()).dtype
+        num_qo_heads, num_kv_heads, head_dim, plan_kwargs = flashinfer_attention_spec(
+            self.model_config, model_dtype, kv_cache.dtype
+        )
+        self.wrapper.plan(
+            self.paged_kv_indptr,
+            self.paged_kv_indices[:num_page_indices],
+            self.paged_kv_last_page_len,
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+            self.block_size,
+            **plan_kwargs,
+        )
+
+    def prepare(self, layout: DecodeBatchLayout, model, kv_cache: torch.Tensor) -> None:
+        self.load(layout)
+        self._plan(len(layout.paged_kv_indices), model, kv_cache)
+
+    def _seed_capture_inputs(self) -> None:
+        seq_ids = torch.arange(self.batch_size, dtype=torch.int32, device="cuda")
+        self.input_ids.zero_()
+        self.rope_positions.zero_()
+        self.slot_mapping.copy_(seq_ids * self.block_size)
+        self.state_slot_ids.copy_(seq_ids)
+        self.paged_kv_indptr.copy_(
+            torch.arange(self.batch_size + 1, dtype=torch.int32, device="cuda")
+        )
+        self.paged_kv_indices[: self.batch_size].copy_(seq_ids)
+        self.paged_kv_last_page_len.fill_(1)
+
+    def _clear_capture_state(self, model, kv_cache: torch.Tensor) -> None:
+        kv_cache[:, :, : self.batch_size].zero_()
+        for module in model.state_cache_modules():
+            module.conv_state[: self.batch_size].zero_()
+            module.recurrent_state[: self.batch_size].zero_()
+
+    def capture(self, model, kv_cache: torch.Tensor, num_kv_cache_blocks: int) -> None:
+        if num_kv_cache_blocks < self.batch_size:
+            raise RuntimeError("not enough KV pages to seed decode graph capture")
+
+        self._seed_capture_inputs()
+        capture_stream = torch.cuda.Stream()
+        try:
+            for is_capture in (False, True):
+                self._clear_capture_state(model, kv_cache)
+                self._plan(self.batch_size, model, kv_cache)
+                capture_stream.wait_stream(torch.cuda.current_stream())
+                if not is_capture:
+                    with (
+                        torch.cuda.stream(capture_stream),
+                        torch.inference_mode(),
+                        use_context(self.context),
+                    ):
+                        model.compute_logits(model(self.input_ids, self.rope_positions))
+                    torch.cuda.current_stream().wait_stream(capture_stream)
+                    torch.cuda.synchronize()
+                else:
+                    graph = torch.cuda.CUDAGraph()
+                    with (
+                        torch.inference_mode(),
+                        torch.cuda.graph(graph, stream=capture_stream),
+                        use_context(self.context),
+                    ):
+                        logits = model.compute_logits(model(self.input_ids, self.rope_positions))
+                    torch.cuda.current_stream().wait_stream(capture_stream)
+                    self.graph = graph
+                    self.logits = logits
+        finally:
+            self._clear_capture_state(model, kv_cache)
+            torch.cuda.synchronize()
+
+    def replay(self) -> torch.Tensor:
+        if not self.captured:
+            raise RuntimeError("decode graph bucket has not been captured")
+        self.graph.replay()
+        return self.logits
+
+    def release(self) -> None:
+        if self.graph is not None and hasattr(self.graph, "reset"):
+            self.graph.reset()
+        self.graph = self.logits = self.wrapper = self.context = self.workspace = None
