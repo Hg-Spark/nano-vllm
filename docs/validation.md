@@ -283,6 +283,32 @@ python -m scripts.verify_qwen3_5_multimodal "$NANOVLLM_MODEL" /path/to/image.jpg
 
 三种实验都可观察 PyTorch `allocated` 峰值、`reserved` 峰值和运行结束时的驱动空闲显存（GiB）。`max_prefill_step_tokens` 和 `max_decode_step_tokens` 应与计划的边界负载核对，不可只根据配置参数声称覆盖上限。`bench.py` 与 `profile_decode.py` 将这些值写入结果，单图验证则打印 Nano 推理阶段的显存摘要。`free_after` 不是运行中的最小空闲量；`allocated` 与 `reserved` 是 PyTorch 分配器指标，不等于全部驱动级显存使用量。Profiler 自身也可能增加测量开销。测试失败/OOM 必须保留原始异常，不能把未完成的负载记为 PASS。
 
+## Hybrid Benchmark 消融实验
+
+在仓库根目录使用统一脚本执行五类离线实验：固定 Batch Decode、动态吞吐、共享前缀、长 Prompt 干扰和抢占压力。它们直接驱动 Engine，不包含 HTTP 或泊松到达流量；输出延迟不能作为在线服务 SLO 结论。
+
+```bash
+export NANOVLLM_MODEL=/absolute/path/to/Qwen3.5
+export NANOVLLM_DTYPE=float16
+REPEATS=1 bash benchmarks/run.sh smoke
+REPEATS=5 bash benchmarks/run.sh full
+REPEATS=5 bash benchmarks/run.sh preemption
+```
+
+`RESULT_DIR` 可自定义保存位置，`RUN_HF_VALIDATION=0` 可跳过非抢占模式的前置 HF 验证（正式性能对照不建议跳过）。单组实验可运行 `python -m benchmarks.bench_experiments --help`；仅汇总可运行 `python -m benchmarks.summarize_bench results/<目录> --min-repeats 5`。
+
+| 实验 | A/B 控制 | 观察 |
+| --- | --- | --- |
+| Decode | 固定 B 下关闭或开启相同 B 的 Graph Bucket | 每步 wall-clock、吞吐与 Replay 次数 |
+| Prefill 干扰 | 同调度器的 Mixed 与 Decode-first Step 互斥 | 长请求 TTFT、短请求 Token Gap |
+| Joint Prefix | 缓存关闭与缓存开启，目标请求共享相同前缀 | TTFT、命中比例、恢复 Token、Snapshot 存储字节 |
+| 动态吞吐 | Eager 与 Graph Bucket | Output tok/s、TPOT、峰值显存 |
+| 抢占压力 | KV 显存预算阶梯 | 实际抢占次数、吞吐；未观察到抢占视为失败 |
+
+固定 Decode 的 `cuda_event_step_window_seconds` 是 CUDA Event 包住 Engine Step 的时间窗口，**包含可能发生的 CPU 提交间隙**；不是纯 Kernel 耗时。测量 GPU Kernel 应使用 `scripts.profile_decode` 或 Nsight。抢占次数与被抢占时的已提交 Token 数均不是恢复耗时。前缀 Snapshot 存储字节不等于 GPU→CPU 传输耗时。
+
+每组独立进程执行且保留失败结果；汇总先比较同负载的完整输出 Hash，再计算 A/B 百分比。基准使用合成 Token、固定输出长度，小样本 P99 Token Gap 不代表真实在线服务尾延迟。正式结论需要至少五轮并记录 Git SHA、模型 revision、GPU、dtype 和工作负载。
+
 ## 先 profile，再选择 kernel
 
 ```bash

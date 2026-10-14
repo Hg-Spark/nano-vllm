@@ -13,7 +13,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Compile Python without runtime dependencies
-        run: python -m compileall -q nanovllm scripts tests
+        run: python -m compileall -q nanovllm scripts benchmarks tests
       - name: Run dependency-light CLI regression tests
         run: |
           python -B -m unittest \
@@ -21,6 +21,7 @@ jobs:
             tests.unit.test_experiment_cli \
             tests.unit.test_diagnosis_script \
             tests.unit.test_experiment_measurement \
+            tests.unit.test_bench_experiments \
             tests.unit.test_script_reporting \
             tests.unit.test_script_probes \
             tests.unit.test_llm_engine \

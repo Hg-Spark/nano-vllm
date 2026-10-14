@@ -23,6 +23,7 @@ jobs:
           python -m unittest -v \
             tests.unit.test_experiment_cli \
             tests.unit.test_experiment_measurement \
+            tests.unit.test_bench_experiments \
             tests.unit.test_diagnosis_script \
             tests.unit.test_script_probes \
             tests.unit.test_script_reporting \
