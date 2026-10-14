@@ -1,0 +1,412 @@
+{
+  "status": "completed",
+  "model": "D:/models/Qwen3.5-2B",
+  "download": "stopped",
+  "dtype": "float16",
+  "enable_thinking": false,
+  "temperature": 0.0,
+  "max_new_tokens": 64,
+  "gdn_prefill": "HF chunk 64",
+  "decode_graph": false,
+  "max_num_batched_tokens": 128,
+  "max_model_len": 512,
+  "gpu_memory_utilization": 0.9,
+  "cases": [
+    {
+      "name": "cn_capital",
+      "question": "中国的首都是哪里？请只回答城市名称。",
+      "prompt_ids": [
+        248045,
+        846,
+        198,
+        96328,
+        102357,
+        96878,
+        99549,
+        10992,
+        96220,
+        96227,
+        97913,
+        97035,
+        98436,
+        1710,
+        248046,
+        198,
+        248045,
+        74455,
+        198,
+        248068,
+        271,
+        248069,
+        271
+      ],
+      "hf_tokens": [
+        98116,
+        248046
+      ],
+      "hf_reply": "北京",
+      "hf_seconds": 1.2122892359999966,
+      "nano_tokens": [
+        98116,
+        248046
+      ],
+      "nano_reply": "北京",
+      "nano_seconds": 2.0500769909999974,
+      "prompt_matched": true,
+      "tokens_matched": true,
+      "reached_token_limit": false,
+      "logit_comparison": [
+        {
+          "step": 0,
+          "finite": true,
+          "max_abs_error": 0.029296875,
+          "mean_abs_error": 0.0047896322794258595,
+          "argmax_matched": true
+        },
+        {
+          "step": 1,
+          "finite": true,
+          "max_abs_error": 0.025390625,
+          "mean_abs_error": 0.0034707386512309313,
+          "argmax_matched": true
+        }
+      ]
+    },
+    {
+      "name": "arithmetic",
+      "question": "2+2等于几？只回答数字。",
+      "prompt_ids": [
+        248045,
+        846,
+        198,
+        17,
+        10,
+        17,
+        102149,
+        96370,
+        10992,
+        96227,
+        97913,
+        99129,
+        1710,
+        248046,
+        198,
+        248045,
+        74455,
+        198,
+        248068,
+        271,
+        248069,
+        271
+      ],
+      "hf_tokens": [
+        19,
+        248046
+      ],
+      "hf_reply": "4",
+      "hf_seconds": 0.27986423900000545,
+      "nano_tokens": [
+        19,
+        248046
+      ],
+      "nano_reply": "4",
+      "nano_seconds": 0.36910405300000093,
+      "prompt_matched": true,
+      "tokens_matched": true,
+      "reached_token_limit": false,
+      "logit_comparison": [
+        {
+          "step": 0,
+          "finite": true,
+          "max_abs_error": 0.0234375,
+          "mean_abs_error": 0.0034629134461283684,
+          "argmax_matched": true
+        },
+        {
+          "step": 1,
+          "finite": true,
+          "max_abs_error": 0.046875,
+          "mean_abs_error": 0.0034970405977219343,
+          "argmax_matched": true
+        }
+      ]
+    },
+    {
+      "name": "en_capital",
+      "question": "What is the capital of France? Answer with only the city name.",
+      "prompt_ids": [
+        248045,
+        846,
+        198,
+        3710,
+        369,
+        279,
+        6511,
+        314,
+        9338,
+        30,
+        21134,
+        440,
+        1132,
+        279,
+        3177,
+        803,
+        13,
+        248046,
+        198,
+        248045,
+        74455,
+        198,
+        248068,
+        271,
+        248069,
+        271
+      ],
+      "hf_tokens": [
+        57590,
+        248046
+      ],
+      "hf_reply": "Paris",
+      "hf_seconds": 0.27778184000000294,
+      "nano_tokens": [
+        57590,
+        248046
+      ],
+      "nano_reply": "Paris",
+      "nano_seconds": 0.35627775100000036,
+      "prompt_matched": true,
+      "tokens_matched": true,
+      "reached_token_limit": false,
+      "logit_comparison": [
+        {
+          "step": 0,
+          "finite": true,
+          "max_abs_error": 0.03125,
+          "mean_abs_error": 0.00598433893173933,
+          "argmax_matched": true
+        },
+        {
+          "step": 1,
+          "finite": true,
+          "max_abs_error": 0.0234375,
+          "mean_abs_error": 0.0032326322980225086,
+          "argmax_matched": true
+        }
+      ]
+    },
+    {
+      "name": "translation",
+      "question": "把英文 apple 翻译成中文，只回答译文。",
+      "prompt_ids": [
+        248045,
+        846,
+        198,
+        96373,
+        98936,
+        22544,
+        220,
+        144886,
+        99986,
+        3709,
+        96227,
+        97913,
+        118829,
+        1710,
+        248046,
+        198,
+        248045,
+        74455,
+        198,
+        248068,
+        271,
+        248069,
+        271
+      ],
+      "hf_tokens": [
+        99203,
+        248046
+      ],
+      "hf_reply": "苹果",
+      "hf_seconds": 0.14149096999999955,
+      "nano_tokens": [
+        99203,
+        248046
+      ],
+      "nano_reply": "苹果",
+      "nano_seconds": 0.19561512800000003,
+      "prompt_matched": true,
+      "tokens_matched": true,
+      "reached_token_limit": false,
+      "logit_comparison": [
+        {
+          "step": 0,
+          "finite": true,
+          "max_abs_error": 0.02099609375,
+          "mean_abs_error": 0.0032950411550700665,
+          "argmax_matched": true
+        },
+        {
+          "step": 1,
+          "finite": true,
+          "max_abs_error": 0.03125,
+          "mean_abs_error": 0.0030362943653017282,
+          "argmax_matched": true
+        }
+      ]
+    },
+    {
+      "name": "chat_greeting",
+      "question": "我叫小明。请用一句话向我问好。",
+      "prompt_ids": [
+        248045,
+        846,
+        198,
+        116067,
+        115942,
+        1710,
+        139054,
+        110827,
+        102604,
+        137961,
+        1710,
+        248046,
+        198,
+        248045,
+        74455,
+        198,
+        248068,
+        271,
+        248069,
+        271
+      ],
+      "hf_tokens": [
+        115942,
+        3709,
+        109266,
+        6115,
+        248046
+      ],
+      "hf_reply": "小明，你好！",
+      "hf_seconds": 0.454778546,
+      "nano_tokens": [
+        115942,
+        3709,
+        109266,
+        6115,
+        248046
+      ],
+      "nano_reply": "小明，你好！",
+      "nano_seconds": 0.5535702790000059,
+      "prompt_matched": true,
+      "tokens_matched": true,
+      "reached_token_limit": false,
+      "logit_comparison": [
+        {
+          "step": 0,
+          "finite": true,
+          "max_abs_error": 0.0234375,
+          "mean_abs_error": 0.003588504856452346,
+          "argmax_matched": true
+        },
+        {
+          "step": 1,
+          "finite": true,
+          "max_abs_error": 0.01953125,
+          "mean_abs_error": 0.0030447524040937424,
+          "argmax_matched": true
+        }
+      ]
+    },
+    {
+      "name": "chat_memory",
+      "question": "我刚才说我叫什么名字？请直接回答。",
+      "prompt_ids": [
+        248045,
+        846,
+        198,
+        116067,
+        115942,
+        1710,
+        139054,
+        110827,
+        102604,
+        137961,
+        1710,
+        248046,
+        198,
+        248045,
+        74455,
+        198,
+        115942,
+        3709,
+        109266,
+        6115,
+        248046,
+        198,
+        248045,
+        846,
+        198,
+        95815,
+        108943,
+        96003,
+        116067,
+        96407,
+        98878,
+        10992,
+        138143,
+        97913,
+        1710,
+        248046,
+        198,
+        248045,
+        74455,
+        198,
+        248068,
+        271,
+        248069,
+        271
+      ],
+      "hf_tokens": [
+        115942,
+        248046
+      ],
+      "hf_reply": "小明",
+      "hf_seconds": 0.31440568099999666,
+      "nano_tokens": [
+        115942,
+        248046
+      ],
+      "nano_reply": "小明",
+      "nano_seconds": 0.3709955530000002,
+      "prompt_matched": true,
+      "tokens_matched": true,
+      "reached_token_limit": false,
+      "logit_comparison": [
+        {
+          "step": 0,
+          "finite": true,
+          "max_abs_error": 0.03125,
+          "mean_abs_error": 0.0031672318000346422,
+          "argmax_matched": true
+        },
+        {
+          "step": 1,
+          "finite": true,
+          "max_abs_error": 0.017578125,
+          "mean_abs_error": 0.0026607513427734375,
+          "argmax_matched": true
+        }
+      ]
+    }
+  ],
+  "runtime": {
+    "model_class": "Qwen3_5ForCausalLM",
+    "is_moe": false,
+    "tied_embeddings": true,
+    "kv_layers": 6,
+    "gdn_layers": 18,
+    "moe_workspace": false
+  },
+  "all_tokens_matched": true,
+  "name_recalled": true
+}

@@ -1,0 +1,29 @@
+name: Code style
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned Ruff
+        run: python -m pip install ruff==0.14.4
+      - name: Check Python import ordering
+        run: ruff check --select I nanovllm scripts tests
+      - name: Check Python formatting
+        run: ruff format --check nanovllm scripts tests || { ruff format --diff nanovllm scripts tests; exit 1; }
+      - name: Run lightweight CLI and experiment tests
+        run: |
+          python -m unittest -v \
+            tests.unit.test_experiment_cli \
+            tests.unit.test_experiment_measurement \
+            tests.unit.test_diagnosis_script \
+            tests.unit.test_script_probes \
+            tests.unit.test_script_reporting \
+            tests.unit.test_scripts

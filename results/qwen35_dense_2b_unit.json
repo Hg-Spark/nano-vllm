@@ -1,0 +1,10 @@
+{
+  "exit_code": 0,
+  "passed": 171,
+  "failed": 0,
+  "skipped": 1,
+  "local_compatibility": [
+    "preseed unittest warning registries",
+    "skip unsupported SM75 fp8e4nv KV store test"
+  ]
+}
