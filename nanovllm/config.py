@@ -27,10 +27,8 @@ def resolve_head_dim(text_config: PretrainedConfig) -> int:
     return text_config.hidden_size // text_config.num_attention_heads
 
 
-def _validate_qwen3_5_rope_support(
-    root_config: PretrainedConfig,
-    text_config: PretrainedConfig,
-) -> None:
+def resolve_qwen3_5_rope(text_config: PretrainedConfig):
+    """Resolve the supported Qwen3.5 RoPE settings once for validation and construction."""
     rope_parameters = getattr(text_config, "rope_parameters", None) or {}
     if not isinstance(rope_parameters, Mapping):
         raise ValueError("Qwen3.5 rope_parameters must be a mapping")
@@ -42,30 +40,30 @@ def _validate_qwen3_5_rope_support(
     if rope_parameters.get("mrope_interleaved", True) is not True:
         raise NotImplementedError("Qwen3.5 requires interleaved mRoPE in nano-vLLM")
 
-    section = rope_parameters.get("mrope_section")
-    if section is None:
-        if getattr(root_config, "vision_config", None) is not None:
-            raise ValueError("multimodal Qwen3.5 requires rope_parameters.mrope_section")
-        return
-    if len(section) != 3:
-        raise ValueError("Qwen3.5 mRoPE requires three sections")
-
     head_dim = resolve_head_dim(text_config)
-    partial_rotary_factor = float(
-        rope_parameters.get(
-            "partial_rotary_factor",
-            getattr(text_config, "partial_rotary_factor", 0.25),
-        )
+    factor = rope_parameters.get(
+        "partial_rotary_factor", getattr(text_config, "partial_rotary_factor", None)
     )
-    rotary_dim = int(head_dim * partial_rotary_factor)
-    if rotary_dim <= 0 or rotary_dim % 2:
-        raise ValueError("Qwen3.5 rotary dimension must be positive and even")
-    section = tuple(int(value) for value in section)
-    if any(value < 0 for value in section) or sum(section) != rotary_dim // 2:
-        raise ValueError(
-            f"Qwen3.5 mRoPE sections must non-negatively cover half rotary_dim: "
-            f"sections={section}, rotary_dim={rotary_dim}"
-        )
+    rotary_dim = int(head_dim * float(0.25 if factor is None else factor))
+    if rotary_dim <= 0 or rotary_dim > head_dim or rotary_dim % 2:
+        raise ValueError("Qwen3.5 rotary dimension must be positive, even and <= head_dim")
+    section = rope_parameters.get("mrope_section")
+    if section is not None:
+        if len(section) != 3:
+            raise ValueError("Qwen3.5 mRoPE requires three sections")
+        section = tuple(int(value) for value in section)
+        if any(value < 0 for value in section) or sum(section) != rotary_dim // 2:
+            raise ValueError(
+                "Qwen3.5 mRoPE sections must non-negatively cover half rotary_dim: "
+                f"sections={section}, rotary_dim={rotary_dim}"
+            )
+    return rotary_dim, float(rope_parameters.get("rope_theta", getattr(text_config, "rope_theta", 10000.0))), section
+
+
+def _validate_qwen3_5_rope_support(root_config: PretrainedConfig, text_config: PretrainedConfig) -> None:
+    _, _, section = resolve_qwen3_5_rope(text_config)
+    if section is None and getattr(root_config, "vision_config", None) is not None:
+        raise ValueError("multimodal Qwen3.5 requires rope_parameters.mrope_section")
 
 
 @dataclass(slots=True)
