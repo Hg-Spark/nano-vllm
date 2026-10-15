@@ -5,6 +5,7 @@ Place this file in the repository root; requires scripts.bench and nanovllm.
 Measures the engine directly (no HTTP, network time, or Poisson arrivals).
 One process = one sample. Use the companion shell script for A/B repetitions.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -27,7 +28,6 @@ def snapshot_bytes(cache):
     )
 
 
-
 def parse_graph_sizes(raw: str) -> tuple[int, ...]:
     if not raw.strip():
         return ()
@@ -41,25 +41,45 @@ def arguments():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("model", nargs="?", default=os.environ.get("NANOVLLM_MODEL"))
     p.add_argument("--dtype", required=True, choices=("float16", "bfloat16"))
-    p.add_argument("--scenario", choices=("throughput", "prefix", "interference", "decode", "preemption"), required=True)
-    p.add_argument("--num-requests", type=int, default=16, help="total initial requests (interference: short only)")
+    p.add_argument(
+        "--scenario",
+        choices=("throughput", "prefix", "interference", "decode", "preemption"),
+        required=True,
+    )
+    p.add_argument(
+        "--num-requests",
+        type=int,
+        default=16,
+        help="total initial requests (interference: short only)",
+    )
     p.add_argument("--input-len", type=int, default=1024)
     p.add_argument("--output-len", type=int, default=256)
     p.add_argument("--max-num-seqs", type=int, default=4)
     p.add_argument("--budget", type=int, default=512, help="max_num_batched_tokens")
     p.add_argument("--max-model-len", type=int, default=4096)
     p.add_argument("--gpu-memory-utilization", type=float, default=0.8)
-    p.add_argument("--graph-sizes", default="", help="comma separated Graph buckets, e.g. 1,2,4; empty=Eager")
+    p.add_argument(
+        "--graph-sizes", default="", help="comma separated Graph buckets, e.g. 1,2,4; empty=Eager"
+    )
     p.add_argument("--cache-entries", type=int, default=0, help="0 disables prefix cache")
     p.add_argument("--shared-prefix-len", type=int, default=1024, help="prefix scenario")
     p.add_argument("--suffix-len", type=int, default=256, help="prefix scenario")
-    p.add_argument("--target-requests", type=int, default=8, help="prefix: number of target requests")
+    p.add_argument(
+        "--target-requests", type=int, default=8, help="prefix: number of target requests"
+    )
     p.add_argument("--warmup-steps", type=int, default=8, help="fixed decode warmup steps")
     p.add_argument("--measure-steps", type=int, default=128, help="fixed decode measured steps")
-    p.add_argument("--schedule-mode", choices=("mixed", "exclusive_decode_first"),
-                   default="mixed", help="exclusive mode only changes prefill scheduling")
-    p.add_argument("--require-preemptions", action="store_true",
-                   help="fail if preemption scenario does not preempt")
+    p.add_argument(
+        "--schedule-mode",
+        choices=("mixed", "exclusive_decode_first"),
+        default="mixed",
+        help="exclusive mode only changes prefill scheduling",
+    )
+    p.add_argument(
+        "--require-preemptions",
+        action="store_true",
+        help="fail if preemption scenario does not preempt",
+    )
     p.add_argument("--late-input-len", type=int, default=2048, help="interference scenario")
     p.add_argument("--late-after-decode-steps", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
@@ -110,7 +130,11 @@ def git_snapshot():
     def cmd(*argv):
         result = subprocess.run(argv, capture_output=True, text=True, check=False)
         return result.stdout.strip() if result.returncode == 0 else None
-    return {"commit": cmd("git", "rev-parse", "HEAD"), "dirty": bool(cmd("git", "status", "--porcelain"))}
+
+    return {
+        "commit": cmd("git", "rev-parse", "HEAD"),
+        "dirty": bool(cmd("git", "status", "--porcelain")),
+    }
 
 
 def tokens_hash(seqs):
@@ -127,8 +151,10 @@ def validate_preemptions(count: int, *, required: bool) -> None:
 def make_requests(engine, prompts, max_tokens):
     from nanovllm import SamplingParams
     from scripts._probes import prepare_requests
+
     return prepare_requests(
-        engine, prompts,
+        engine,
+        prompts,
         SamplingParams(temperature=0.0, ignore_eos=True, max_tokens=max_tokens),
     )
 
@@ -144,7 +170,8 @@ def run_fixed_decode(engine, a, graph_replays):
     vocab = vocabulary_size(engine)
     prompt = [1 if vocab > 1 else 0] * a.input_len
     sampling = SamplingParams(
-        temperature=0.0, ignore_eos=True,
+        temperature=0.0,
+        ignore_eos=True,
         max_tokens=a.warmup_steps + a.measure_steps + 2,
     )
     prepare_fixed_decode_batch(engine, prompt, sampling, a.max_num_seqs)
@@ -201,8 +228,11 @@ def run_fixed_decode(engine, a, graph_replays):
         "cuda_free_gib_after": torch.cuda.mem_get_info()[0] / 1024**3,
         "graph_replays": replays,
     }
-    return metrics, {"token_hash": tokens_hash(seqs),
-                     "fixed_batch_size": a.max_num_seqs, "context_len": a.input_len}
+    return metrics, {
+        "token_hash": tokens_hash(seqs),
+        "fixed_batch_size": a.max_num_seqs,
+        "context_len": a.input_len,
+    }
 
 
 def run(a):
@@ -213,8 +243,11 @@ def run(a):
     from scripts.bench import run_benchmark
 
     engine = LLM(
-        a.model, dtype=a.dtype, max_num_batched_tokens=a.budget,
-        max_num_seqs=a.max_num_seqs, max_model_len=a.max_model_len,
+        a.model,
+        dtype=a.dtype,
+        max_num_batched_tokens=a.budget,
+        max_num_seqs=a.max_num_seqs,
+        max_model_len=a.max_model_len,
         gpu_memory_utilization=a.gpu_memory_utilization,
         max_prefix_cache_entries=a.cache_entries,
         decode_graph_batch_sizes=a.graph_sizes,
@@ -226,7 +259,7 @@ def run(a):
         effective_max_len = engine.max_model_len
         kv_blocks = engine.model_runner.num_kv_cache_blocks
         kv = engine.model_runner.kv_cache
-        kv_cache_gib = kv.numel() * kv.element_size() / (1024 ** 3)
+        kv_cache_gib = kv.numel() * kv.element_size() / (1024**3)
         if vocab < 2:
             raise RuntimeError("vocabulary is unexpectedly small")
         rng = Random(a.seed)
@@ -252,14 +285,18 @@ def run(a):
         if a.schedule_mode == "exclusive_decode_first":
             # Same scheduler/resources. Skip Prefill while at least one Decode is scheduled.
             # This is Decode-first step exclusivity, NOT a Prefill-first baseline.
-            def exclusive_prefill(prefill_chunks, decode_count, num_batched_tokens,
-                                  *, reserved_free_blocks=0):
+            def exclusive_prefill(
+                prefill_chunks, decode_count, num_batched_tokens, *, reserved_free_blocks=0
+            ):
                 if decode_count:
                     return num_batched_tokens
                 return original_prefill_pass(
-                    prefill_chunks, decode_count, num_batched_tokens,
+                    prefill_chunks,
+                    decode_count,
+                    num_batched_tokens,
                     reserved_free_blocks=reserved_free_blocks,
                 )
+
             engine.scheduler._schedule_prefill_pass = exclusive_prefill
 
         def tracked_graph(chunks, seqs):
@@ -284,8 +321,9 @@ def run(a):
             metrics, details = run_fixed_decode(engine, a, lambda: graph_replays)
 
         elif a.scenario in ("throughput", "preemption"):
-            prompts = [[rng.randrange(vocab) for _ in range(a.input_len)]
-                       for _ in range(a.num_requests)]
+            prompts = [
+                [rng.randrange(vocab) for _ in range(a.input_len)] for _ in range(a.num_requests)
+            ]
             seqs = make_requests(engine, prompts, a.output_len)
             metrics = run_benchmark(engine, seqs)
             completion_hash = tokens_hash(seqs)
@@ -294,13 +332,16 @@ def run(a):
                 validate_preemptions(len(preempted), required=a.require_preemptions)
 
         elif a.scenario == "interference":
-            prompts = [[rng.randrange(vocab) for _ in range(a.input_len)]
-                       for _ in range(a.num_requests)]
+            prompts = [
+                [rng.randrange(vocab) for _ in range(a.input_len)] for _ in range(a.num_requests)
+            ]
             short = make_requests(engine, prompts, a.output_len)
             late_prompt = [rng.randrange(vocab) for _ in range(a.late_input_len)]
             late = make_requests(engine, [late_prompt], a.output_len)[0]
             metrics = run_benchmark(
-                engine, short, late_sequence=late,
+                engine,
+                short,
+                late_sequence=late,
                 late_after_decode_steps=a.late_after_decode_steps,
             )
             details = {"token_hash": tokens_hash([*short, late])}
@@ -355,7 +396,8 @@ def run(a):
             "time_utc": datetime.now(timezone.utc).isoformat(),
             "source": "nano-vllm qwen3.5 engine, no HTTP",
             "git": git_snapshot(),
-            "gpu": gpu, "compute_capability": cc,
+            "gpu": gpu,
+            "compute_capability": cc,
             "torch_version": torch.__version__,
             "torch_cuda_version": torch.version.cuda,
             "effective_max_model_len": effective_max_len,
@@ -379,8 +421,10 @@ def main():
         result = run(a)
     except BaseException as exc:
         record = {
-            "status": "failed", "scenario": a.scenario,
-            "error_type": type(exc).__name__, "error": str(exc),
+            "status": "failed",
+            "scenario": a.scenario,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
             "time_utc": datetime.now(timezone.utc).isoformat(),
             "git": git_snapshot(),
             "parameters": {k: v for k, v in vars(a).items() if k != "out"},
@@ -390,12 +434,18 @@ def main():
     else:
         target.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf8")
         m = result["metrics"]
-        print(f"saved {target} | throughput={m['output_throughput_tok_s']:.1f} tok/s "
-              f"TPOT={m['tpot_seconds']['mean'] * 1000:.2f} ms "
-              f"graph_replays={m['graph_replays']}")
+        print(
+            f"saved {target} | throughput={m['output_throughput_tok_s']:.1f} tok/s "
+            f"TPOT={m['tpot_seconds']['mean'] * 1000:.2f} ms "
+            f"graph_replays={m['graph_replays']}"
+        )
         if "total_restored_prefix_tokens" in result["details"]:
-            print("restored prefix tokens:", result["details"]["total_restored_prefix_tokens"],
-                  "hit rate:", result["details"]["prefix_hit_rate"])
+            print(
+                "restored prefix tokens:",
+                result["details"]["total_restored_prefix_tokens"],
+                "hit rate:",
+                result["details"]["prefix_hit_rate"],
+            )
 
 
 if __name__ == "__main__":
