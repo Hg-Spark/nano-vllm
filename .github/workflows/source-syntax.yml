@@ -34,6 +34,7 @@ jobs:
             tests.unit.test_scheduler \
             tests.unit.test_scheduler_recovery \
             tests.unit.test_scheduler_prefix_cache \
-            tests.unit.test_hybrid_resources
+            tests.unit.test_hybrid_resources \
+            tests.unit.test_multimodal
       - name: Check Markdown relative links
         run: python scripts/check_markdown_links.py
