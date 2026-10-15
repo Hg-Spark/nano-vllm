@@ -133,41 +133,56 @@ class Scheduler:
         num_batched_tokens = 0
         preempted_this_step = False
 
-        while (
-            self.running
-            and len(decode_chunks) < self.max_num_seqs
-            and num_batched_tokens < self.max_num_batched_tokens
-        ):
+        # First schedule decodes that can run without reclaiming another request's pages.
+        # A blocked page-growing request must not preempt a ready request behind it.
+        deferred: deque[Sequence] = deque()
+        for _ in range(len(self.running)):
+            if len(decode_chunks) >= self.max_num_seqs or num_batched_tokens >= self.max_num_batched_tokens:
+                break
             seq = self.running[0]
             self.resources.validate_request(seq)
             if seq.committed_tokens != len(seq) - 1:
                 raise RuntimeError(f"sequence {seq.seq_id} decode prefix mismatch")
             self.running.popleft()
+            while self.block_manager.max_schedulable_tokens(seq, 1) == 0:
+                if not self.block_manager.evict_prefix():
+                    deferred.append(seq)
+                    break
+            else:
+                self.block_manager.ensure_capacity(seq, len(seq))
+                decode_chunks.append(ScheduledChunk(seq, seq.committed_tokens, len(seq)))
+                num_batched_tokens += 1
 
+        # Only after the ready pass, reclaim resources for page-growing decodes.
+        while (
+            deferred
+            and len(decode_chunks) < self.max_num_seqs
+            and num_batched_tokens < self.max_num_batched_tokens
+        ):
+            seq = deferred.popleft()
             while self.block_manager.max_schedulable_tokens(seq, 1) == 0:
                 if self.block_manager.evict_prefix():
                     continue
                 victim = self._find_waiting_resource_victim()
                 if victim is not None:
                     self.preempt(victim)
-                    preempted_this_step = True
-                    continue
-                if self.running:
+                elif self.running:
                     self.preempt(self.running.pop())
-                    preempted_this_step = True
+                elif deferred:
+                    self.preempt(deferred.pop())
                 else:
                     self.preempt(seq)
-                    preempted_this_step = True
                     seq = None
                     break
-
+                preempted_this_step = True
             if seq is None:
-                break
-
+                preempted_this_step = True
+                continue
             self.block_manager.ensure_capacity(seq, len(seq))
             decode_chunks.append(ScheduledChunk(seq, seq.committed_tokens, len(seq)))
             num_batched_tokens += 1
 
+        self.running.extend(deferred)
         self.running.extend(chunk.seq for chunk in decode_chunks)
         if preempted_this_step:
             return SchedulerOutput(decode_chunks=tuple(decode_chunks))
@@ -197,7 +212,7 @@ class Scheduler:
             ),
         )
 
-    def _reset_to_waiting(self, seq: Sequence, *, front: bool) -> None:
+    def _reset_to_waiting(self, seq: Sequence) -> None:
         self.resources.validate_request(seq)
         if seq in self.running:
             self.running.remove(seq)
@@ -205,13 +220,10 @@ class Scheduler:
             self.waiting.remove(seq)
         seq.status = SequenceStatus.WAITING
         self._release_runtime_state(seq)
-        if front:
-            self.waiting.appendleft(seq)
-        else:
-            self.waiting.append(seq)
+        self.waiting.append(seq)
 
     def preempt(self, seq: Sequence) -> None:
-        self._reset_to_waiting(seq, front=False)
+        self._reset_to_waiting(seq)
 
     def postprocess(
         self,
