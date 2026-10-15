@@ -85,21 +85,59 @@ def _append_rope_positions(
             destination[axis].append(position[axis])
 
 
+class PinnedMetadataPool:
+    """Reusable page-locked staging for eager batch metadata."""
+
+    def __init__(self) -> None:
+        self.buffers = {}
+        self.events = {}
+
+    def to_cuda(self, name: str, values, dtype: torch.dtype) -> torch.Tensor:
+        import torch
+
+        source = torch.as_tensor(values, dtype=dtype, device="cpu")
+        required = source.numel()
+        host = self.buffers.get(name)
+        if host is None or host.numel() < required:
+            host = torch.empty(required, dtype=dtype, pin_memory=True)
+            self.buffers[name] = host
+        previous = self.events.get(name)
+        if previous is not None:
+            previous.synchronize()
+        staged = host[:required].view(source.shape)
+        staged.copy_(source)
+        result = staged.cuda(non_blocking=True)
+        event = torch.cuda.Event()
+        event.record(torch.cuda.current_stream())
+        self.events[name] = event
+        return result
+
+    def clear(self) -> None:
+        for event in self.events.values():
+            event.synchronize()
+        self.events.clear()
+        self.buffers.clear()
+
+
 def _pinned_cpu_tensor(values, dtype: torch.dtype) -> torch.Tensor:
     import torch
 
     return torch.tensor(values, dtype=dtype, pin_memory=True)
 
 
-def _cuda_int32(values: tuple[int, ...] | list[int]) -> torch.Tensor:
+def _cuda_int32(values, *, pool: PinnedMetadataPool | None = None, key: str = "") -> torch.Tensor:
     import torch
 
+    if pool is not None:
+        return pool.to_cuda(key, values, torch.int32)
     return _pinned_cpu_tensor(values, torch.int32).cuda(non_blocking=True)
 
 
-def _cuda_int64(values: tuple[int, ...] | tuple[tuple[int, ...], ...]) -> torch.Tensor:
+def _cuda_int64(values, *, pool: PinnedMetadataPool | None = None, key: str = "") -> torch.Tensor:
     import torch
 
+    if pool is not None:
+        return pool.to_cuda(key, values, torch.int64)
     return _pinned_cpu_tensor(values, torch.int64).cuda(non_blocking=True)
 
 
