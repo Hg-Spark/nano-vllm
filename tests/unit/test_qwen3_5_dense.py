@@ -44,6 +44,20 @@ class Qwen3_5DenseTest(unittest.TestCase):
             self.assertIsInstance(layer.mlp, Qwen3_5MLP)
             self.assertFalse(hasattr(layer.mlp, "experts"))
 
+    def test_text_only_model_does_not_create_vision_tower(self):
+        from types import SimpleNamespace
+
+        root = SimpleNamespace(
+            model_type="qwen3_5",
+            text_config=dense_config(),
+            vision_config=object(),
+        )
+        with patch("nanovllm.models.qwen3_5.AutoModel.from_config") as create_vision:
+            model = Qwen3_5ForCausalLM(root, load_vision=False)
+        create_vision.assert_not_called()
+        self.assertIsNone(model.visual)
+        self.assertIn("model.visual.", model.checkpoint_skip_prefixes)
+
     def test_dense_mlp_packs_hf_checkpoint_weights_in_gate_up_order(self):
         config = dense_config()
         hf = HFQwen3_5MLP(config, config.intermediate_size)
