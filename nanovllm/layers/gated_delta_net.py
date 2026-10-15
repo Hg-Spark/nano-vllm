@@ -146,9 +146,9 @@ class GatedDeltaNet(nn.Module):
         ):
             return False
         if self._flashinfer_device_major is None:
-            self._flashinfer_device_major = torch.cuda.get_device_capability(
-                hidden_states.device
-            )[0]
+            self._flashinfer_device_major = torch.cuda.get_device_capability(hidden_states.device)[
+                0
+            ]
         return self._flashinfer_device_major in (9, 10, 12)
 
     def _split_qkv(
