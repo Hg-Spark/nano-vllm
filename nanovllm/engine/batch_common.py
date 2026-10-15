@@ -101,15 +101,16 @@ class PinnedMetadataPool:
         if host is None or host.numel() < required:
             host = torch.empty(required, dtype=dtype, pin_memory=True)
             self.buffers[name] = host
-        previous = self.events.get(name)
-        if previous is not None:
-            previous.synchronize()
+        event = self.events.get(name)
+        if event is not None:
+            event.synchronize()
+        else:
+            event = torch.cuda.Event()
+            self.events[name] = event
         staged = host[:required].view(source.shape)
         staged.copy_(source)
         result = staged.cuda(non_blocking=True)
-        event = torch.cuda.Event()
         event.record(torch.cuda.current_stream())
-        self.events[name] = event
         return result
 
     def clear(self) -> None:
