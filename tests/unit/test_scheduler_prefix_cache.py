@@ -31,7 +31,7 @@ class SchedulerPrefixCacheTest(unittest.TestCase):
             True,
             {original.seq_id: snapshot},
         )
-        self.assertEqual(scheduler.block_manager.num_cached_prefixes, 1)
+        self.assertEqual(len(scheduler.block_manager.prefix_cache), 1)
         self.assertEqual(
             scheduler.block_manager.block_refcounts[cached_block],
             2,
@@ -93,7 +93,7 @@ class SchedulerPrefixCacheTest(unittest.TestCase):
 
                 self.assertEqual(seq.committed_tokens, 0)
                 self.assertEqual(scheduled.prefill_chunks[0].num_tokens, 4)
-                self.assertEqual(scheduler.block_manager.num_cached_prefixes, 0)
+                self.assertEqual(len(scheduler.block_manager.prefix_cache), 0)
 
     def test_prefix_publish_failure_keeps_batch_uncommitted(self):
         scheduler = make_scheduler(
