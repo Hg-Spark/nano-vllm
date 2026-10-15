@@ -20,7 +20,10 @@ if torch is not None:
 class ModelRunnerTest(unittest.TestCase):
     def test_initialization_failure_restores_torch_device_state(self):
         config = SimpleNamespace(
-            kv_cache_block_size=16, dtype="float16", max_visual_tokens_per_request=0
+            kv_cache_block_size=16,
+            dtype="float16",
+            max_visual_tokens_per_request=0,
+            root_config=SimpleNamespace(),
         )
         previous_device = torch.device("cuda:1")
         with (
