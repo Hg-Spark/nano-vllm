@@ -14,6 +14,7 @@ jobs:
           python-version: '3.12'
       - name: Compile Python without runtime dependencies
         run: python -m compileall -q nanovllm scripts benchmarks tests
+      # Only stdlib-compatible modules belong in this environment; GPU tests run separately.
       - name: Run dependency-light CLI regression tests
         run: |
           python -B -m unittest \
@@ -30,7 +31,6 @@ jobs:
             tests.unit.test_prefill_batch \
             tests.unit.test_prefix_cache \
             tests.unit.test_state_manager \
-            tests.unit.test_qwen35_flashinfer_ops \
             tests.unit.test_scheduler \
             tests.unit.test_scheduler_recovery \
             tests.unit.test_scheduler_prefix_cache \
