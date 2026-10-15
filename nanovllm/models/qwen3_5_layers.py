@@ -36,7 +36,6 @@ class Qwen3_5Attention(nn.Module):
         )
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5
 
         attention_bias = getattr(config, "attention_bias", False)
         self.q_proj = nn.Linear(
@@ -104,7 +103,6 @@ class Qwen3_5Attention(nn.Module):
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
-            self.scaling,
             self.num_kv_heads,
         )
 
