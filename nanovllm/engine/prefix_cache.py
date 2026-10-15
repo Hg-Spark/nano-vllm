@@ -38,9 +38,6 @@ class PrefixCache:
     def __len__(self) -> int:
         return len(self._entries)
 
-    def entries(self) -> tuple[PrefixEntry, ...]:
-        return tuple(self._entries.values())
-
     @staticmethod
     def _is_text_prefix(seq: Sequence, prefix_tokens: int) -> bool:
         return seq.image_state is None or prefix_tokens <= seq.image_state.image_start
