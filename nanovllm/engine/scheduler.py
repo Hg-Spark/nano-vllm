@@ -138,7 +138,10 @@ class Scheduler:
         # A blocked page-growing request must not preempt a ready request behind it.
         deferred: deque[Sequence] = deque()
         for _ in range(len(self.running)):
-            if len(decode_chunks) >= self.max_num_seqs or num_batched_tokens >= self.max_num_batched_tokens:
+            if (
+                len(decode_chunks) >= self.max_num_seqs
+                or num_batched_tokens >= self.max_num_batched_tokens
+            ):
                 break
             seq = self.running[0]
             self.resources.validate_request(seq)
