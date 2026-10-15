@@ -39,8 +39,6 @@ class ModelRunner:
         self.kv_cache = None
         self.attention_workspace = None
         self.metadata_pool = PinnedMetadataPool()
-        self.moe_workspace = None
-        self.moe_output = None
         self.prefill_wrapper = None
         self.decode_wrapper = None
         self.decode_graph_buckets: dict[int, DecodeGraphBucket] = {}
@@ -112,9 +110,7 @@ class ModelRunner:
 
     def _init_moe_runtime(self) -> None:
         if self.config.is_moe:
-            self.moe_workspace, self.moe_output = initialize_moe_runtime(self.model, self.config)
-        else:
-            self.moe_workspace = self.moe_output = None
+            initialize_moe_runtime(self.model, self.config)
 
     def _release_cuda_resources(self) -> None:
         buckets = getattr(self, "decode_graph_buckets", {})
@@ -128,8 +124,6 @@ class ModelRunner:
         self.prefill_wrapper = None
         self.decode_wrapper = None
         self.attention_workspace = None
-        self.moe_workspace = None
-        self.moe_output = None
         self.model = None
         self.sampler = None
         if torch.cuda.is_available():
