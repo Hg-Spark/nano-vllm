@@ -26,14 +26,11 @@ class RotaryEmbedding(nn.Module):
         self,
         head_size: int,
         rotary_dim: int,
-        max_position_embeddings: int,
         base: float,
         mrope_section: tuple[int, int, int] | None = None,
     ) -> None:
         super().__init__()
-        del max_position_embeddings
         assert 0 < rotary_dim <= head_size and rotary_dim % 2 == 0
-        self.rotary_dim = rotary_dim
         self.mrope_section = mrope_section
         inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
@@ -77,14 +74,12 @@ class RotaryEmbedding(nn.Module):
 def get_rope(
     head_size: int,
     rotary_dim: int,
-    max_position: int,
     base: float,
     mrope_section: tuple[int, int, int] | None = None,
 ):
     return RotaryEmbedding(
         head_size,
         rotary_dim,
-        max_position,
         base,
         mrope_section,
     )
