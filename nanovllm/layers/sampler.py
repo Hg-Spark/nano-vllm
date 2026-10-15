@@ -24,6 +24,4 @@ class Sampler(nn.Module):
     @staticmethod
     def _sample(logits: torch.Tensor, temperatures: torch.Tensor) -> torch.Tensor:
         probs = torch.softmax(logits / temperatures.unsqueeze(1), dim=-1)
-        return probs.div_(torch.empty_like(probs).exponential_(1).clamp_min_(1e-10)).argmax(
-            dim=-1
-        )
+        return probs.div_(torch.empty_like(probs).exponential_(1).clamp_min_(1e-10)).argmax(dim=-1)
