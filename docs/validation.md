@@ -37,7 +37,7 @@ python -m scripts.profile_decode "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE"
 | 类型 | 主要测试 |
 | --- | --- |
 | 模型/权重 | `test_qwen3_5_dense.py`、`test_qwen3_5_moe.py`、`test_config.py` |
-| GDN/Attention/FP8 | `test_gdn_chunk.py`、`test_gated_delta_net.py`、`test_attention.py`、`test_fp8_kv_cache.py` |
+| GDN/Attention/FP8 | `test_gdn_chunk.py`、`test_gated_delta_net.py`、`test_attention.py`（包含 FP8 KV 测试） |
 | 批次/调度/状态 | `test_prefill_batch.py`、`test_scheduler*.py`、`test_hybrid_resources.py` |
 | 前缀/多模态/Graph | `test_prefix_cache.py`、`test_multimodal.py`、`test_model_runner.py` |
 | 测量/CLI | `test_experiment_*.py`、`test_scripts.py`、`test_script_*.py` |
@@ -237,7 +237,7 @@ KV_blocks = floor(KV_budget / bytes_per_block)
 
 `gpu_memory_utilization` 默认 `0.8`，未分给静态缓存的显存由 Prefill、MoE、Vision 临时激活及 CUDA Graph Capture 等共享。这是容量折中，不保证所有形状、路由分布或图像输入都不会 OOM；如出现 OOM，应降低显存利用率、Token Budget 或并发量，而不是把固定余量当作准确测量的峰值。
 
-KV 预算按 `max_visual_tokens_per_request`（未配置时使用 `max_model_len`）为最多 `max_num_seqs` 个活动单图请求的视觉特征预留 GPU 显存；请求准入强制检查这个上限；请求结束或抢占时清理 request-local 特征；执行异常后当前引擎不可继续使用。Decode CUDA Graph Capture 仍在 KV Cache 分配之后，若已配置 Bucket 捕获时 OOM 或 Plan 失败，初始化直接报错，不自动降级为 Eager。CUDA Graph 的捕获/内部预执行不属于已移除的显存 Profiling Warmup。首次真实请求可能承担算子初始化或编译延迟。
+纯文本模式默认 `max_visual_tokens_per_request=0`，跳过视觉塔加载及视觉特征显存预留；图文请求需要显式配置正整数上限（或 `None` 表示依 `max_model_len` 预留）。启用视觉时，KV 预算按该上限为最多 `max_num_seqs` 个活动单图请求的视觉特征预留 GPU 显存；请求准入强制检查这个上限；请求结束或抢占时清理 request-local 特征；执行异常后当前引擎不可继续使用。Decode CUDA Graph Capture 仍在 KV Cache 分配之后，若已配置 Bucket 捕获时 OOM 或 Plan 失败，初始化直接报错，不自动降级为 Eager。CUDA Graph 的捕获/内部预执行不属于已移除的显存 Profiling Warmup。首次真实请求可能承担算子初始化或编译延迟。
 
 ### 运行时显存预算验证（无需新增后端）
 
@@ -356,6 +356,6 @@ python -m scripts.profile_decode "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
   → 对固定 batch 的 Eager / CUDA Graph 分别做数值与 TPOT 对照
 ```
 
-GDN 在 SM90+ 且 Head K/V Dimension 均为 128 时走 FlashInfer 0.7.0 的 Indexed Prefill/Decode，原地更新 FP32 `[V,K]` State Pool；其他设备仍用 PyTorch FP32 chunk-64 递推和 Decode。需要在支持的 GPU 上运行 `tests/unit/test_flashinfer_gdn.py` 验证数值一致性；两条路径的 Prefill TTFT、Decode TPOT、Graph Capture 和显存峰值需分别实测。MoE Prefill/Decode 都使用 FlashInfer CUTLASS Fused MoE，不提供其他后端或回退。后续先用 profile 验证各路径在目标 workload 的收益，再决定是否继续定制 kernel；Attention 占比显著时再评估更深的 FP8/Paged Attention 优化。
+GDN 在 SM90+ 且 Head K/V Dimension 均为 128 时走 FlashInfer 0.7.0 的 Indexed Prefill/Decode，原地更新 FP32 `[V,K]` State Pool；其他设备仍用 PyTorch FP32 chunk-64 递推和 Decode。需要在支持的 GPU 上运行 `tests/integration/test_flashinfer_gdn.py` 验证数值一致性；两条路径的 Prefill TTFT、Decode TPOT、Graph Capture 和显存峰值需分别实测。MoE Prefill/Decode 都使用 FlashInfer CUTLASS Fused MoE，不提供其他后端或回退。后续先用 profile 验证各路径在目标 workload 的收益，再决定是否继续定制 kernel；Attention 占比显著时再评估更深的 FP8/Paged Attention 优化。
 
 性能记录见[热点分析模板](../results/TEMPLATE.md)，验收条件见[路线图](../ROADMAP.md)。
