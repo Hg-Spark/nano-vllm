@@ -28,7 +28,7 @@ def _visual_feature_cache_nbytes(
     model_dtype: torch.dtype,
 ) -> int:
     vision_config = getattr(config.root_config, "vision_config", None)
-    if vision_config is None:
+    if vision_config is None or config.max_visual_tokens_per_request == 0:
         return 0
     # Images can remain resident across chunked prefill and multiple scheduler
     # steps. Reserve for concurrent live visual features rather than the
@@ -77,7 +77,7 @@ def allocate_runtime_caches(
         * len(kv_modules)
         * config.kv_cache_block_size
         * config.text_config.num_key_value_heads
-        * config.text_config.head_dim
+        * config.head_dim
         * cache_element_size
     )
     visual_feature_cache_bytes = _visual_feature_cache_nbytes(
@@ -108,7 +108,7 @@ def allocate_runtime_caches(
         num_kv_cache_blocks,
         config.kv_cache_block_size,
         config.text_config.num_key_value_heads,
-        config.text_config.head_dim,
+        config.head_dim,
         device="cuda",
         dtype=cache_dtype,
     )
