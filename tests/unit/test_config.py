@@ -11,6 +11,7 @@ def make_qwen3_5_text_config():
         model_type="qwen3_5_moe_text",
         hidden_size=8,
         num_attention_heads=2,
+        num_key_value_heads=1,
         head_dim=4,
         partial_rotary_factor=0.5,
         max_position_embeddings=1024,
