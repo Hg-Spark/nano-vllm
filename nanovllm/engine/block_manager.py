@@ -76,13 +76,6 @@ class BlockManager:
         self.retain_blocks(block_ids)
         seq.block_table.extend(block_ids)
 
-    @property
-    def num_cached_prefixes(self) -> int:
-        return len(self.prefix_cache)
-
-    def prefix_entries(self) -> tuple[PrefixEntry, ...]:
-        return self.prefix_cache.entries()
-
     def find_prefix(self, seq: Sequence, max_tokens: int) -> PrefixEntry | None:
         return self.prefix_cache.find(seq, max_tokens)
 
