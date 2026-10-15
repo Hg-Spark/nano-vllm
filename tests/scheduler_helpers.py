@@ -10,6 +10,7 @@ def make_scheduler(
     num_blocks=16,
     block_size=16,
     max_prefix_cache_entries=16,
+    prefix_cache_eager_snapshot=True,
     eos_token_ids=(99, 100),
 ):
     config = SimpleNamespace(
@@ -18,6 +19,7 @@ def make_scheduler(
         eos_token_ids=eos_token_ids,
         kv_cache_block_size=block_size,
         max_prefix_cache_entries=max_prefix_cache_entries,
+        prefix_cache_eager_snapshot=prefix_cache_eager_snapshot,
     )
     return Scheduler(config, num_blocks)
 
