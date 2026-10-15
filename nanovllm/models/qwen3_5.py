@@ -105,13 +105,19 @@ class Qwen3_5ForCausalLM(nn.Module):
     )
     checkpoint_skip_prefixes = ("mtp.",)
 
-    def __init__(self, config) -> None:
+    def __init__(self, config, *, load_vision: bool = True) -> None:
         super().__init__()
         text_config = getattr(config, "text_config", config)
         vision_config = getattr(config, "vision_config", None)
         self.root_config = config
         self.is_moe = is_qwen3_5_moe(config)
-        self.visual = AutoModel.from_config(vision_config) if vision_config is not None else None
+        self.visual = (
+            AutoModel.from_config(vision_config)
+            if load_vision and vision_config is not None
+            else None
+        )
+        if not load_vision:
+            self.checkpoint_skip_prefixes = (*self.checkpoint_skip_prefixes, "model.visual.")
         self.model = Qwen3_5Model(text_config)
         self.lm_head = nn.Linear(
             text_config.hidden_size,
