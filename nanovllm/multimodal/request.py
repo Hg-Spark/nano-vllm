@@ -115,20 +115,8 @@ def image_state_from_processor_output(
     image_end = image_indices[-1] + 1
     if image_indices != list(range(image_start, image_end)):
         raise ValueError("ImagePrompt requires one contiguous image interval")
-    if any(modality not in (0, 1) for modality in types):
-        raise ValueError("ImagePrompt does not support video tokens")
-
     grid_signature = tuple(int(value) for value in image_grid_thw[0].tolist())
     spatial_merge_size = int(root_config.vision_config.spatial_merge_size)
-    expected_visual_tokens = (
-        grid_signature[0] * grid_signature[1] * grid_signature[2] // (spatial_merge_size**2)
-    )
-    if image_end - image_start != expected_visual_tokens:
-        raise ValueError(
-            f"image placeholder count ({image_end - image_start}) does not match "
-            f"visual token count ({expected_visual_tokens})"
-        )
-
     rope_positions, rope_delta = _build_rope_positions(
         types,
         grid_signature,
