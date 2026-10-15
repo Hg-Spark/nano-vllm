@@ -29,12 +29,17 @@ def make_state(*, image_start=2, image_end=6, num_tokens=9):
         rope_delta=-2,
         image_start=image_start,
         image_end=image_end,
-        grid_signature=(1, 4, 4),
         visual_features=object(),
     )
 
 
 class MultimodalRequestTest(unittest.TestCase):
+    def test_disabled_vision_rejects_image_before_processor(self):
+        engine = object.__new__(LLMEngine)
+        engine.config = SimpleNamespace(max_visual_tokens_per_request=0)
+        with self.assertRaisesRegex(ValueError, "image requests require"):
+            engine._prepare_request(ImagePrompt("image", object()), SamplingParams(max_tokens=1))
+
     def test_image_admission_checks_same_limit(self):
         engine = object.__new__(LLMEngine)
         engine.config = SimpleNamespace(
