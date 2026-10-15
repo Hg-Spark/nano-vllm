@@ -37,7 +37,7 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         self.assertEqual(manager.block_refcounts[first_block], 2)
 
         _, second_block = publish_prefix(manager, [5, 6, 7, 8, 9], 4)
-        self.assertEqual(manager.num_cached_prefixes, 1)
+        self.assertEqual(len(manager.prefix_cache), 1)
         self.assertEqual(manager.block_refcounts[first_block], 1)
 
         hit = manager.find_prefix(Sequence([5, 6, 7, 8, 10]), max_tokens=4)
