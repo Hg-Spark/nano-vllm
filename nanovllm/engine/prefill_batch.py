@@ -23,9 +23,15 @@ def prepare_prefill(
         is_prefill=True,
         slot_mapping=_cuda_int32(layout.slot_mapping, pool=host_pool, key="prefill_slots"),
         qo_indptr=_cuda_int32(layout.q_offsets, pool=host_pool, key="prefill_q_offsets"),
-        paged_kv_indptr=_cuda_int32(layout.paged_kv_indptr, pool=host_pool, key="prefill_kv_indptr"),
-        paged_kv_indices=_cuda_int32(layout.paged_kv_indices, pool=host_pool, key="prefill_kv_indices"),
-        paged_kv_last_page_len=_cuda_int32(layout.paged_kv_last_page_len, pool=host_pool, key="prefill_page_len"),
+        paged_kv_indptr=_cuda_int32(
+            layout.paged_kv_indptr, pool=host_pool, key="prefill_kv_indptr"
+        ),
+        paged_kv_indices=_cuda_int32(
+            layout.paged_kv_indices, pool=host_pool, key="prefill_kv_indices"
+        ),
+        paged_kv_last_page_len=_cuda_int32(
+            layout.paged_kv_last_page_len, pool=host_pool, key="prefill_page_len"
+        ),
         state_slots=layout.state_slots,
         state_slot_ids=_cuda_int32(layout.state_slots, pool=host_pool, key="prefill_state_slots"),
         state_prefix_lens=layout.state_prefix_lens,
