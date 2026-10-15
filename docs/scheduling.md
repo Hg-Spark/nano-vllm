@@ -50,7 +50,7 @@ KV 只增长到容纳 `end` 所需的块数；GDN 始终沿用该请求的同一
 | 3 | `[32,40)` | 40 | 3 | 同一个槽 | 是，生成首个 token |
 | 4 | 位置 40 的首个生成 token | 41 | 3 | 同一个槽 | 是，生成第二个 token |
 
-第 3 轮后，`num_tokens=41`，`committed_tokens=40`。部分 chunk 不会生成可交给用户的 token；只有所有已知输入都处理完，`ModelRunner._sample_indices()` 才选中该请求采样。
+第 3 轮后，`num_tokens=41`，`committed_tokens=40`。部分 chunk 不会生成可交给用户的 token；只有所有已知输入都处理完，`ModelRunner._sample_logits()` 才选中该请求采样。
 
 同一请求本轮只安排一个 chunk；调度器继续扫描其他等待请求。暂时缺少资源的请求会轮转到队尾，本轮仍可能安排后续请求。
 
@@ -139,7 +139,7 @@ CPU 资源预留失败时，`HybridResources.reserve()` 释放本次新增的 KV
 - **本轮结束位置恰好是完整 KV 块边界**；
 - 该精确 token 前缀尚未存在。
 
-例如块容量为 16、20-token Prompt 且启用 Prefix Cache：Scheduler 会先选取 `[0,16)`，在该边界捕获并发布 KV + GDN 快照，再执行 `[16,20)`。不启用缓存时保持 `[0,20)`；已有缓存条目、视觉 Token 边界及 Token Budget 仍受原有约束。只在可以发布新完整块时额外切分，避免每块都执行一次 Forward。
+例如块容量为 16、20-token Prompt 且启用 Prefix Cache：Scheduler 会先选取 `[0,16)`，在该边界捕获并发布 KV + GDN 快照，再执行 `[16,20)`。不启用缓存时保持 `[0,20)`；已有缓存条目、视觉 Token 边界及 Token Budget 仍受原有约束。只在可以发布新完整块且 `prefix_cache_eager_snapshot=True`（默认）时额外切分，避免每块都执行一次 Forward；设为 `False` 可禁止为快照额外切分，但自然到达完整块边界时仍会发布，长前缀的缓存命中机会可能减少。
 
 整块边界还能避免共享一个将被继续写入的半满块；新请求续写时分配后续块，不会覆盖共享前缀。
 
