@@ -22,11 +22,16 @@ class BenchmarkExperimentsTest(unittest.TestCase):
             "gpu": "GPU",
             "git": {"commit": "abc", "dirty": False},
             "parameters": {
-                "scenario": "decode", "max_num_seqs": 2, "budget": 512,
-                "graph_sizes": [], "cache_entries": 0, "schedule_mode": "mixed",
+                "scenario": "decode",
+                "max_num_seqs": 2,
+                "budget": 512,
+                "graph_sizes": [],
+                "cache_entries": 0,
+                "schedule_mode": "mixed",
             },
             "metrics": {
-                "output_throughput_tok_s": 100, "tpot_seconds": {"mean": 0.01},
+                "output_throughput_tok_s": 100,
+                "tpot_seconds": {"mean": 0.01},
             },
             "details": {"token_hash": "same"},
         }
@@ -91,7 +96,10 @@ class BenchmarkExperimentsTest(unittest.TestCase):
 
         engine = SimpleNamespace(step=step, scheduler=SimpleNamespace(running=[seq]))
         args = SimpleNamespace(
-            input_len=16, max_num_seqs=1, warmup_steps=0, measure_steps=2,
+            input_len=16,
+            max_num_seqs=1,
+            warmup_steps=0,
+            measure_steps=2,
             graph_sizes=(),
         )
         with (
@@ -103,8 +111,7 @@ class BenchmarkExperimentsTest(unittest.TestCase):
 
         self.assertEqual(
             events,
-            ["device_sync", "start", "step", "end", "event_sync",
-             "start", "step", "end", "event_sync"],
+            ["device_sync"] + ["start", "step", "end", "event_sync"] * 2,
         )
         self.assertEqual(metrics["cuda_event_step_window_seconds"]["mean"], 0.002)
 
