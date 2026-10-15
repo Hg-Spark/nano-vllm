@@ -50,7 +50,10 @@ class ModelRunner:
         torch.set_default_dtype(getattr(torch, config.dtype))
         torch.set_default_device("cuda")
         try:
-            self.model = Qwen3_5ForCausalLM(config.root_config)
+            self.model = Qwen3_5ForCausalLM(
+                config.root_config,
+                load_vision=config.max_visual_tokens_per_request != 0,
+            )
             load_model(self.model, config.model)
             self.model.pack_linear_projections()
             self.model.eval()
