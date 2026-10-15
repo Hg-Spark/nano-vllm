@@ -57,10 +57,16 @@ def resolve_qwen3_5_rope(text_config: PretrainedConfig):
                 "Qwen3.5 mRoPE sections must non-negatively cover half rotary_dim: "
                 f"sections={section}, rotary_dim={rotary_dim}"
             )
-    return rotary_dim, float(rope_parameters.get("rope_theta", getattr(text_config, "rope_theta", 10000.0))), section
+    return (
+        rotary_dim,
+        float(rope_parameters.get("rope_theta", getattr(text_config, "rope_theta", 10000.0))),
+        section,
+    )
 
 
-def _validate_qwen3_5_rope_support(root_config: PretrainedConfig, text_config: PretrainedConfig) -> None:
+def _validate_qwen3_5_rope_support(
+    root_config: PretrainedConfig, text_config: PretrainedConfig
+) -> None:
     _, _, section = resolve_qwen3_5_rope(text_config)
     if section is None and getattr(root_config, "vision_config", None) is not None:
         raise ValueError("multimodal Qwen3.5 requires rope_parameters.mrope_section")
