@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 
+
 class GDNStatePool(nn.Module):
     """Physical Conv/Recurrent state slots for one GDN layer.
 
