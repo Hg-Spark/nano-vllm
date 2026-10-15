@@ -207,7 +207,8 @@ class GatedDeltaNet(nn.Module):
         if use_flashinfer:
             from flashinfer.gdn_prefill import chunk_gated_delta_rule as flashinfer_prefill
 
-            query, key, value = self._split_qkv(torch.cat(conv_parts, dim=0))
+            packed_conv = conv_parts[0] if len(conv_parts) == 1 else torch.cat(conv_parts, dim=0)
+            query, key, value = self._split_qkv(packed_conv)
             context = get_context()
             offsets = context.qo_indptr
             slot_ids = context.state_slot_ids
