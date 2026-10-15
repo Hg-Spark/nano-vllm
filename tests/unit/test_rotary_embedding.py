@@ -16,7 +16,6 @@ class RotaryEmbeddingTest(unittest.TestCase):
         rope = RotaryEmbedding(
             head_size=head_dim,
             rotary_dim=rotary_dim,
-            max_position_embeddings=16,
             base=10000,
         )
 
@@ -36,7 +35,6 @@ class RotaryEmbeddingTest(unittest.TestCase):
         rope = RotaryEmbedding(
             head_size=12,
             rotary_dim=12,
-            max_position_embeddings=16,
             base=10000,
             mrope_section=(2, 2, 2),
         )
@@ -55,7 +53,6 @@ class RotaryEmbeddingTest(unittest.TestCase):
         rope = RotaryEmbedding(
             head_size=12,
             rotary_dim=12,
-            max_position_embeddings=16,
             base=10000,
             mrope_section=(2, 2, 2),
         )
