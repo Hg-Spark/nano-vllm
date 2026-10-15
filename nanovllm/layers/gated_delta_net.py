@@ -38,6 +38,7 @@ class GatedDeltaNet(nn.Module):
             raise ValueError("linear_num_value_heads must be divisible by linear_num_key_heads")
         self.head_k_dim = config.linear_key_head_dim
         self.head_v_dim = config.linear_value_head_dim
+        self._flashinfer_device_major = None
         self.key_dim = self.head_k_dim * self.num_k_heads
         self.value_dim = self.head_v_dim * self.num_v_heads
         self.conv_kernel_size = config.linear_conv_kernel_dim
@@ -137,12 +138,18 @@ class GatedDeltaNet(nn.Module):
         return beta, decay
 
     def _can_use_flashinfer(self, hidden_states: torch.Tensor) -> bool:
-        return (
-            hidden_states.is_cuda
-            and hidden_states.dtype in (torch.float16, torch.bfloat16)
-            and self.head_k_dim == self.head_v_dim == 128
-            and torch.cuda.get_device_capability(hidden_states.device)[0] in (9, 10, 12)
-        )
+        if (
+            not hidden_states.is_cuda
+            or hidden_states.dtype not in (torch.float16, torch.bfloat16)
+            or self.head_k_dim != 128
+            or self.head_v_dim != 128
+        ):
+            return False
+        if self._flashinfer_device_major is None:
+            self._flashinfer_device_major = torch.cuda.get_device_capability(
+                hidden_states.device
+            )[0]
+        return self._flashinfer_device_major in (9, 10, 12)
 
     def _split_qkv(
         self, mixed_qkv: torch.Tensor
@@ -202,16 +209,10 @@ class GatedDeltaNet(nn.Module):
 
             query, key, value = self._split_qkv(torch.cat(conv_parts, dim=0))
             context = get_context()
-            offsets = (
-                context.qo_indptr
-                if context.qo_indptr is not None
-                else torch.tensor(q_offsets, dtype=torch.int32, device=hidden_states.device)
-            )
-            slot_ids = (
-                context.state_slot_ids
-                if context.state_slot_ids is not None
-                else torch.tensor(state_slots, dtype=torch.int32, device=hidden_states.device)
-            )
+            offsets = context.qo_indptr
+            slot_ids = context.state_slot_ids
+            if offsets is None or slot_ids is None:
+                raise RuntimeError("FlashInfer GDN prefill requires device metadata")
             with record_function("nanovllm::gdn_prefill_flashinfer"):
                 core, _ = flashinfer_prefill(
                     query.contiguous(),
@@ -273,9 +274,7 @@ class GatedDeltaNet(nn.Module):
                     scale=self.head_k_dim**-0.5,
                     use_qk_l2norm=True,
                     initial_state=self.state_pool.recurrent_state,
-                    initial_state_indices=state_slot_ids.to(
-                        device=hidden_states.device, dtype=torch.int32
-                    ),
+                    initial_state_indices=state_slot_ids,
                     backend="flashinfer",
                 )
             return self._finalize_output(core.squeeze(1), z)
