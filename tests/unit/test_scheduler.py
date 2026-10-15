@@ -94,6 +94,17 @@ class SchedulerCoreTest(unittest.TestCase):
             [(0, 16, True)],
         )
 
+    def test_non_eager_prefix_does_not_split_fitting_prompt(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=512,
+            max_prefix_cache_entries=16,
+            prefix_cache_eager_snapshot=False,
+            block_size=16,
+        )
+        scheduler.add(Sequence(list(range(20))))
+        chunks = scheduler.schedule().prefill_chunks
+        self.assertEqual([(c.start, c.end, c.capture_snapshot) for c in chunks], [(0, 20, False)])
+
     def test_prefix_cache_chunk_alignment_is_opt_in(self):
         scheduler = make_scheduler(
             max_num_batched_tokens=512,
@@ -346,6 +357,25 @@ class SchedulerCoreTest(unittest.TestCase):
             [long_seq],
         )
         self.assertEqual(third.prefill_chunks[0].num_tokens, 3)
+
+    def test_page_growth_does_not_starve_ready_decode(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=2,
+            max_num_seqs=2,
+            num_blocks=2,
+            block_size=4,
+        )
+        blocked = Sequence([1, 2, 3, 4, 5])
+        scheduler.block_manager.ensure_capacity(blocked, 4)
+        scheduler.state_manager.allocate(blocked)
+        blocked.committed_tokens = 4
+        blocked.status = SequenceStatus.RUNNING
+        scheduler.running.append(blocked)
+        ready = make_running_sequence(scheduler, [6, 7, 8])
+        scheduled = scheduler.schedule()
+        self.assertEqual(scheduled_sequences(scheduled.decode_chunks), [ready])
+        self.assertIn(blocked, scheduler.waiting)
+        self.assertEqual(list(scheduler.running), [ready])
 
     def test_decode_budget_rotates_running_requests(self):
         scheduler = make_scheduler(
