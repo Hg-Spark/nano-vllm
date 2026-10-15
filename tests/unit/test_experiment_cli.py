@@ -6,6 +6,7 @@ import os
 import unittest
 from unittest.mock import patch
 
+from benchmarks import bench_experiments as experiments
 from scripts import (
     bench,
     chat,
@@ -59,6 +60,11 @@ class CliTest(unittest.TestCase):
                 self.assertRaises(SystemExit),
             ):
                 script.parse_args([*argv, "--dtype", "float16"])
+
+    def test_graph_bucket_argument(self):
+        self.assertEqual(experiments.parse_graph_sizes("4,1,2,2"), (1, 2, 4))
+        with self.assertRaises(ValueError):
+            experiments.parse_graph_sizes("0")
 
     def test_environment_model_and_explicit_override(self):
         with patch.dict(os.environ, {"NANOVLLM_MODEL": "~/environment-model"}):

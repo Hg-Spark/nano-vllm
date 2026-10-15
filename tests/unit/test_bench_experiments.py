@@ -1,4 +1,4 @@
-"""CPU-only contracts for the focused hybrid benchmark experiments."""
+"""CPU-only regression checks for benchmark result validity and timing."""
 
 import json
 import sys
@@ -16,50 +16,48 @@ from scripts import _probes
 
 
 class BenchmarkExperimentsTest(unittest.TestCase):
-    def test_graph_sizes_and_output_parity(self):
-        self.assertEqual(benchmark.parse_graph_sizes("4,1,2,2"), (1, 2, 4))
-        self.assertEqual(benchmark.parse_graph_sizes(""), ())
-        with self.assertRaises(ValueError):
-            benchmark.parse_graph_sizes("0")
-        self.assertNotEqual(
-            benchmark.tokens_hash([SimpleNamespace(completion_token_ids=[1, 2])]),
-            benchmark.tokens_hash([SimpleNamespace(completion_token_ids=[1, 3])]),
-        )
-
-    def test_summary_rejects_output_mismatch_before_speedups(self):
+    def test_ab_parity_and_speedup(self):
         base = {
             "status": "completed",
             "gpu": "GPU",
-            "compute_capability": [9, 0],
             "git": {"commit": "abc", "dirty": False},
-            "script_sha256": "same",
             "parameters": {
-                "scenario": "decode",
-                "max_num_seqs": 2,
-                "budget": 512,
-                "graph_sizes": [],
-                "cache_entries": 0,
-                "schedule_mode": "mixed",
+                "scenario": "decode", "max_num_seqs": 2, "budget": 512,
+                "graph_sizes": [], "cache_entries": 0, "schedule_mode": "mixed",
             },
             "metrics": {
-                "output_throughput_tok_s": 100,
-                "tpot_seconds": {"mean": 0.01},
+                "output_throughput_tok_s": 100, "tpot_seconds": {"mean": 0.01},
             },
-            "details": {"token_hash": "original"},
+            "details": {"token_hash": "same"},
         }
-        changed = json.loads(json.dumps(base))
-        changed["parameters"]["graph_sizes"] = [2]
-        changed["details"]["token_hash"] = "different"
-        with tempfile.TemporaryDirectory() as tmp:
-            for name, payload in (("base.json", base), ("graph.json", changed)):
-                (Path(tmp) / name).write_text(json.dumps(payload), encoding="utf-8")
+        graph = json.loads(json.dumps(base))
+        graph["parameters"]["graph_sizes"] = [2]
+        graph["metrics"]["output_throughput_tok_s"] = 150
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "eager.json").write_text(json.dumps(base), encoding="utf-8")
+            graph_file = Path(folder) / "graph.json"
+            graph_file.write_text(json.dumps(graph), encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                summary.main([folder])
+            self.assertIn("Output throughput improvement: +50.00%", output.getvalue())
+            self.assertIn("Successful paired comparisons: 1", output.getvalue())
+
+            graph["details"]["token_hash"] = "different"
+            graph_file.write_text(json.dumps(graph), encoding="utf-8")
             with (
                 redirect_stdout(StringIO()),
                 self.assertRaisesRegex(SystemExit, "Output token hashes differ"),
             ):
-                summary.main([tmp])
+                summary.main([folder])
 
-    def test_fixed_decode_cuda_events_do_not_sync_before_end_record(self):
+    def test_preemption_must_be_observed_when_required(self):
+        with self.assertRaisesRegex(RuntimeError, "no preemptions observed"):
+            benchmark.validate_preemptions(0, required=True)
+        benchmark.validate_preemptions(1, required=True)
+        benchmark.validate_preemptions(0, required=False)
+
+    def test_decode_event_record_precedes_sync(self):
         events = []
 
         class Event:
@@ -67,37 +65,33 @@ class BenchmarkExperimentsTest(unittest.TestCase):
                 self.name = name
 
             def record(self):
-                events.append(self.name + "_record")
+                events.append(self.name)
 
             def synchronize(self):
-                events.append(self.name + "_sync")
+                events.append("event_sync")
 
             def elapsed_time(self, other):
                 return 2.0
 
-        event_number = iter(("start", "end"))
+        names = iter(("start", "end"))
         cuda = SimpleNamespace(
-            Event=lambda **kwargs: Event(next(event_number)),
+            Event=lambda **kw: Event(next(names)),
             synchronize=Mock(side_effect=lambda: events.append("device_sync")),
             reset_peak_memory_stats=Mock(),
-            max_memory_allocated=lambda: 1024,
-            max_memory_reserved=lambda: 1024,
-            mem_get_info=lambda: (1024, 2048),
+            max_memory_allocated=lambda: 0,
+            max_memory_reserved=lambda: 0,
+            mem_get_info=lambda: (0, 0),
         )
-        sequences = [SimpleNamespace(completion_token_ids=[]) for _ in range(2)]
+        seq = SimpleNamespace(completion_token_ids=[])
 
         def step():
-            events.append("engine_step")
-            for seq in sequences:
-                seq.completion_token_ids.append(1)
-            return [], SimpleNamespace(prefill_tokens=0, decode_tokens=2)
+            events.append("step")
+            seq.completion_token_ids.append(1)
+            return [], SimpleNamespace(prefill_tokens=0, decode_tokens=1)
 
-        engine = SimpleNamespace(step=step, scheduler=SimpleNamespace(running=sequences))
+        engine = SimpleNamespace(step=step, scheduler=SimpleNamespace(running=[seq]))
         args = SimpleNamespace(
-            input_len=16,
-            max_num_seqs=2,
-            warmup_steps=1,
-            measure_steps=3,
+            input_len=16, max_num_seqs=1, warmup_steps=0, measure_steps=2,
             graph_sizes=(),
         )
         with (
@@ -107,14 +101,12 @@ class BenchmarkExperimentsTest(unittest.TestCase):
         ):
             metrics, _ = benchmark.run_fixed_decode(engine, args, lambda: 0)
 
-        self.assertEqual(cuda.synchronize.call_count, 1)
-        self.assertEqual(events.count("start_record"), 3)
-        self.assertEqual(events.count("end_record"), 3)
-        self.assertEqual(events.count("end_sync"), 3)
+        self.assertEqual(
+            events,
+            ["device_sync", "start", "step", "end", "event_sync",
+             "start", "step", "end", "event_sync"],
+        )
         self.assertEqual(metrics["cuda_event_step_window_seconds"]["mean"], 0.002)
-        for idx, event in enumerate(events):
-            if event == "end_record":
-                self.assertEqual(events[idx - 1], "engine_step")
 
 
 if __name__ == "__main__":

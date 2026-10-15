@@ -119,6 +119,11 @@ def tokens_hash(seqs):
     return hashlib.sha256(data.encode()).hexdigest()
 
 
+def validate_preemptions(count: int, *, required: bool) -> None:
+    if required and count == 0:
+        raise RuntimeError("no preemptions observed; increase pressure or lower GPU budget")
+
+
 def make_requests(engine, prompts, max_tokens):
     from nanovllm import SamplingParams
     from scripts._probes import prepare_requests
@@ -283,8 +288,8 @@ def run(a):
             metrics = run_benchmark(engine, seqs)
             completion_hash = tokens_hash(seqs)
             details = {"token_hash": completion_hash}
-            if a.scenario == "preemption" and a.require_preemptions and not preempted:
-                raise RuntimeError("no preemptions observed; increase pressure or lower GPU budget")
+            if a.scenario == "preemption":
+                validate_preemptions(len(preempted), required=a.require_preemptions)
 
         elif a.scenario == "interference":
             prompts = [[rng.randrange(vocab) for _ in range(a.input_len)]
