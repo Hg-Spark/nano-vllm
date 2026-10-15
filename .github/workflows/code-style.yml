@@ -15,9 +15,9 @@ jobs:
       - name: Install pinned Ruff
         run: python -m pip install ruff==0.14.4
       - name: Check Python import ordering
-        run: ruff check --select I nanovllm scripts tests
+        run: ruff check --select I nanovllm scripts tests benchmarks
       - name: Check Python formatting
-        run: ruff format --check nanovllm scripts tests || { ruff format --diff nanovllm scripts tests; exit 1; }
+        run: ruff format --check nanovllm scripts tests benchmarks || { ruff format --diff nanovllm scripts tests benchmarks; exit 1; }
       - name: Run lightweight CLI and experiment tests
         run: |
           python -m unittest -v \
