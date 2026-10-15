@@ -78,6 +78,7 @@ class Config:
     gpu_memory_utilization: float = 0.8
     kv_cache_block_size: int = 16
     max_prefix_cache_entries: int = 0
+    prefix_cache_eager_snapshot: bool = True
     max_visual_tokens_per_request: int | None = 0
     kv_cache_dtype: str = "auto"
     kv_cache_k_scale: float = 1.0
