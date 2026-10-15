@@ -6,6 +6,7 @@ import torch
 from torch.profiler import record_function
 
 from nanovllm.config import Config
+from nanovllm.engine.batch_common import PinnedMetadataPool
 from nanovllm.engine.cache_runtime import (
     allocate_runtime_caches,
     capture_gdn_state,
@@ -37,6 +38,7 @@ class ModelRunner:
         self.sampler = None
         self.kv_cache = None
         self.attention_workspace = None
+        self.metadata_pool = PinnedMetadataPool()
         self.moe_workspace = None
         self.moe_output = None
         self.prefill_wrapper = None
@@ -119,6 +121,9 @@ class ModelRunner:
         for bucket in buckets.values():
             bucket.release()
         buckets.clear()
+        if getattr(self, "metadata_pool", None) is not None:
+            self.metadata_pool.clear()
+            self.metadata_pool = None
         self.kv_cache = None
         self.prefill_wrapper = None
         self.decode_wrapper = None
@@ -206,12 +211,11 @@ class ModelRunner:
         if all(seqs[idx].temperature <= 1e-10 for idx in sample_indices):
             token_ids = logits.argmax(dim=-1).tolist()
         else:
-            temperatures = torch.tensor(
-                [seqs[idx].temperature for idx in sample_indices],
-                dtype=torch.float32,
-                pin_memory=True,
-            ).cuda(non_blocking=True)
-            token_ids = self.sampler(logits, temperatures).tolist()
+            values = [seqs[idx].temperature for idx in sample_indices]
+            temperatures = self.metadata_pool.to_cuda("sample_temperatures", values, torch.float32)
+            token_ids = self.sampler(
+                logits, temperatures, all_sampling=all(value > 1e-10 for value in values)
+            ).tolist()
         for idx, token_id in zip(sample_indices, token_ids):
             results[idx] = token_id
         return results
@@ -248,9 +252,9 @@ class ModelRunner:
                 return graph_result
 
         batch = (
-            prepare_prefill(chunks, self.block_size)
+            prepare_prefill(chunks, self.block_size, self.metadata_pool)
             if is_prefill
-            else prepare_decode(chunks, self.block_size)
+            else prepare_decode(chunks, self.block_size, self.metadata_pool)
         )
         context = self._plan_attention(batch.context)
         profile_range = "nanovllm::prefill_model" if is_prefill else "nanovllm::decode_model"
