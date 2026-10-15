@@ -66,8 +66,7 @@ class Qwen3_5DenseTest(unittest.TestCase):
         with patch("nanovllm.engine.model_runner.initialize_moe_runtime") as initialize:
             runner._init_moe_runtime()
         initialize.assert_not_called()
-        self.assertIsNone(runner.moe_workspace)
-        self.assertIsNone(runner.moe_output)
+        self.assertFalse(hasattr(runner, "moe_workspace"))
 
     def test_strict_loading_handles_either_tied_name_and_rejects_conflicts(self):
         source = Qwen3_5ForCausalLM(dense_config())
