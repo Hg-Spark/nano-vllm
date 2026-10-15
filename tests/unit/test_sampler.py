@@ -27,6 +27,12 @@ class SamplingTest(unittest.TestCase):
             torch.tensor([1, 2]),
         )
 
+    def test_all_sampling_path_skips_greedy_reduction(self):
+        logits = torch.tensor([[1.0, 3.0, 2.0], [4.0, 2.0, 3.0]])
+        result = Sampler()(logits, torch.ones(2), all_sampling=True)
+        self.assertEqual(result.shape, (2,))
+        self.assertTrue(torch.all((result >= 0) & (result < 3)).item())
+
     def test_negative_temperature_is_rejected(self):
         with self.assertRaises(ValueError):
             SamplingParams(temperature=-0.1)
