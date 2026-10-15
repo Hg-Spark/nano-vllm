@@ -67,7 +67,7 @@ output  = S_new × q_t
 
 单层活动循环矩阵的形状是 `[num_value_heads, value_head_dim, key_head_dim]`，不随序列长度增长。卷积状态也固定大小。不过本模型仍有 Full Attention 层，因此整个请求的显存并非与上下文长度无关。
 
-Prefill 固定使用 [gdn_chunk.py](../nanovllm/layers/gdn_chunk.py) 中独立推导的分块 Delta Rule 递推。Q/K/V、门控和状态计算为 FP32，每个最多 64-token 的块通过一次单位下三角求解计算增量，再通过矩阵乘法获得输出及末态。尾块无需补零。计算边界将运行时的 `[V,K]` 转为算子使用的 `[K,V]`，结束后写回原状态池。不进行硬件后端自动分派，也不依赖 Transformers 私有函数或 kernel hub。
+GDN 在支持 SM90/100/120、FP16/BF16 且 K/V head_dim 均为 128 的设备上选择 FlashInfer Indexed Prefill/Decode；其他配置使用 [gdn_chunk.py](../nanovllm/layers/gdn_chunk.py) 的 FP32 chunk-64 Prefill 及 PyTorch Decode。两条路径均在边界维护 FP32 `[V,K]` 循环状态；PyTorch 分块求解在算子内部转换为 `[K,V]`。
 
 调度层的“分块 prefill”仍表示分几轮执行输入，与算子内部的 chunk 64 分别处理。非零历史状态、变长请求和前缀快照沿用原接口。不同调度分块会改变 FP32 舍入顺序，不能要求任意分块方式都逐位相同。Decode 保留现有向量化递归路径；分块递推与 HF 数学等价但运算顺序不同，不保证逐位一致，也不代表完整模型已与 HF 对齐。
 
@@ -91,7 +91,7 @@ router logits → FP32 softmax → Top-K → 对选中权重重新归一化
 
 [Qwen3_5ForCausalLM](../nanovllm/models/qwen3_5.py) 是共享主干的薄适配层。`qwen3_5_text` 的每层 FFN 使用已有 `Qwen3_5MLP` 的三个普通 Linear：`down_proj(silu(gate_proj(x)) * up_proj(x))`，宽度来自 `intermediate_size`。不创建 router、专家张量或 MoE 工作空间。GDN、Attention、Norm、调度与缓存接口沿用同一实现。
 
-这一步没有引入 nano-vLLM 原始 Qwen3 基线的 gate/up 合并投影和张量并行层。先保持 HF 的独立 `gate_proj`、`up_proj`、`down_proj` 权重名称，后续性能优化可单独实现。若配置启用 `tie_word_embeddings`，embedding 与 `lm_head` 共享同一个参数；严格加载器按参数身份合并别名，仍拒绝缺失 FFN 权重或相互冲突的共享权重。
+严格权重加载阶段使用 HF 的独立 `gate_proj`、`up_proj`、`down_proj` 名称；加载后 `pack_projections()` 合并 Gate/Up Linear，并用 FlashInfer `silu_and_mul` 计算稠密 SwiGLU。若配置启用 `tie_word_embeddings`，embedding 与 `lm_head` 共享同一个参数；严格加载器按参数身份合并别名，仍拒绝缺失 FFN 权重或相互冲突的共享权重。
 
 ## 一个请求有两种物理历史
 
@@ -201,7 +201,7 @@ ModelRunner 每个 batch 只调用一次 FlashInfer `plan()`，各 Full Attentio
 
 ## 启动时怎样分配缓存
 
-[ModelRunner](../nanovllm/engine/model_runner.py)先加载模型并调用 `eval()`，由 [allocate_runtime_caches()](../nanovllm/engine/cache_runtime.py)根据 `gpu_memory_utilization` 和当下已使用显存计算静态 KV 预算，同时扣除 `max_num_seqs` 个 GDN 槽位及视觉特征预留。不再运行模型来测量历史激活峰值，剩余显存作为 Prefill、MoE、Vision 临时激活和 Graph Capture 的余量；这不是 OOM 安全证明。
+[ModelRunner](../nanovllm/engine/model_runner.py)先加载模型并调用 `eval()`，由 [allocate_runtime_caches()](../nanovllm/engine/cache_runtime.py)根据 `gpu_memory_utilization` 和当下已使用显存计算静态 KV 预算，同时扣除 `max_num_seqs` 个 GDN 槽位及启用视觉模式时的视觉特征预留。不再运行模型来测量历史激活峰值，剩余显存作为 Prefill、MoE、Vision 临时激活和 Graph Capture 的余量；这不是 OOM 安全证明。
 
 ```text
 GPU_used = total_GPU_memory - CUDA_free_at_allocation
@@ -223,7 +223,7 @@ KV_blocks = floor(KV_budget / KV_block_bytes)
 
 ```text
 conv_state      [槽数, conv_dim, conv_kernel_size]
-recurrent_state [槽数, value_heads, key_head_dim, value_head_dim]
+recurrent_state [槽数, value_heads, value_head_dim, key_head_dim]
 ```
 
 `eval()` 设置模块推理行为，`torch.inference_mode()` 关闭前向中的训练追踪。后者不妨碍 KV/GDN 张量就地更新。它们是推理执行设置，不会把参考算子自动融合成高性能 kernel。
@@ -232,7 +232,7 @@ recurrent_state [槽数, value_heads, key_head_dim, value_head_dim]
 
 [load_model()](../nanovllm/utils/loader.py)读取目录下的 safetensors 分片，按模型声明的规则改名、跳过无关权重，再逐项检查名称和形状：
 
-- `model.language_model.` 映射到 `model.`，`model.visual.` 映射到 `visual.`；
+- `model.language_model.` 映射到 `model.`；启用视觉模式时 `model.visual.` 映射到 `visual.`，纯文本模式跳过视觉权重；
 - 跳过 `mtp.` 前缀；
 - 遇到未知参数、形状不匹配或缺失参数时抛出异常。
 
