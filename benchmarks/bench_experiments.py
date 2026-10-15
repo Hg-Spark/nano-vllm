@@ -11,10 +11,10 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
-from random import Random
 import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
+from random import Random
 from time import perf_counter
 
 
@@ -136,6 +136,7 @@ def make_requests(engine, prompts, max_tokens):
 def run_fixed_decode(engine, a, graph_replays):
     """Measure real Scheduler + ModelRunner at a fixed active decode batch."""
     import torch
+
     from nanovllm import SamplingParams
     from scripts._probes import prepare_fixed_decode_batch, vocabulary_size
     from scripts.bench import summarize
@@ -206,9 +207,10 @@ def run_fixed_decode(engine, a, graph_replays):
 
 def run(a):
     import torch
+
     from nanovllm import LLM
-    from scripts.bench import run_benchmark
     from scripts._probes import vocabulary_size
+    from scripts.bench import run_benchmark
 
     engine = LLM(
         a.model, dtype=a.dtype, max_num_batched_tokens=a.budget,
