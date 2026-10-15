@@ -83,7 +83,6 @@ class FlashInferAttentionDispatchTest(unittest.TestCase):
         attention = Attention(
             num_heads=2,
             head_dim=8,
-            scale=8**-0.5,
             num_kv_heads=1,
         )
         attention.k_cache = torch.empty(4, 4, 1, 8, dtype=dtype)
@@ -152,7 +151,7 @@ class FlashInferAttentionDispatchTest(unittest.TestCase):
         )
 
     def test_missing_paged_cache_is_rejected(self):
-        attention = Attention(2, 8, 8**-0.5, 1)
+        attention = Attention(2, 8, 1)
         q = torch.randn(1, 2, 8)
         k = torch.randn(1, 1, 8)
         v = torch.randn(1, 1, 8)
