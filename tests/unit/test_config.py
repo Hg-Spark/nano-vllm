@@ -61,6 +61,25 @@ class ConfigTest(unittest.TestCase):
                     max_visual_tokens_per_request=11,
                 )
 
+    def test_head_dim_fallback_and_invalid_attention_dimensions(self):
+        text = make_qwen3_5_text_config()
+        del text.head_dim
+        config = self.load(self.root(text), dtype="float16")
+        self.assertEqual(config.head_dim, 4)
+        self.assertEqual(config.max_visual_tokens_per_request, 0)
+
+        for attr, value in (
+            ("num_attention_heads", 0),
+            ("num_key_value_heads", 0),
+            ("num_key_value_heads", 3),
+            ("head_dim", -1),
+        ):
+            with self.subTest(attr=attr, value=value):
+                bad = make_qwen3_5_text_config()
+                setattr(bad, attr, value)
+                with self.assertRaises(ValueError):
+                    self.load(self.root(bad), dtype="float16")
+
     def test_accepts_dense_and_moe_and_multimodal_mrope(self):
         moe_cfg = self.load(self.root(), dtype="bfloat16")
         self.assertTrue(moe_cfg.is_moe)
