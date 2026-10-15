@@ -29,7 +29,6 @@ class ImageState:
     rope_delta: int
     image_start: int
     image_end: int
-    grid_signature: tuple[int, int, int]
     visual_features: torch.Tensor | None = None
 
 
@@ -142,6 +141,5 @@ def image_state_from_processor_output(
         rope_delta=rope_delta,
         image_start=image_start,
         image_end=image_end,
-        grid_signature=grid_signature,
     )
     return ids, state
