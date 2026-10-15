@@ -4,6 +4,7 @@ import triton.language as tl
 from torch import nn
 from torch.profiler import record_function
 
+from nanovllm.config import resolve_head_dim
 from nanovllm.utils.context import get_context
 
 
@@ -12,11 +13,7 @@ def flashinfer_attention_spec(
     model_dtype: torch.dtype,
     kv_dtype: torch.dtype,
 ) -> tuple[int, int, int, dict]:
-    head_dim = getattr(
-        config,
-        "head_dim",
-        config.hidden_size // config.num_attention_heads,
-    )
+    head_dim = resolve_head_dim(config)
     return (
         config.num_attention_heads,
         config.num_key_value_heads,
