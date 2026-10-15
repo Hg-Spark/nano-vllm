@@ -96,6 +96,8 @@ class LLMEngine:
     ) -> Sequence:
         image_state = None
         if isinstance(prompt, ImagePrompt):
+            if self.config.max_visual_tokens_per_request == 0:
+                raise ValueError("image requests require max_visual_tokens_per_request > 0 or None")
             processed = self._get_processor()(
                 text=prompt.text, images=prompt.image, return_tensors="pt"
             )
