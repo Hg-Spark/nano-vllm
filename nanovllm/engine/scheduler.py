@@ -13,6 +13,7 @@ class Scheduler:
     def __init__(self, config: Config, num_kv_cache_blocks: int) -> None:
         self.max_num_seqs = config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
+        self.prefix_cache_eager_snapshot = getattr(config, "prefix_cache_eager_snapshot", True)
         self.eos_token_ids = set(config.eos_token_ids)
         self.block_manager = BlockManager(
             num_kv_cache_blocks,
@@ -97,7 +98,7 @@ class Scheduler:
             target_tokens = seq.committed_tokens + scheduled_tokens
             # A complete KV page also needs the GDN state at the same boundary.
             # Stop before a non-aligned tail only when it yields a new cache entry.
-            if self.block_manager.prefix_cache.enabled:
+            if self.prefix_cache_eager_snapshot and self.block_manager.prefix_cache.enabled:
                 block_size = self.block_manager.block_size
                 full_block_end = target_tokens // block_size * block_size
                 if (
