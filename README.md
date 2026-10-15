@@ -15,7 +15,7 @@
 
 GDN 循环矩阵及快照保持 FP32 `[V,K]` 布局；SM90+ 直接在 State Pool 上执行 FlashInfer，旧 GPU 使用 PyTorch 路径。输入投影和 Dense MLP 的 Gate/Up 权重在 checkpoint 加载后打包。MoE Prefill / Decode 统一使用 FlashInfer CUTLASS，SM75（例如 RTX 2080 Ti）不支持该 MoE 后端。模型 dtype 必须显式为 `float16` 或 `bfloat16`。
 
-**执行边界：** Prefill 使用 FlashInfer Paged Attention Eager；Decode 根据 Batch size 选择固定 CUDA Graph 或 Eager。启动时以 `gpu_memory_utilization=0.8`（默认）进行静态 KV 定容，**不执行无缓存 Attention/GDN Profiling Warmup**；启用 Decode Graph 时仍需预执行、捕获并清理临时写入的状态。物理 KV Pool 启动时预分配，逻辑 Block 在请求运行期间按需分配。显存余量不是任意负载均不会 OOM 的保证。`max_visual_tokens_per_request` 可显式限制图像请求视觉 Token 数量并减少相应的 KV 定容扣减；未设置时沿用保守上限。启用 Graph 后记录每个 Bucket 的显存变化。
+**执行边界：** Prefill 使用 FlashInfer Paged Attention Eager；Decode 根据 Batch size 选择固定 CUDA Graph 或 Eager。启动时以 `gpu_memory_utilization=0.8`（默认）进行静态 KV 定容，**不执行无缓存 Attention/GDN Profiling Warmup**；启用 Decode Graph 时仍需预执行、捕获并清理临时写入的状态。物理 KV Pool 启动时预分配，逻辑 Block 在请求运行期间按需分配。显存余量不是任意负载均不会 OOM 的保证。默认 `max_visual_tokens_per_request=0`，仅加载文本模型；图文推理需显式设置正数视觉 Token 上限，或设为 `None` 使用保守上限。启用 Graph 后记录每个 Bucket 的显存变化。
 
 ## 最小运行
 
