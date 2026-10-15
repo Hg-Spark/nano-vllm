@@ -96,7 +96,6 @@ class Qwen3_5Attention(nn.Module):
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=rotary_dim,
-            max_position=config.max_position_embeddings,
             base=rope_theta,
             mrope_section=mrope_section,
         )
