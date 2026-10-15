@@ -1,9 +1,6 @@
 import torch
 from torch import nn
 
-GDN_RECURRENT_SNAPSHOT_DTYPE = torch.float32
-
-
 class GDNStatePool(nn.Module):
     """Physical Conv/Recurrent state slots for one GDN layer.
 
@@ -103,7 +100,6 @@ class GDNStatePool(nn.Module):
             ),
             recurrent_state.detach().to(
                 device="cpu",
-                dtype=GDN_RECURRENT_SNAPSHOT_DTYPE,
                 copy=True,
             ),
         )
