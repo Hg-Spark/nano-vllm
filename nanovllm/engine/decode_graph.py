@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import flashinfer
 import torch
 
-from nanovllm.engine.batch_common import DecodeBatchLayout, _pinned_cpu_tensor
+from nanovllm.engine.batch_common import DecodeBatchLayout
 from nanovllm.layers.attention import flashinfer_attention_spec
 from nanovllm.utils.context import Context, use_context
 
@@ -32,6 +32,21 @@ class DecodeGraphBucket:
         self.paged_kv_indptr = torch.arange(self.batch_size + 1, dtype=torch.int32, device="cuda")
         self.paged_kv_indices = torch.zeros(self.max_page_indices, dtype=torch.int32, device="cuda")
         self.paged_kv_last_page_len = torch.ones(self.batch_size, dtype=torch.int32, device="cuda")
+        # Reuse page-locked host staging and wait before modifying an in-flight buffer.
+        self._host_buffers = {
+            name: torch.empty_like(getattr(self, name), device="cpu", pin_memory=True)
+            for name in (
+                "input_ids",
+                "rope_positions",
+                "slot_mapping",
+                "state_slot_ids",
+                "paged_kv_indptr",
+                "paged_kv_indices",
+                "paged_kv_last_page_len",
+            )
+        }
+        self._host_transfer_done = torch.cuda.Event()
+        self._has_pending_host_transfer = False
         self.wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
             self.workspace,
             kv_layout="NHD",
@@ -63,21 +78,30 @@ class DecodeGraphBucket:
             and len(layout.paged_kv_indices) <= self.max_page_indices
         )
 
-    @staticmethod
-    def _copy_layout(destination: torch.Tensor, values) -> None:
-        destination.copy_(_pinned_cpu_tensor(values, destination.dtype), non_blocking=True)
+    def _copy_layout(self, name: str, values) -> None:
+        host = self._host_buffers[name]
+        source = torch.as_tensor(values, dtype=host.dtype, device="cpu")
+        target = host if name != "paged_kv_indices" else host[: source.numel()]
+        target.copy_(source)
+        device = getattr(self, name)
+        if name == "paged_kv_indices":
+            device = device[: source.numel()]
+        device.copy_(target, non_blocking=True)
 
     def load(self, layout: DecodeBatchLayout) -> None:
         if not self.can_run(layout):
             raise ValueError("decode layout does not fit graph bucket")
-        self._copy_layout(self.input_ids, layout.input_ids)
-        self._copy_layout(self.rope_positions, layout.rope_positions)
-        self._copy_layout(self.slot_mapping, layout.slot_mapping)
-        self._copy_layout(self.state_slot_ids, layout.state_slots)
-        self._copy_layout(self.paged_kv_indptr, layout.paged_kv_indptr)
-        num_indices = len(layout.paged_kv_indices)
-        self._copy_layout(self.paged_kv_indices[:num_indices], layout.paged_kv_indices)
-        self._copy_layout(self.paged_kv_last_page_len, layout.paged_kv_last_page_len)
+        if self._has_pending_host_transfer:
+            self._host_transfer_done.synchronize()
+        self._copy_layout("input_ids", layout.input_ids)
+        self._copy_layout("rope_positions", layout.rope_positions)
+        self._copy_layout("slot_mapping", layout.slot_mapping)
+        self._copy_layout("state_slot_ids", layout.state_slots)
+        self._copy_layout("paged_kv_indptr", layout.paged_kv_indptr)
+        self._copy_layout("paged_kv_indices", layout.paged_kv_indices)
+        self._copy_layout("paged_kv_last_page_len", layout.paged_kv_last_page_len)
+        self._host_transfer_done.record(torch.cuda.current_stream())
+        self._has_pending_host_transfer = True
 
     def _plan(self, num_page_indices: int, model, kv_cache: torch.Tensor) -> None:
         model_dtype = next(model.parameters()).dtype
@@ -161,4 +185,8 @@ class DecodeGraphBucket:
     def release(self) -> None:
         if self.graph is not None and hasattr(self.graph, "reset"):
             self.graph.reset()
+        if self._has_pending_host_transfer:
+            self._host_transfer_done.synchronize()
+        self._host_buffers = {}
+        self._host_transfer_done = None
         self.graph = self.logits = self.wrapper = self.context = self.workspace = None
