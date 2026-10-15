@@ -20,6 +20,13 @@ def _load_hf_config(model_path: str) -> PretrainedConfig:
     return AutoConfig.from_pretrained(model_path)
 
 
+def resolve_head_dim(text_config: PretrainedConfig) -> int:
+    explicit = getattr(text_config, "head_dim", None)
+    if explicit is not None:
+        return int(explicit)
+    return text_config.hidden_size // text_config.num_attention_heads
+
+
 def _validate_qwen3_5_rope_support(
     root_config: PretrainedConfig,
     text_config: PretrainedConfig,
@@ -43,13 +50,7 @@ def _validate_qwen3_5_rope_support(
     if len(section) != 3:
         raise ValueError("Qwen3.5 mRoPE requires three sections")
 
-    head_dim = int(
-        getattr(
-            text_config,
-            "head_dim",
-            text_config.hidden_size // text_config.num_attention_heads,
-        )
-    )
+    head_dim = resolve_head_dim(text_config)
     partial_rotary_factor = float(
         rope_parameters.get(
             "partial_rotary_factor",
@@ -77,7 +78,7 @@ class Config:
     gpu_memory_utilization: float = 0.8
     kv_cache_block_size: int = 16
     max_prefix_cache_entries: int = 0
-    max_visual_tokens_per_request: int | None = None
+    max_visual_tokens_per_request: int | None = 0
     kv_cache_dtype: str = "auto"
     kv_cache_k_scale: float = 1.0
     kv_cache_v_scale: float = 1.0
@@ -87,6 +88,7 @@ class Config:
     text_config: PretrainedConfig = field(init=False, repr=False)
     is_moe: bool = field(init=False)
     eos_token_ids: tuple[int, ...] = field(init=False, default=(), repr=False)
+    head_dim: int = field(init=False)
 
     def __post_init__(self) -> None:
         if self.dtype not in ("float16", "bfloat16"):
@@ -129,7 +131,14 @@ class Config:
         if getattr(hf_config, "quantization_config", None):
             raise NotImplementedError("quantized Qwen3.5 checkpoints are not supported")
 
-        required = ("layer_types", "linear_num_value_heads", "linear_num_key_heads") + (
+        required = (
+            "hidden_size",
+            "num_attention_heads",
+            "num_key_value_heads",
+            "layer_types",
+            "linear_num_value_heads",
+            "linear_num_key_heads",
+        ) + (
             (
                 "num_experts",
                 "num_experts_per_tok",
@@ -142,6 +151,20 @@ class Config:
         missing = [name for name in required if not hasattr(self.text_config, name)]
         if missing:
             raise ValueError("invalid Qwen3.5 text config, missing: " + ", ".join(missing))
+        for name in ("hidden_size", "num_attention_heads", "num_key_value_heads"):
+            value = getattr(self.text_config, name)
+            if not isinstance(value, int) or value <= 0:
+                raise ValueError(f"Qwen3.5 {name} must be a positive integer")
+        if self.text_config.num_attention_heads % self.text_config.num_key_value_heads:
+            raise ValueError("Qwen3.5 attention heads must be divisible by KV heads")
+        if (
+            getattr(self.text_config, "head_dim", None) is None
+            and self.text_config.hidden_size % self.text_config.num_attention_heads
+        ):
+            raise ValueError("Qwen3.5 hidden_size must be divisible by attention heads")
+        self.head_dim = resolve_head_dim(self.text_config)
+        if self.head_dim <= 0:
+            raise ValueError("Qwen3.5 head_dim must be positive")
         if self.is_moe and self.text_config.num_experts_per_tok > self.text_config.num_experts:
             raise ValueError("num_experts_per_tok exceeds num_experts")
         if not self.is_moe and self.text_config.intermediate_size <= 0:
