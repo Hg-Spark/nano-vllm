@@ -113,7 +113,7 @@ python -m scripts.verify_qwen3_5 "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
   --max-model-len 4096
 ```
 
-脚本先运行 Transformers 参考模型，再运行本实现。HF 使用显式传入的 `--dtype`（与 nano-vLLM 相同）、关闭随机采样并取消 EOS 提前结束；本实现使用 `temperature=0.0`、`ignore_eos=True`。比较的是生成部分的 token ID，长度不同也算失败。
+脚本先运行 Transformers 参考模型，再运行本实现。HF 使用显式传入的 `--dtype`（与 nano-vLLM 相同）、关闭随机采样并取消 EOS 提前结束；本实现使用 `temperature=0.0`、`ignore_eos=True`。除生成部分的 token ID 严格一致外，还通过两侧 `lm_head` Hook 比较每个生成步骤的原始 logits（包括 Prefill 最后位置与后续 Decode）。逐步计算 `RMS(Nano - HF) / max(RMS(HF), 1e-12)`，默认阈值为 `0.05`，可通过 `--logits-relative-rms-threshold` 修改。结果保存每步相对 RMS 与最大绝对误差，不保存完整词表 logits。
 
 文本、单图对齐和逐层诊断在 MoE 模型上显式指定 HF 的专家后端：`--hf-experts-backend`
 接受 `eager`、`batched_mm`、`grouped_mm`，默认 `eager`，不接受 `auto`。
@@ -124,7 +124,7 @@ MoE 计算后端。HF `eager` 用于独立数值对照，和 FlashInfer 的舍�
 因此必须记录实际 HF 专家后端。稠密 Qwen3.5 不启用专家后端。
 MoE 仅支持 FlashInfer CUTLASS 覆盖的 GPU 架构；不支持 SM75。
 
-输出成功标识为 `PASS: greedy token sequences match exactly`；失败会报告 completion 中首个不一致的索引和两侧 token，保留失败结果且不自动加载模型进行额外诊断。需要定位逐层 Hidden States 误差时，单独运行 `python -m scripts.diagnose_qwen3_5`。该脚本直接使用所给 prompt，不会自动套聊天模板。
+token 对齐成功输出 `PASS: greedy token sequences match exactly`，logits 对齐成功输出 `PASS: logits relative RMS`。token 不一致报告首个不同索引，logits 超阈值报告首个异常步骤、相对 RMS 和最大绝对误差；阈值是浮点误差验收标准，并不要求逐元素完全相等。需要定位逐层 Hidden States 误差时，单独运行 `python -m scripts.diagnose_qwen3_5`。该脚本直接使用所给 prompt，不会自动套聊天模板。
 
 默认只比较 16 个新 token。正式记录应覆盖多个中文/英文提示、不同输入长度和更长的 continuation，并保留检查点版本和完整输出。不能用一次短提示通过替代全部验证。
 

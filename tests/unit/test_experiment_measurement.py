@@ -116,6 +116,18 @@ class MeasurementTest(unittest.TestCase):
         self.assertEqual(compare_tokens([1, 2], [1, 3])["first_mismatch"], 1)
         self.assertEqual(compare_tokens([1], [1, 2])["first_mismatch"], 1)
 
+    def test_logits_comparison_detects_numeric_divergence(self):
+        import torch
+
+        from scripts.verify_qwen3_5 import compare_logits
+
+        hf = torch.tensor([1.0, 2.0, 3.0])
+        self.assertEqual(compare_logits([hf, hf], [hf, hf], 0.05)["max_relative_rms"], 0)
+        with self.assertRaisesRegex(ValidationFailure, "logits at step 1"):
+            compare_logits([hf, hf], [hf, hf + 1], 0.05)
+        with self.assertRaisesRegex(ValidationFailure, "non-finite"):
+            compare_logits([hf], [torch.tensor([1.0, float("nan"), 3.0])], 0.05)
+
     def test_statistics_interpolation(self):
         summary = bench.summarize([0, 10])
         self.assertEqual(summary["p50"], 5)
