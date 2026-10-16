@@ -1,27 +1,56 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "nano-vllm"
-version = "0.2.0"
+version = "0.3.0"
 authors = [{ name = "Xingkai Yu" }]
 license = "MIT"
 license-files = ["LICENSE"]
 readme = "README.md"
-description = "a lightweight vLLM implementation built from scratch"
-requires-python = ">=3.10,<3.13"
+description = "A compact Qwen3.5 hybrid inference runtime"
+requires-python = ">=3.10"
+# Reference environment: Python 3.10-3.12, PyTorch 2.14.0, CUDA 13.0.
+# These versions are documentation guidance, not installation constraints.
 dependencies = [
-    "torch>=2.4.0",
-    "triton>=3.0.0",
-    "transformers>=4.51.0",
-    "flash-attn",
-    "xxhash",
+    "torch",
+    "transformers>=5.2.0",
+    "flashinfer-python==0.7.0",
+    "safetensors",
+    "Pillow",
 ]
 
 [project.urls]
-Homepage="https://github.com/GeeeekExplorer/nano-vllm"
+Homepage = "https://github.com/Hg-Spark/nano-vllm"
+
+# The launcher targets Linux x86_64 and CUDA 13.0.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "tuna"
+url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+default = true
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["nanovllm*"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
