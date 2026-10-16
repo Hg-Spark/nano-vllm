@@ -41,7 +41,7 @@ class RotaryEmbeddingTest(unittest.TestCase):
         frequencies = positions[:, :, None].float() * rope.inv_freq[None, None, :]
         selected = frequencies[0].clone()
         for axis, count in ((1, 11), (2, 10)):
-            selected[..., axis:count * 3:3] = frequencies[axis, ..., axis:count * 3:3]
+            selected[..., axis : count * 3 : 3] = frequencies[axis, ..., axis : count * 3 : 3]
         cos = selected.cos()[:, None, :]
         sin = selected.sin()[:, None, :]
 

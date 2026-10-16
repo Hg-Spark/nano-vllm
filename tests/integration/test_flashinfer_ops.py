@@ -77,9 +77,7 @@ class Qwen35FlashInferOpsTest(unittest.TestCase):
             intermediate_size=256,
         )
         for dtype in self._supported_dtypes():
-            layer = Qwen3_5DecoderLayer(config, 0, 32).to(
-                device="cuda", dtype=dtype
-            )
+            layer = Qwen3_5DecoderLayer(config, 0, 32).to(device="cuda", dtype=dtype)
             layer.self_attn = ScaleAttention()
             layer.mlp = torch.nn.Identity()
             with torch.no_grad():
