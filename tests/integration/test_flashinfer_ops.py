@@ -62,7 +62,7 @@ class Qwen35FlashInferOpsTest(unittest.TestCase):
         from nanovllm.models.qwen3_5 import Qwen3_5DecoderLayer
 
         class ScaleAttention(torch.nn.Module):
-            def forward(self, positions, hidden_states):
+            def forward(self, hidden_states, rope_cache):
                 return hidden_states * 0.125
 
         config = SimpleNamespace(
@@ -77,7 +77,7 @@ class Qwen35FlashInferOpsTest(unittest.TestCase):
             intermediate_size=256,
         )
         for dtype in self._supported_dtypes():
-            layer = Qwen3_5DecoderLayer(config, 0, 32, (32, 10000.0, None)).to(
+            layer = Qwen3_5DecoderLayer(config, 0, 32).to(
                 device="cuda", dtype=dtype
             )
             layer.self_attn = ScaleAttention()
@@ -93,7 +93,7 @@ class Qwen35FlashInferOpsTest(unittest.TestCase):
                     reference = merged + layer.post_attention_layernorm(merged)
                 hidden, residual = initial.clone(), None
                 for _ in range(2):
-                    hidden, residual = layer(torch.zeros(3, 4, device="cuda"), hidden, residual)
+                    hidden, residual = layer(hidden, residual, None)
                 actual = hidden + residual
                 torch.testing.assert_close(actual, reference, rtol=3e-2, atol=3e-2)
 

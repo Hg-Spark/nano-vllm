@@ -29,7 +29,7 @@ class Qwen3_5RMSNorm(nn.Module):
 
 
 class Qwen3_5Attention(nn.Module):
-    def __init__(self, config, head_dim: int, rope_params: tuple) -> None:
+    def __init__(self, config, head_dim: int) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -69,20 +69,12 @@ class Qwen3_5Attention(nn.Module):
             eps=config.rms_norm_eps,
         )
 
-        rotary_dim, rope_theta, mrope_section = rope_params
-
-        self.rotary_emb = RotaryEmbedding(
-            self.head_dim,
-            rotary_dim=rotary_dim,
-            base=rope_theta,
-            mrope_section=mrope_section,
-        )
         self.attn = Attention()
 
     def forward(
         self,
-        positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        rope_cache: tuple[torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
         q_gate = self.q_proj(hidden_states).view(
             -1,
@@ -103,7 +95,7 @@ class Qwen3_5Attention(nn.Module):
 
         q = self.q_norm(q)
         k = self.k_norm(k)
-        q, k = self.rotary_emb(positions, q, k)
+        q, k = RotaryEmbedding.apply_cached(q, k, self.head_dim, rope_cache)
 
         output = self.attn(q, k, v).flatten(1)
         output = output * torch.sigmoid(gate.flatten(1))

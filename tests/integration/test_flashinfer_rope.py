@@ -12,8 +12,8 @@ from nanovllm.layers.rotary_embedding import RotaryEmbedding
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA for FlashInfer RoPE")
 class RotaryEmbeddingTest(unittest.TestCase):
     def test_partial_rope_rotates_prefix_and_preserves_tail(self):
-        head_dim = 8
-        rotary_dim = 4
+        head_dim = 64
+        rotary_dim = 32
         rope = RotaryEmbedding(
             head_size=head_dim,
             rotary_dim=rotary_dim,
@@ -33,15 +33,15 @@ class RotaryEmbeddingTest(unittest.TestCase):
         self.assertFalse(torch.equal(q_out[..., :rotary_dim], q[..., :rotary_dim]))
 
     def test_flashinfer_mrope_matches_reference(self):
-        rope = RotaryEmbedding(12, 12, 10000, mrope_section=(2, 2, 2)).cuda()
+        rope = RotaryEmbedding(64, 64, 10000, mrope_section=(11, 11, 10)).cuda()
         torch.manual_seed(5)
-        q = torch.randn(3, 2, 12, device="cuda", dtype=torch.float16)
-        k = torch.randn(3, 1, 12, device="cuda", dtype=torch.float16)
+        q = torch.randn(3, 2, 64, device="cuda", dtype=torch.float16)
+        k = torch.randn(3, 1, 64, device="cuda", dtype=torch.float16)
         positions = torch.tensor([[1, 2, 3], [4, 6, 8], [7, 9, 11]], device="cuda")
         frequencies = positions[:, :, None].float() * rope.inv_freq[None, None, :]
         selected = frequencies[0].clone()
-        for axis in (1, 2):
-            selected[..., axis:6:3] = frequencies[axis, ..., axis:6:3]
+        for axis, count in ((1, 11), (2, 10)):
+            selected[..., axis:count * 3:3] = frequencies[axis, ..., axis:count * 3:3]
         cos = selected.cos()[:, None, :]
         sin = selected.sin()[:, None, :]
 

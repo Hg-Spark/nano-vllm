@@ -9,18 +9,19 @@ from nanovllm.config import resolve_head_dim, resolve_qwen3_5_rope
 from nanovllm.layers.attention import Attention
 from nanovllm.layers.gated_delta_net import GatedDeltaNet
 from nanovllm.layers.gdn_state import GDNStatePool
+from nanovllm.layers.rotary_embedding import RotaryEmbedding
 from nanovllm.models.qwen3_5_layers import Qwen3_5Attention, Qwen3_5MLP, Qwen3_5RMSNorm
 from nanovllm.models.qwen3_5_moe import Qwen3_5SparseMoeBlock
 
 
 class Qwen3_5DecoderLayer(nn.Module):
-    def __init__(self, config, layer_idx: int, head_dim: int, rope_params: tuple) -> None:
+    def __init__(self, config, layer_idx: int, head_dim: int) -> None:
         super().__init__()
         self.block_type = config.layer_types[layer_idx]
         if self.block_type == "linear_attention":
             self.linear_attn = GatedDeltaNet(config)
         elif self.block_type == "full_attention":
-            self.self_attn = Qwen3_5Attention(config, head_dim, rope_params)
+            self.self_attn = Qwen3_5Attention(config, head_dim)
         else:
             raise ValueError(f"unsupported Qwen3.5 layer type: {self.block_type}")
 
@@ -41,9 +42,9 @@ class Qwen3_5DecoderLayer(nn.Module):
 
     def forward(
         self,
-        positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        rope_cache: tuple[torch.Tensor, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden_states
@@ -55,10 +56,7 @@ class Qwen3_5DecoderLayer(nn.Module):
             with record_function("nanovllm::gdn_layer"):
                 hidden_states = self.linear_attn(hidden_states)
         else:
-            hidden_states = self.self_attn(
-                positions,
-                hidden_states,
-            )
+            hidden_states = self.self_attn(hidden_states, rope_cache)
         hidden_states = self.post_attention_layernorm.forward_with_residual(hidden_states, residual)
         with record_function("nanovllm::moe_layer" if self.is_moe else "nanovllm::ffn_layer"):
             hidden_states = self.mlp(hidden_states)
@@ -73,10 +71,13 @@ class Qwen3_5Model(nn.Module):
             config.hidden_size,
         )
         head_dim = resolve_head_dim(config)
-        rope_params = resolve_qwen3_5_rope(config)
+        rotary_dim, rope_theta, mrope_section = resolve_qwen3_5_rope(config)
+        self.rotary_emb = RotaryEmbedding(
+            head_dim, rotary_dim=rotary_dim, base=rope_theta, mrope_section=mrope_section
+        )
         self.layers = nn.ModuleList(
             [
-                Qwen3_5DecoderLayer(config, layer_idx, head_dim, rope_params)
+                Qwen3_5DecoderLayer(config, layer_idx, head_dim)
                 for layer_idx in range(config.num_hidden_layers)
             ]
         )
@@ -95,8 +96,9 @@ class Qwen3_5Model(nn.Module):
             raise ValueError("specify exactly one of input_ids or inputs_embeds")
         hidden_states = self.embed_tokens(input_ids) if inputs_embeds is None else inputs_embeds
         residual = None
+        rope_cache = self.rotary_emb.prepare(positions)
         for layer in self.layers:
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            hidden_states, residual = layer(hidden_states, residual, rope_cache)
         return self.norm.forward_with_residual(hidden_states, residual)
 
 
