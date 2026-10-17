@@ -66,7 +66,7 @@ flowchart LR
 
 ### 资源预留
 
-Scheduler 先按 KV 空闲页、Decode 预留空间和 GDN 可用槽位计算可调度 token 数。只有资源预算满足要求时才分配；不足时尝试缓存淘汰或抢占，无法推进则直接报错。
+Scheduler 按全生命周期 KV 页额度及 GDN 槽位准入新请求。已接纳请求按当前 Chunk 按需分配 KV 页，额外的前缀缓存引用可通过 LRU 淘汰回收；额度不足的新请求继续等待。
 
 ### 执行成功：推进一个共同边界
 
@@ -90,7 +90,7 @@ check result count
 
 ## 执行失败与预留失败的区别
 
-调度器在分配前检查 KV 和 Slot 容量，并优先通过缓存淘汰和抢占解决资源不足。实际分配发生错误则直接上抛，终止当前执行流程。
+调度器在新请求准入时约束完整 KV 额度和 GDN Slot，执行时按需分配物理页。若缓存淘汰后仍无法满足已接纳请求的页增长需求，则抛出异常。
 
 模型前向、CUDA Graph 或提交后处理抛出异常时，物理 KV/GDN 状态可能已部分改变。此时 `LLMEngine._run_batch()` 将引擎标记为不可用，原异常直接上抛。之后的 `step()`、`add_request()` 和 `generate()` 均拒绝继续执行，必须重新构造引擎。
 
@@ -175,6 +175,6 @@ check result count
 - decode 前满足 `committed_tokens == len(seq) - 1`。
 - 前缀快照的 token 边界必须等于共享 KV 前缀边界。
 - 预留失败只撤销增量；前向失败会终止当前引擎的后续执行。
-- 完成、抢占、缓存发布和缓存淘汰各自只释放或增加自己拥有的引用。
+- 请求完成释放 KV 与 Slot；缓存发布与淘汰各自只增加或释放自己持有的引用。
 
 对应测试见 [test_scheduler.py](../tests/unit/test_scheduler.py)、[test_prefix_cache.py](../tests/unit/test_prefix_cache.py)、[test_state_manager.py](../tests/unit/test_state_manager.py) 和 [test_llm_engine.py](../tests/unit/test_llm_engine.py)。
