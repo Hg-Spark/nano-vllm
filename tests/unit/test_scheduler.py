@@ -84,6 +84,7 @@ class SchedulerCoreTest(unittest.TestCase):
             ("non_eager", {"max_prefix_cache_entries": 16, "prefix_cache_eager_snapshot": False}),
             ("disabled", {"max_prefix_cache_entries": 0}),
             ("zero_snapshot_budget", {"max_prefix_cache_snapshot_bytes": 0}),
+            ("undersized_snapshot_budget", {"max_prefix_cache_snapshot_bytes": 1, "snapshot_nbytes": 16}),
         )
         for label, options in cases:
             with self.subTest(mode=label):

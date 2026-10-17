@@ -26,12 +26,14 @@ class PrefixCache:
         retain_blocks: Callable[[Iterable[int]], None],
         release_blocks: Callable[[Iterable[int]], None],
         max_snapshot_bytes: int | None = None,
+        snapshot_nbytes: int | None = None,
     ) -> None:
         if max_snapshot_bytes is not None and max_snapshot_bytes < 0:
             raise ValueError("max_snapshot_bytes must be non-negative")
         self.block_size = block_size
         self.max_entries = max_entries
         self.max_snapshot_bytes = max_snapshot_bytes
+        self.snapshot_nbytes = snapshot_nbytes
         self._snapshot_bytes = 0
         self._retain_blocks = retain_blocks
         self._release_blocks = release_blocks
@@ -73,6 +75,12 @@ class PrefixCache:
 
     def should_publish(self, seq: Sequence, end: int) -> bool:
         if not self.enabled or self.max_snapshot_bytes == 0 or end <= seq.committed_tokens:
+            return False
+        if (
+            self.max_snapshot_bytes is not None
+            and self.snapshot_nbytes is not None
+            and self.snapshot_nbytes > self.max_snapshot_bytes
+        ):
             return False
         if end > seq.num_prompt_tokens or end % self.block_size != 0:
             return False

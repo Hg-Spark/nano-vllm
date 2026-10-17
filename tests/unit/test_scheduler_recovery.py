@@ -1,6 +1,8 @@
 import unittest
 
 from nanovllm.engine.sequence import Sequence, SequenceStatus
+from nanovllm.engine.state_manager import GDNStateSnapshot
+from nanovllm.sampling_params import SamplingParams
 from tests.scheduler_helpers import (
     make_scheduler,
     scheduled_sequences,
@@ -108,6 +110,49 @@ class SchedulerRecoveryTest(unittest.TestCase):
         scheduler.postprocess(step3.prefill_chunks, [11, 12], True)
         self.assertEqual((first.committed_tokens, second.committed_tokens), (6, 6))
         self.assertEqual(list(scheduler.running), [first, second])
+
+    def test_prefill_recovers_without_repeated_preemption_cycle(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=512,
+            max_num_seqs=2,
+            num_blocks=10,
+            block_size=16,
+            max_prefix_cache_entries=1,
+            prefix_cache_eager_snapshot=True,
+        )
+        specs = ((113, 32), (110, 39), (93, 4))
+        seqs = [
+            Sequence(
+                [1] * prompt_len,
+                SamplingParams(max_tokens=max_tokens, ignore_eos=True),
+            )
+            for prompt_len, max_tokens in specs
+        ]
+        for seq in seqs:
+            scheduler.add(seq)
+
+        for _ in range(250):
+            output = scheduler.schedule()
+            if output.decode_chunks:
+                scheduler.postprocess(
+                    output.decode_chunks, [2] * len(output.decode_chunks), False
+                )
+            if output.prefill_chunks:
+                snapshots = {
+                    chunk.seq.seq_id: GDNStateSnapshot(chunk.end, ())
+                    for chunk in output.prefill_chunks
+                    if chunk.capture_snapshot
+                }
+                sampled = [
+                    2 if chunk.end == len(chunk.seq) else None
+                    for chunk in output.prefill_chunks
+                ]
+                scheduler.postprocess(output.prefill_chunks, sampled, True, snapshots)
+            if scheduler.is_finished():
+                break
+
+        self.assertTrue(scheduler.is_finished(), "resource pressure stalled prefill completion")
+        self.assertEqual([seq.completion_token_ids for seq in seqs], [[2] * n for _, n in specs])
 
 
 if __name__ == "__main__":

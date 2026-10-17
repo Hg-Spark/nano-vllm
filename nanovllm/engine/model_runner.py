@@ -90,6 +90,9 @@ class ModelRunner:
                 self.attention_workspace, kv_layout="NHD", backend="auto"
             )
             self.kv_cache, self.num_kv_cache_blocks = allocate_runtime_caches(self.model, config)
+            self.snapshot_nbytes = sum(
+                module.state_cache_nbytes(1) for module in self.model.state_cache_modules()
+            )
             self.attention_spec = flashinfer_attention_spec(
                 config.text_config, next(self.model.parameters()).dtype, self.kv_cache.dtype
             )

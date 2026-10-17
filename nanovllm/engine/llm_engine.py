@@ -56,7 +56,11 @@ class LLMEngine:
                     _normalize_eos_token_ids(getattr(config.text_config, "eos_token_id", None))
                 )
             config.eos_token_ids = eos_token_ids
-            self.scheduler = Scheduler(config, self.model_runner.num_kv_cache_blocks)
+            self.scheduler = Scheduler(
+                config,
+                self.model_runner.num_kv_cache_blocks,
+                snapshot_nbytes=self.model_runner.snapshot_nbytes,
+            )
         except Exception:
             if self.model_runner is not None:
                 self.model_runner.exit()

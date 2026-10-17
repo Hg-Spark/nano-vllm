@@ -11,6 +11,7 @@ def make_scheduler(
     block_size=16,
     max_prefix_cache_entries=16,
     max_prefix_cache_snapshot_bytes=None,
+    snapshot_nbytes=None,
     prefix_cache_eager_snapshot=True,
     eos_token_ids=(99, 100),
 ):
@@ -23,7 +24,7 @@ def make_scheduler(
         max_prefix_cache_snapshot_bytes=max_prefix_cache_snapshot_bytes,
         prefix_cache_eager_snapshot=prefix_cache_eager_snapshot,
     )
-    return Scheduler(config, num_blocks)
+    return Scheduler(config, num_blocks, snapshot_nbytes=snapshot_nbytes)
 
 
 def make_running_sequence(scheduler, token_ids):

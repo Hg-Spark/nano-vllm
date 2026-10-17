@@ -9,7 +9,9 @@ from nanovllm.engine.state_manager import GDNStateSnapshot, StateSlotManager
 
 
 class Scheduler:
-    def __init__(self, config: Config, num_kv_cache_blocks: int) -> None:
+    def __init__(
+        self, config: Config, num_kv_cache_blocks: int, snapshot_nbytes: int | None = None
+    ) -> None:
         self.max_num_seqs = config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.prefix_cache_eager_snapshot = config.prefix_cache_eager_snapshot
@@ -19,12 +21,15 @@ class Scheduler:
             config.kv_cache_block_size,
             max_prefix_entries=config.max_prefix_cache_entries,
             max_prefix_cache_snapshot_bytes=config.max_prefix_cache_snapshot_bytes,
+            snapshot_nbytes=snapshot_nbytes,
         )
         self.state_manager = StateSlotManager(config.max_num_seqs)
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
         self.preemption_count = 0
         self.preempted_committed_tokens = 0
+        # A resource-blocked prefill must finish before admitting more partial prefills.
+        self._prefill_target: Sequence | None = None
 
     def is_finished(self) -> bool:
         return not self.waiting and not self.running
@@ -56,9 +61,9 @@ class Scheduler:
             reserved += self.block_manager.additional_blocks_needed(seq, target_tokens)
         return reserved
 
-    def _find_waiting_resource_victim(self) -> Sequence | None:
+    def _find_waiting_resource_victim(self, exclude: Sequence | None = None) -> Sequence | None:
         for candidate in reversed(self.waiting):
-            if candidate.block_table or candidate.state_slot >= 0:
+            if candidate is not exclude and (candidate.block_table or candidate.state_slot >= 0):
                 return candidate
         return None
 
@@ -72,6 +77,11 @@ class Scheduler:
     ) -> None:
         """Scan each waiter once within the token and resource budgets."""
         max_prefill_seqs = self.max_num_seqs - decode_count
+        if self._prefill_target is not None:
+            # Keep the chosen request at the head across scheduler steps.
+            self.waiting.remove(self._prefill_target)
+            self.waiting.appendleft(self._prefill_target)
+            max_prefill_seqs = min(max_prefill_seqs, 1)
         for _ in range(len(self.waiting)):
             if not self.waiting or len(prefill_chunks) >= max_prefill_seqs:
                 break
@@ -121,8 +131,14 @@ class Scheduler:
             if target_tokens == len(seq):
                 seq.status = SequenceStatus.RUNNING
                 self.running.append(seq)
+                if seq is self._prefill_target:
+                    self._prefill_target = None
             else:
                 self.waiting.append(seq)
+                if scheduled_tokens < requested_tokens:
+                    self._prefill_target = seq
+            if self._prefill_target is not None:
+                break
 
     def _release_runtime_state(self, seq: Sequence) -> None:
         seq.pending_state_snapshot = None
@@ -169,7 +185,9 @@ class Scheduler:
             while self.block_manager.max_schedulable_tokens(seq, 1) == 0:
                 if self.block_manager.prefix_cache.evict():
                     continue
-                victim = self._find_waiting_resource_victim()
+                victim = self._find_waiting_resource_victim(self._prefill_target)
+                if victim is None:
+                    victim = self._find_waiting_resource_victim()
                 if victim is not None:
                     self.preempt(victim)
                 elif self.running:
@@ -201,10 +219,12 @@ class Scheduler:
         )
 
         while not decode_chunks and not prefill_chunks:
-            victim = self._find_waiting_resource_victim()
+            victim = self._find_waiting_resource_victim(self._prefill_target)
             if victim is None or len(self.waiting) <= 1:
                 raise RuntimeError("scheduler could not make progress")
             self.preempt(victim)
+            if self._prefill_target is None:
+                self._prefill_target = self.waiting[0]
             self._schedule_prefill_pass(prefill_chunks, 0, num_batched_tokens)
         return SchedulerOutput(
             decode_chunks=tuple(decode_chunks),
@@ -220,6 +240,8 @@ class Scheduler:
         )
 
     def preempt(self, seq: Sequence, *, detached: bool = False) -> None:
+        if seq is self._prefill_target:
+            self._prefill_target = None
         if not detached:
             if seq in self.running:
                 self.running.remove(seq)

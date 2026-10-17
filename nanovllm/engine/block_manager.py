@@ -14,6 +14,7 @@ class BlockManager:
         block_size: int,
         max_prefix_entries: int = 0,
         max_prefix_cache_snapshot_bytes: int | None = None,
+        snapshot_nbytes: int | None = None,
     ) -> None:
         if num_blocks <= 0 or max_prefix_entries < 0:
             raise ValueError("num_blocks must be positive and max_prefix_entries non-negative")
@@ -26,6 +27,7 @@ class BlockManager:
             self.retain_blocks,
             self.release_blocks,
             max_snapshot_bytes=max_prefix_cache_snapshot_bytes,
+            snapshot_nbytes=snapshot_nbytes,
         )
 
     def _allocate_block(self) -> int:
