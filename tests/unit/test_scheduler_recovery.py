@@ -74,7 +74,8 @@ class SchedulerAdmissionTest(unittest.TestCase):
         self.assertEqual([chunk.num_tokens for chunk in step2.prefill_chunks], [2, 2])
         scheduler.postprocess(step2.prefill_chunks, [11, None], True)
         self.assertEqual(second.committed_tokens, 2)
-        self.assertEqual(list(scheduler.running), [first])
+        self.assertTrue(first.is_finished)
+        self.assertEqual(list(scheduler.running), [])
 
 
 if __name__ == "__main__":
