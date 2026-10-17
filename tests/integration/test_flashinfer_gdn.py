@@ -74,9 +74,10 @@ class FlashInferGDNTest(unittest.TestCase):
             )
             for slots in permutations
         ]
+        # Compare Delta Rule backends; both paths use causal-conv1d for convolution.
         with patch.object(self.layer, "_can_use_flashinfer", return_value=False):
             expected_outputs = [
-                self.layer._forward_decode_batch(inputs, slots.long()) for inputs, slots in batches
+                self.layer._forward_decode_batch(inputs, slots) for inputs, slots in batches
             ]
         expected_conv = self.layer.state_pool.conv_state.clone()
         expected_state = self.layer.state_pool.recurrent_state.clone()

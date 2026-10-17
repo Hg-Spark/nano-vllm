@@ -24,7 +24,6 @@ class Context:
     state_prefix_lens: tuple[int, ...] | None = None
     prefill_q_offsets: tuple[int, ...] | None = None
     state_slot_ids: torch.Tensor | None = None
-    state_slot_indices: torch.Tensor | None = None
 
 
 _CONTEXT: ContextVar[Context] = ContextVar("nanovllm_context", default=Context())

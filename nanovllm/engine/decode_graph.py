@@ -15,7 +15,6 @@ class DecodeGraphBucket:
     max_model_len: int
     block_size: int
     workspace_bytes: int = FLASHINFER_GRAPH_WORKSPACE_BYTES
-    state_slot_dtype: torch.dtype = torch.int32
 
     def __post_init__(self) -> None:
         import flashinfer
@@ -29,14 +28,7 @@ class DecodeGraphBucket:
         self.rope_positions = torch.zeros(3, self.batch_size, dtype=torch.int64, device="cuda")
         self.kv_batch_indices = torch.arange(self.batch_size, dtype=torch.int32, device="cuda")
         self.kv_positions = torch.zeros(self.batch_size, dtype=torch.int32, device="cuda")
-        self.state_slot_ids = torch.zeros(
-            self.batch_size, dtype=self.state_slot_dtype, device="cuda"
-        )
-        self.state_slot_indices = (
-            self.state_slot_ids
-            if self.state_slot_dtype == torch.int64
-            else torch.zeros(self.batch_size, dtype=torch.int64, device="cuda")
-        )
+        self.state_slot_ids = torch.zeros(self.batch_size, dtype=torch.int32, device="cuda")
         self.paged_kv_indptr = torch.arange(self.batch_size + 1, dtype=torch.int32, device="cuda")
         self.paged_kv_indices = torch.zeros(self.max_page_indices, dtype=torch.int32, device="cuda")
         self.paged_kv_last_page_len = torch.ones(self.batch_size, dtype=torch.int32, device="cuda")
@@ -73,7 +65,6 @@ class DecodeGraphBucket:
             paged_kv_last_page_len=self.paged_kv_last_page_len,
             attention_wrapper=self.wrapper,
             state_slot_ids=self.state_slot_ids,
-            state_slot_indices=self.state_slot_indices,
         )
         self.graph: torch.cuda.CUDAGraph | None = None
         self.logits: torch.Tensor | None = None
@@ -106,8 +97,6 @@ class DecodeGraphBucket:
         self._copy_layout("rope_positions", layout.rope_positions)
         self._copy_layout("kv_positions", layout.kv_positions)
         self._copy_layout("state_slot_ids", layout.state_slots)
-        if self.state_slot_indices is not self.state_slot_ids:
-            self.state_slot_indices.copy_(self.state_slot_ids)
         self._copy_layout("paged_kv_indptr", layout.paged_kv_indptr)
         self._copy_layout("paged_kv_indices", layout.paged_kv_indices)
         self._copy_layout("paged_kv_last_page_len", layout.paged_kv_last_page_len)
@@ -137,8 +126,6 @@ class DecodeGraphBucket:
         self.rope_positions.zero_()
         self.kv_positions.zero_()
         self.state_slot_ids.copy_(seq_ids)
-        if self.state_slot_indices is not self.state_slot_ids:
-            self.state_slot_indices.copy_(seq_ids)
         self.paged_kv_indptr.copy_(
             torch.arange(self.batch_size + 1, dtype=torch.int32, device="cuda")
         )

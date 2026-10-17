@@ -250,7 +250,6 @@ def prepare_decode(
     chunks: tuple[ScheduledChunk, ...],
     block_size: int,
     host_pool: PinnedMetadataPool,
-    state_slot_dtype: str = "int32",
 ) -> PreparedBatch:
     layout = build_decode_batch_layout(chunks, block_size)
     upload = host_pool.to_cuda
@@ -261,7 +260,7 @@ def prepare_decode(
         paged_kv_indptr=upload("decode_kv_indptr", layout.paged_kv_indptr, "int32"),
         paged_kv_indices=upload("decode_kv_indices", layout.paged_kv_indices, "int32"),
         paged_kv_last_page_len=upload("decode_page_len", layout.paged_kv_last_page_len, "int32"),
-        state_slot_ids=upload("decode_state_slots", layout.state_slots, state_slot_dtype),
+        state_slot_ids=upload("decode_state_slots", layout.state_slots, "int32"),
     )
     return PreparedBatch(
         input_ids=upload("decode_input_ids", layout.input_ids, "int64"),

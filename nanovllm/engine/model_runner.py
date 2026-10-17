@@ -70,13 +70,11 @@ class ModelRunner:
             for layer in self.model.model.layers:
                 if layer.block_type == "linear_attention":
                     layer.linear_attn._flashinfer_enabled = use_flashinfer_gdn
-            self.decode_state_slot_dtype = "int32"
             self.decode_graph_buckets = {
                 batch_size: DecodeGraphBucket(
                     batch_size=batch_size,
                     max_model_len=config.max_model_len,
                     block_size=config.kv_cache_block_size,
-                    state_slot_dtype=getattr(torch, self.decode_state_slot_dtype),
                 )
                 for batch_size in config.decode_graph_batch_sizes
             }
@@ -243,18 +241,9 @@ class ModelRunner:
         batch = (
             prepare_prefill(chunks, self.block_size, self.metadata_pool)
             if is_prefill
-            else prepare_decode(
-                chunks, self.block_size, self.metadata_pool, self.decode_state_slot_dtype
-            )
+            else prepare_decode(chunks, self.block_size, self.metadata_pool)
         )
         context = self._plan_attention(batch.context)
-        if not is_prefill:
-            indices = (
-                context.state_slot_ids
-                if self.decode_state_slot_dtype == "int64"
-                else context.state_slot_ids.long()
-            )
-            context = replace(context, state_slot_indices=indices)
         profile_range = "nanovllm::prefill_model" if is_prefill else "nanovllm::decode_model"
 
         with use_context(context):

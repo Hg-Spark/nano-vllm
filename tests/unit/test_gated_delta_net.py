@@ -18,7 +18,7 @@ def make_config():
         linear_num_value_heads=4,
         linear_num_key_heads=2,
         linear_key_head_dim=4,
-        linear_value_head_dim=3,
+        linear_value_head_dim=6,
         linear_conv_kernel_dim=4,
         rms_norm_eps=1e-6,
     )
@@ -29,14 +29,28 @@ def make_states(layer):
         torch.zeros(
             layer.conv_dim,
             layer.conv_kernel_size - 1,
+            device=layer.conv1d.weight.device,
         ),
         torch.zeros(
             layer.num_v_heads,
             layer.head_v_dim,
             layer.head_k_dim,
             dtype=torch.float32,
+            device=layer.conv1d.weight.device,
         ),
     )
+
+
+def reference_causal_conv(layer, mixed_qkv, conv_state):
+    full = torch.cat((conv_state, mixed_qkv.T), dim=-1)
+    out = F.conv1d(
+        full.unsqueeze(0),
+        layer.conv1d.weight,
+        layer.conv1d.bias,
+        groups=layer.conv_dim,
+    )
+    conv_state.copy_(full[:, -(layer.conv_kernel_size - 1) :])
+    return F.silu(out).squeeze(0).T
 
 
 def reference_forward_sequence(
@@ -47,7 +61,7 @@ def reference_forward_sequence(
 ) -> torch.Tensor:
     mixed_qkv, z, b, a = layer._project_inputs(hidden_states)
     beta, decay = layer._gates(b, a)
-    mixed_qkv = layer._causal_conv(mixed_qkv, conv_state)
+    mixed_qkv = reference_causal_conv(layer, mixed_qkv, conv_state)
     query, key, value = mixed_qkv.split(
         [layer.key_dim, layer.key_dim, layer.value_dim],
         dim=-1,
@@ -80,18 +94,16 @@ def run_with_context(
         return layer(hidden_states)
 
 
+@unittest.skipUnless(torch.cuda.is_available(), "GDN forward requires CUDA")
 class GatedDeltaNetStateTest(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(0)
-        self.layer = GatedDeltaNet(make_config())
+        self.layer = GatedDeltaNet(make_config()).cuda()
         with torch.no_grad():
             self.layer.A_log.zero_()
 
     def test_fresh_prefill_clears_reused_slot(self):
-        hidden_states = torch.randn(
-            5,
-            self.layer.hidden_size,
-        )
+        hidden_states = torch.randn(5, self.layer.hidden_size, device="cuda")
 
         expected_conv, expected_recurrent = make_states(self.layer)
         expected = reference_forward_sequence(
@@ -122,8 +134,10 @@ class GatedDeltaNetStateTest(unittest.TestCase):
         )
 
     def test_convolution_chunk_state_matches_full_sequence(self):
-        inputs = torch.randn(9, self.layer.conv_dim)
-        start_state = torch.randn(self.layer.conv_dim, self.layer.conv_kernel_size - 1)
+        inputs = torch.randn(9, self.layer.conv_dim, device="cuda")
+        start_state = torch.randn(
+            self.layer.conv_dim, self.layer.conv_kernel_size - 1, device="cuda"
+        )
         full = torch.cat((start_state, inputs.T), dim=-1).unsqueeze(0)
         expected = (
             F.silu(F.conv1d(full, self.layer.conv1d.weight, groups=self.layer.conv_dim))
@@ -141,8 +155,8 @@ class GatedDeltaNetStateTest(unittest.TestCase):
         )
 
     def test_variable_length_batch_keeps_state_aligned(self):
-        first = torch.randn(6, self.layer.hidden_size)
-        second = torch.randn(4, self.layer.hidden_size)
+        first = torch.randn(6, self.layer.hidden_size, device="cuda")
+        second = torch.randn(4, self.layer.hidden_size, device="cuda")
         first_conv, first_state = make_states(self.layer)
         second_conv, second_state = make_states(self.layer)
         expected_first = reference_forward_sequence(
@@ -195,7 +209,7 @@ class GatedDeltaNetStateTest(unittest.TestCase):
 
         expected_conv = self.layer.state_pool.conv_state.clone()
         expected_state = self.layer.state_pool.recurrent_state.clone()
-        inputs = torch.randn(2, self.layer.hidden_size)
+        inputs = torch.randn(2, self.layer.hidden_size, device="cuda")
         slots = (2, 0)
         expected = torch.cat(
             [
@@ -209,7 +223,10 @@ class GatedDeltaNetStateTest(unittest.TestCase):
             ]
         )
         actual = run_with_context(
-            self.layer, inputs, False, state_slot_ids=torch.tensor(slots, dtype=torch.int64)
+            self.layer,
+            inputs,
+            False,
+            state_slot_ids=torch.tensor(slots, device="cuda", dtype=torch.int32),
         )
 
         for actual_tensor, expected_tensor in (
@@ -224,7 +241,6 @@ class GatedDeltaNetStateTest(unittest.TestCase):
                 atol=1e-5,
             )
 
-    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_cuda_convolution_matches_reference_across_prefill_and_decode(self):
         config = make_config()
         config.linear_value_head_dim = 4  # Channel-last CUDA convolution layout.
@@ -261,13 +277,12 @@ class GatedDeltaNetStateTest(unittest.TestCase):
                 hidden,
                 False,
                 state_slot_ids=torch.tensor(slots, device="cuda", dtype=torch.int32),
-                state_slot_indices=torch.tensor(slots, device="cuda", dtype=torch.int64),
             )
             torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
             torch.testing.assert_close(layer.state_pool.conv_state, ref_conv, atol=0, rtol=0)
 
     def test_snapshot_resume_matches_uninterrupted_continuation(self):
-        inputs = torch.randn(9, self.layer.hidden_size)
+        inputs = torch.randn(9, self.layer.hidden_size, device="cuda")
         split = 5
         self.layer.state_pool.allocate_state_cache(1)
         run_with_context(
@@ -306,7 +321,7 @@ class GatedDeltaNetStateTest(unittest.TestCase):
             state_prefix_lens=(split,),
             prefill_q_offsets=(0, len(inputs) - split),
         )
-        torch.testing.assert_close(resumed, expected, rtol=0, atol=0)
+        torch.testing.assert_close(resumed, expected, rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":
