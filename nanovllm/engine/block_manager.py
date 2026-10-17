@@ -19,6 +19,7 @@ class BlockManager:
         if num_blocks <= 0 or max_prefix_entries < 0:
             raise ValueError("num_blocks must be positive and max_prefix_entries non-negative")
         self.block_size = block_size
+        self.num_blocks = num_blocks
         self.free_block_ids: deque[int] = deque(range(num_blocks))
         self.block_refcounts = [0] * num_blocks
         self.prefix_cache = PrefixCache(
@@ -37,7 +38,7 @@ class BlockManager:
         self.block_refcounts[block_id] = 1
         return block_id
 
-    def _required_blocks(self, num_tokens: int) -> int:
+    def required_blocks(self, num_tokens: int) -> int:
         return (num_tokens + self.block_size - 1) // self.block_size
 
     def retain_blocks(self, block_ids: Iterable[int]) -> None:
@@ -64,14 +65,14 @@ class BlockManager:
         if (
             num_tokens <= 0
             or num_tokens % self.block_size != 0
-            or len(block_ids) != self._required_blocks(num_tokens)
+            or len(block_ids) != self.required_blocks(num_tokens)
         ):
             raise RuntimeError("invalid shared KV prefix blocks or boundary")
         self.retain_blocks(block_ids)
         seq.block_table.extend(block_ids)
 
     def additional_blocks_needed(self, seq: Sequence, target_tokens: int) -> int:
-        return max(0, self._required_blocks(target_tokens) - len(seq.block_table))
+        return max(0, self.required_blocks(target_tokens) - len(seq.block_table))
 
     def max_schedulable_tokens(
         self,
@@ -86,7 +87,7 @@ class BlockManager:
         return max(0, min(requested_tokens, available))
 
     def ensure_capacity(self, seq: Sequence, target_tokens: int) -> None:
-        missing = self._required_blocks(target_tokens) - len(seq.block_table)
+        missing = self.required_blocks(target_tokens) - len(seq.block_table)
         if missing <= 0:
             return
         if missing > len(self.free_block_ids):
