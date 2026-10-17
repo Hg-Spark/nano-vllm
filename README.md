@@ -1,6 +1,6 @@
 # nano-vLLM — Qwen3.5 Hybrid Runtime
 
-面向 **Qwen3.5 Dense / MoE** 的单 GPU 推理实验实现。要求 Python 3.12；运行时同时管理 Full Attention 的 Paged KV 与 Gated DeltaNet 的 Conv / Recurrent State，支持 Dense SwiGLU 或 FlashInfer CUTLASS Fused MoE。
+面向 **Qwen3.5 Dense / MoE** 的单 GPU 推理实验实现。参考环境为 Python 3.12；运行时同时管理 Full Attention 的 Paged KV 与 Gated DeltaNet 的 Conv / Recurrent State，支持 Dense SwiGLU 或 FlashInfer CUTLASS Fused MoE。
 
 ## 支持范围
 

@@ -134,9 +134,7 @@ class SchedulerRecoveryTest(unittest.TestCase):
         for _ in range(250):
             output = scheduler.schedule()
             if output.decode_chunks:
-                scheduler.postprocess(
-                    output.decode_chunks, [2] * len(output.decode_chunks), False
-                )
+                scheduler.postprocess(output.decode_chunks, [2] * len(output.decode_chunks), False)
             if output.prefill_chunks:
                 snapshots = {
                     chunk.seq.seq_id: GDNStateSnapshot(chunk.end, ())
@@ -144,8 +142,7 @@ class SchedulerRecoveryTest(unittest.TestCase):
                     if chunk.capture_snapshot
                 }
                 sampled = [
-                    2 if chunk.end == len(chunk.seq) else None
-                    for chunk in output.prefill_chunks
+                    2 if chunk.end == len(chunk.seq) else None for chunk in output.prefill_chunks
                 ]
                 scheduler.postprocess(output.prefill_chunks, sampled, True, snapshots)
             if scheduler.is_finished():
