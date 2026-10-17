@@ -10,9 +10,9 @@ license = "MIT"
 license-files = ["LICENSE"]
 readme = "README.md"
 description = "A compact Qwen3.5 hybrid inference runtime"
-requires-python = ">=3.10"
-# Reference environment: Python 3.10-3.12, PyTorch 2.14.0, CUDA 13.0.
-# These versions are documentation guidance, not installation constraints.
+requires-python = ">=3.12,<3.13"
+# Reference environment: Python 3.12, PyTorch 2.14.0, CUDA 13.0.
+# PyTorch/CUDA versions are guidance, not installation constraints.
 dependencies = [
     "torch",
     "transformers>=5.2.0",
@@ -53,5 +53,5 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py312"
 line-length = 100

@@ -77,9 +77,8 @@ class LLMEngine:
         if self._atexit_handler is not None:
             atexit.unregister(self._atexit_handler)
             self._atexit_handler = None
-        if self.model_runner is not None:
-            self.model_runner.exit()
-            self.model_runner = None
+        self.model_runner.exit()
+        self.model_runner = None
 
     def _get_processor(self):
         if self.processor is None:

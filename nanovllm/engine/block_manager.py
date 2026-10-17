@@ -93,12 +93,6 @@ class BlockManager:
             raise RuntimeError("insufficient KV cache blocks")
         seq.block_table.extend(self._allocate_block() for _ in range(missing))
 
-    def truncate_blocks(self, seq: Sequence, keep_num_blocks: int) -> None:
-        released = tuple(seq.block_table[keep_num_blocks:])
-        if released:
-            self.release_blocks(released)
-            del seq.block_table[keep_num_blocks:]
-
     def deallocate(self, seq: Sequence) -> None:
         if seq.block_table:
             self.release_blocks(seq.block_table)
