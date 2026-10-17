@@ -17,6 +17,7 @@ dependencies = [
     "torch",
     "transformers>=5.2.0",
     "flashinfer-python==0.7.0",
+    "causal-conv1d==1.7.0",
     "safetensors",
     "Pillow",
 ]

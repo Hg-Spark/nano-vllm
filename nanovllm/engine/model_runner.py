@@ -70,7 +70,7 @@ class ModelRunner:
             for layer in self.model.model.layers:
                 if layer.block_type == "linear_attention":
                     layer.linear_attn._flashinfer_enabled = use_flashinfer_gdn
-            self.decode_state_slot_dtype = "int32" if use_flashinfer_gdn else "int64"
+            self.decode_state_slot_dtype = "int32"
             self.decode_graph_buckets = {
                 batch_size: DecodeGraphBucket(
                     batch_size=batch_size,

@@ -6,6 +6,8 @@ except ImportError as exc:
     raise unittest.SkipTest(f"requires torch: {exc}")
 from types import SimpleNamespace
 
+import torch.nn.functional as F
+
 from nanovllm.layers.gated_delta_net import GatedDeltaNet
 from nanovllm.utils.context import Context, use_context
 
@@ -202,6 +204,48 @@ class GatedDeltaNetStateTest(unittest.TestCase):
                 rtol=1e-5,
                 atol=1e-5,
             )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_cuda_convolution_matches_reference_across_prefill_and_decode(self):
+        config = make_config()
+        config.linear_value_head_dim = 4  # Channel-last CUDA convolution layout.
+        layer = GatedDeltaNet(config).to(device="cuda", dtype=torch.float16)
+        layer.state_pool.allocate_state_cache(2)
+        with torch.no_grad():
+            layer.A_log.zero_()
+            layer.state_pool.conv_state[0].copy_(torch.randn_like(layer.state_pool.conv_state[0]))
+            for length in (1, 2, 7):
+                inputs = torch.randn(length, layer.conv_dim, device="cuda", dtype=torch.float16)
+                state = layer.state_pool.conv_state[0]
+                full = torch.cat((state.unsqueeze(0), inputs.T.unsqueeze(0)), dim=-1)
+                expected = F.conv1d(full, layer.conv1d.weight, groups=layer.conv_dim)
+                expected = F.silu(expected[:, :, -length:]).squeeze(0).T
+                expected_state = full[0, :, -layer.conv_kernel_size :]
+                actual = layer._causal_conv(inputs, state)
+                torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
+                torch.testing.assert_close(state, expected_state, atol=0, rtol=0)
+
+            hidden = torch.randn(2, layer.hidden_size, device="cuda", dtype=torch.float16)
+            slots = (1, 0)
+            ref_conv = layer.state_pool.conv_state.clone()
+            ref_recurrent = layer.state_pool.recurrent_state.clone()
+            expected = torch.cat(
+                [
+                    reference_forward_sequence(
+                        layer, hidden[i : i + 1], ref_conv[slot], ref_recurrent[slot]
+                    )
+                    for i, slot in enumerate(slots)
+                ]
+            )
+            actual = run_with_context(
+                layer,
+                hidden,
+                False,
+                state_slot_ids=torch.tensor(slots, device="cuda", dtype=torch.int32),
+                state_slot_indices=torch.tensor(slots, device="cuda", dtype=torch.int64),
+            )
+            torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
+            torch.testing.assert_close(layer.state_pool.conv_state, ref_conv, atol=0, rtol=0)
 
     def test_snapshot_resume_matches_uninterrupted_continuation(self):
         inputs = torch.randn(9, self.layer.hidden_size)

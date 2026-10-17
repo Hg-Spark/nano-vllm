@@ -78,6 +78,29 @@ class GatedDeltaNet(nn.Module):
     def _causal_conv(self, mixed_qkv: torch.Tensor, conv_state: torch.Tensor) -> torch.Tensor:
         seq_len = mixed_qkv.size(0)
         x = mixed_qkv.transpose(0, 1).unsqueeze(0)
+        if mixed_qkv.is_cuda:
+            from causal_conv1d import causal_conv1d_fn
+
+            # The pool retains width tokens; the convolution needs the latest width - 1.
+            initial_states = conv_state[:, 1:].transpose(0, 1).contiguous().transpose(0, 1)
+            if self.conv_dim % 8 or x.stride(2) % 8:
+                x = x.contiguous()
+            out = causal_conv1d_fn(
+                x,
+                self.conv1d.weight.squeeze(1),
+                self.conv1d.bias,
+                initial_states=initial_states.unsqueeze(0),
+                activation="silu",
+            )
+            if seq_len >= self.conv_kernel_size:
+                conv_state.copy_(mixed_qkv[-self.conv_kernel_size :].transpose(0, 1))
+            else:
+                conv_state.copy_(
+                    torch.cat((conv_state[:, seq_len:], mixed_qkv.transpose(0, 1)), dim=-1)
+                )
+            return out.squeeze(0).transpose(0, 1).to(mixed_qkv.dtype)
+
+        # CPU reference for small numerical tests.
         x_with_state = torch.cat((conv_state.unsqueeze(0), x), dim=-1).to(self.conv1d.weight.dtype)
         conv_state.copy_(x_with_state[0, :, -self.conv_kernel_size :])
         out = F.conv1d(
@@ -234,19 +257,35 @@ class GatedDeltaNet(nn.Module):
         state_slot_ids: torch.Tensor,
         state_slot_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # FlashInfer takes int32, while PyTorch index_copy_ needs int64.
+        # CUDA convolution and FlashInfer use int32 slots; PyTorch indexing uses int64.
         slot_ids = state_slot_indices if state_slot_indices is not None else state_slot_ids.long()
         mixed_qkv, z, b, a = self._project_inputs(hidden_states)
 
-        conv_state = self.state_pool.conv_state.index_select(0, slot_ids)
-        next_conv_state = torch.cat(
-            (conv_state[..., 1:], mixed_qkv.unsqueeze(-1).to(conv_state.dtype)), dim=-1
-        )
-        conv_output = F.conv1d(
-            next_conv_state, self.conv1d.weight, self.conv1d.bias, padding=0, groups=self.conv_dim
-        )
-        mixed_qkv = F.silu(conv_output.squeeze(-1)).to(hidden_states.dtype)
-        self.state_pool.conv_state.index_copy_(0, slot_ids, next_conv_state)
+        if mixed_qkv.is_cuda:
+            from causal_conv1d import causal_conv1d_update
+
+            mixed_qkv = causal_conv1d_update(
+                mixed_qkv,
+                self.state_pool.conv_state,
+                self.conv1d.weight.squeeze(1),
+                self.conv1d.bias,
+                activation="silu",
+                conv_state_indices=state_slot_ids,
+            )
+        else:
+            conv_state = self.state_pool.conv_state.index_select(0, slot_ids)
+            next_conv_state = torch.cat(
+                (conv_state[..., 1:], mixed_qkv.unsqueeze(-1).to(conv_state.dtype)), dim=-1
+            )
+            conv_output = F.conv1d(
+                next_conv_state,
+                self.conv1d.weight,
+                self.conv1d.bias,
+                padding=0,
+                groups=self.conv_dim,
+            )
+            mixed_qkv = F.silu(conv_output.squeeze(-1)).to(hidden_states.dtype)
+            self.state_pool.conv_state.index_copy_(0, slot_ids, next_conv_state)
 
         query, key, value = self._split_qkv(mixed_qkv)
         if self._can_use_flashinfer(hidden_states):
