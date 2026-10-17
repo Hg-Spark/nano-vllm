@@ -104,6 +104,8 @@ class Scheduler:
             if scheduled_tokens == 0 or (
                 seq.state_slot < 0 and not self.state_manager.can_allocate(seq)
             ):
+                if seq is self._prefill_target:
+                    break
                 self.waiting.rotate(-1)
                 continue
 
