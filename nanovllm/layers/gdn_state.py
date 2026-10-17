@@ -41,7 +41,7 @@ class GDNStatePool(nn.Module):
         return bool(self.conv_state.numel() and self.recurrent_state.numel())
 
     def state_cache_nbytes(self, num_slots: int) -> int:
-        conv_elements = num_slots * self.conv_dim * self.conv_kernel_size
+        conv_elements = num_slots * self.conv_dim * (self.conv_kernel_size - 1)
         recurrent_elements = num_slots * self.num_v_heads * self.head_k_dim * self.head_v_dim
         return (
             conv_elements * self.conv_state.element_size()
@@ -55,7 +55,7 @@ class GDNStatePool(nn.Module):
         self.conv_state = torch.zeros(
             num_slots,
             self.conv_dim,
-            self.conv_kernel_size,
+            self.conv_kernel_size - 1,
             device=device,
             dtype=self.conv_state.dtype,
         )

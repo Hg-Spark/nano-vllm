@@ -76,37 +76,31 @@ class GatedDeltaNet(nn.Module):
         )
 
     def _causal_conv(self, mixed_qkv: torch.Tensor, conv_state: torch.Tensor) -> torch.Tensor:
-        seq_len = mixed_qkv.size(0)
         x = mixed_qkv.transpose(0, 1).unsqueeze(0)
         if mixed_qkv.is_cuda:
             from causal_conv1d import causal_conv1d_fn
 
-            # The pool retains width tokens; the convolution needs the latest width - 1.
-            initial_states = conv_state[:, 1:].transpose(0, 1).contiguous().transpose(0, 1)
-            if self.conv_dim % 8 or x.stride(2) % 8:
-                x = x.contiguous()
-            out = causal_conv1d_fn(
+            # Final states require channel-last input and initial-state layouts.
+            x = mixed_qkv.contiguous().transpose(0, 1).unsqueeze(0)
+            initial_states = conv_state.transpose(0, 1).contiguous().transpose(0, 1)
+            out, final_states = causal_conv1d_fn(
                 x,
                 self.conv1d.weight.squeeze(1),
                 self.conv1d.bias,
                 initial_states=initial_states.unsqueeze(0),
+                return_final_states=True,
                 activation="silu",
             )
-            if seq_len >= self.conv_kernel_size:
-                conv_state.copy_(mixed_qkv[-self.conv_kernel_size :].transpose(0, 1))
-            else:
-                conv_state.copy_(
-                    torch.cat((conv_state[:, seq_len:], mixed_qkv.transpose(0, 1)), dim=-1)
-                )
+            conv_state.copy_(final_states[0])
             return out.squeeze(0).transpose(0, 1).to(mixed_qkv.dtype)
 
         # CPU reference for small numerical tests.
         x_with_state = torch.cat((conv_state.unsqueeze(0), x), dim=-1).to(self.conv1d.weight.dtype)
-        conv_state.copy_(x_with_state[0, :, -self.conv_kernel_size :])
+        conv_state.copy_(x_with_state[0, :, -(self.conv_kernel_size - 1) :])
         out = F.conv1d(
             x_with_state, self.conv1d.weight, self.conv1d.bias, padding=0, groups=self.conv_dim
         )
-        return F.silu(out[:, :, -seq_len:]).squeeze(0).transpose(0, 1).to(mixed_qkv.dtype)
+        return F.silu(out).squeeze(0).transpose(0, 1).to(mixed_qkv.dtype)
 
     def _expand_qk_heads(
         self, query: torch.Tensor, key: torch.Tensor
@@ -274,18 +268,18 @@ class GatedDeltaNet(nn.Module):
             )
         else:
             conv_state = self.state_pool.conv_state.index_select(0, slot_ids)
-            next_conv_state = torch.cat(
-                (conv_state[..., 1:], mixed_qkv.unsqueeze(-1).to(conv_state.dtype)), dim=-1
+            conv_window = torch.cat(
+                (conv_state, mixed_qkv.unsqueeze(-1).to(conv_state.dtype)), dim=-1
             )
             conv_output = F.conv1d(
-                next_conv_state,
+                conv_window,
                 self.conv1d.weight,
                 self.conv1d.bias,
                 padding=0,
                 groups=self.conv_dim,
             )
             mixed_qkv = F.silu(conv_output.squeeze(-1)).to(hidden_states.dtype)
-            self.state_pool.conv_state.index_copy_(0, slot_ids, next_conv_state)
+            self.state_pool.conv_state.index_copy_(0, slot_ids, conv_window[..., 1:])
 
         query, key, value = self._split_qkv(mixed_qkv)
         if self._can_use_flashinfer(hidden_states):

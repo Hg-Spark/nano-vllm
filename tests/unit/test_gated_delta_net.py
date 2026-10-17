@@ -28,7 +28,7 @@ def make_states(layer):
     return (
         torch.zeros(
             layer.conv_dim,
-            layer.conv_kernel_size,
+            layer.conv_kernel_size - 1,
         ),
         torch.zeros(
             layer.num_v_heads,
@@ -119,6 +119,25 @@ class GatedDeltaNetStateTest(unittest.TestCase):
             expected,
             rtol=1e-5,
             atol=1e-5,
+        )
+
+    def test_convolution_chunk_state_matches_full_sequence(self):
+        inputs = torch.randn(9, self.layer.conv_dim)
+        start_state = torch.randn(self.layer.conv_dim, self.layer.conv_kernel_size - 1)
+        full = torch.cat((start_state, inputs.T), dim=-1).unsqueeze(0)
+        expected = (
+            F.silu(F.conv1d(full, self.layer.conv1d.weight, groups=self.layer.conv_dim))
+            .squeeze(0)
+            .T
+        )
+        state = start_state.clone()
+        chunks = [
+            self.layer._causal_conv(chunk, state)
+            for chunk in (inputs[:1], inputs[1:3], inputs[3:6], inputs[6:])
+        ]
+        torch.testing.assert_close(torch.cat(chunks), expected, rtol=1e-6, atol=1e-6)
+        torch.testing.assert_close(
+            state, inputs[-(self.layer.conv_kernel_size - 1) :].T, rtol=0, atol=0
         )
 
     def test_variable_length_batch_keeps_state_aligned(self):
@@ -214,13 +233,13 @@ class GatedDeltaNetStateTest(unittest.TestCase):
         with torch.no_grad():
             layer.A_log.zero_()
             layer.state_pool.conv_state[0].copy_(torch.randn_like(layer.state_pool.conv_state[0]))
-            for length in (1, 2, 7):
+            for length in (1, 2, 3, 4, 7, 65):
                 inputs = torch.randn(length, layer.conv_dim, device="cuda", dtype=torch.float16)
                 state = layer.state_pool.conv_state[0]
                 full = torch.cat((state.unsqueeze(0), inputs.T.unsqueeze(0)), dim=-1)
                 expected = F.conv1d(full, layer.conv1d.weight, groups=layer.conv_dim)
                 expected = F.silu(expected[:, :, -length:]).squeeze(0).T
-                expected_state = full[0, :, -layer.conv_kernel_size :]
+                expected_state = full[0, :, -(layer.conv_kernel_size - 1) :]
                 actual = layer._causal_conv(inputs, state)
                 torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
                 torch.testing.assert_close(state, expected_state, atol=0, rtol=0)
