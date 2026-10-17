@@ -9,7 +9,7 @@
 ```text
 Qwen3.5 Hybrid Model → Full Attention KV + GDN Conv/Recurrent State
   → 连续批处理 / Chunked Prefill / Decode-first
-  → 请求级资源预留、逻辑提交、抢占与 Prefix 恢复
+  → 请求级 KV 准入、逻辑提交与 Prefix 恢复
   → HF 数值对齐、端到端测量、Profile 驱动优化
 ```
 
@@ -33,7 +33,7 @@ Qwen3.5 Hybrid Model → Full Attention KV + GDN Conv/Recurrent State
 | 混合状态内存 | Hybrid KV 按层类型建立不同 cache spec / manager，并协调各组缓存有效性 | Unified Radix Cache 将 FULL/SWA/循环态组件放入统一前缀结构（以官方设计材料为准） | `BlockManager` 管分页 KV，`StateSlotManager` 管 GDN Slot，`Scheduler` 完成联合预留与释放；不引入通用 cache-spec 注册体系 |
 | 共享前缀 | Automatic Prefix Caching 以缓存块为基础；Hybrid 场景还要协调各组可用前缀 | RadixAttention / RadixTree 表示 token 前缀，HiCache 扩展到 GPU/CPU/外部存储 | 精确 token 前缀 + 有界 LRU，KV 引用共享、GDN CPU Snapshot 绑定同一边界；目标是验证复用正确性 |
 | 循环状态恢复 | Hybrid 的 Mamba/循环缓存需满足对应的 checkpoint、对齐与保留规则 | 循环态在安全前缀边界需要 checkpoint，多个组件共同决定可恢复边界 | 仅完整 KV 页边界捕获 GDN 状态；KV 命中但缺少对应 GDN 快照时**不能单独复用 KV** |
-| 抢占与故障 | 生产引擎具有更完整的资源回收、请求重排及扩展缓存/通信路径 | 与 Cache/Allocator、请求生命周期和缓存复用协同 | 资源不够则淘汰/抢占、联合释放并重算；执行失败丢弃受影响的物理历史且异常上抛 |
+| 抢占与故障 | 生产引擎具有更完整的资源回收、请求重排及扩展缓存/通信路径 | 与 Cache/Allocator、请求生命周期和缓存复用协同 | 接纳前预留完整生命周期 KV 额度；运行中只淘汰 Prefix Cache；失败则抛错并关闭引擎 |
 | Full Attention | 支持多种 Attention 后端及针对模型/硬件的优化 | 支持多后端，也可按阶段组合后端 | 固定 FlashInfer Paged Prefill/Decode 与 KV Append；FP8 缩放及转换使用 PyTorch，避免自行维护写入 kernel |
 | GDN / MoE | 对不同架构集成专用层、backend、融合/编译等优化 | 具备多种推理 kernel 及 MoE/混合 Attention 后端 | GDN 在 SM90/100/120 且 K/V head_dim=128 时使用 FlashInfer，其他配置使用 PyTorch FP32 chunk=64；MoE Prefill/Decode 使用 FlashInfer CUTLASS Fused MoE；先建立明确的对照基线 |
 | CUDA Graph | 有后端能力协商与多种 Graph 捕获模式 | 与执行批次及 Attention Backend 的 Graph 支持共同设计 | 只为显式指定的 Decode Batch size 做 exact bucket；不做 padding，未命中走 Eager |
@@ -95,7 +95,7 @@ SGLang RadixAttention 适合大量请求反复共享前缀的场景；HiCache �
 | 当前方案 | 有意承担的代价 | 什么证据会推动重新选型 |
 | --- | --- | --- |
 | 静态 KV 显存预算（默认 0.8） | 可能保留过量余量或在峰值负载时 OOM | 按最大 Prefill、最大 Decode Batch、单图负载实测，才评估增减比例或恢复显存 Profiling |
-| 抢占后联合释放并重算 | 长上下文重复 Prefill | 测得重算成本显著，才评估请求状态 swap/checkpoint |
+| 保守准入 | Max Tokens 较大时并发度下降 | 实测存在显著收益后再评估动态预留 |
 | 前缀 GDN Snapshot 保留 FP32 循环矩阵 | CPU 内存及拷贝开销较大 | 命中率、快照带宽与内存测量说明需要压缩；有精度验证再引入有损模式 |
 | FlashInfer Paged Attention + FP8 KV 可选 | 受 FlashInfer 和 GPU 架构能力约束 | Kernel trace 和端到端测量显示现有 Attention 路径是主要瓶颈 |
 | 独立 PyTorch GDN Chunk | 存在中间矩阵和计算开销 | 数值对齐后，Profile 显示 Prefill GDN 是主要热点 |
@@ -103,7 +103,7 @@ SGLang RadixAttention 适合大量请求反复共享前缀的场景；HiCache �
 | Decode CUDA Graph exact bucket | Batch 未命中时回退 Eager；每个 bucket 消耗显存 | 测得更多 bucket 或 padding 在具体负载下稳定改善 TPOT |
 | 单 GPU / 单图 | 无 TP/EP、跨节点缓存、多图视频服务 | 项目目标转向生产服务或更大模型部署 |
 
-**验证优先级：** HF Greedy 对齐 → Chunked Prefill 连续性 → Prefix 实际恢复 → 失败/抢占后的数值一致性 → 相同设备/模型/输入的 benchmark → Profile。已有 Dense FP16 实测仅证明记录范围；[验证文档](validation.md)明确区分未运行和通过。
+**验证优先级：** HF Greedy 对齐 → Chunked Prefill 连续性 → Prefix 实际恢复 → 资源受限的调度完成性 → 相同设备/模型/输入的 benchmark → Profile。已有 Dense FP16 实测仅证明记录范围；[验证文档](validation.md)明确区分未运行和通过。
 
 ## 五、何时改用 vLLM / SGLang，何时继续保留小运行时
 

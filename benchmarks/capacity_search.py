@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Search for the largest tested no-preemption Decode batch on a fixed workload."""
+"""Search for the largest tested full Decode batch on a fixed workload."""
 
 from __future__ import annotations
 
@@ -75,12 +75,7 @@ def probe(args, batch: int) -> bool:
     if record["execution_status"] != "completed":
         raise RuntimeError(f"batch {batch} incomplete; inspect {output}")
     metrics = record["result"]["metrics"]
-    details = record["result"]["details"]
-    return (
-        metrics["requests"] == batch
-        and metrics["max_decode_step_tokens"] == batch
-        and details["preemptions"] == 0
-    )
+    return metrics["requests"] == batch and metrics["max_decode_step_tokens"] == batch
 
 
 def main():
@@ -92,7 +87,7 @@ def main():
         batch = (low + high) // 2
         passed = probe(args, batch)
         trials.append({"batch_size": batch, "passed": passed})
-        print(f"batch={batch}: {'pass' if passed else 'preempted/partial'}", flush=True)
+        print(f"batch={batch}: {'pass' if passed else 'partial'}", flush=True)
         if passed:
             low = batch
         else:
@@ -105,7 +100,7 @@ def main():
     }
     destination = args.out_dir / "capacity_summary.json"
     destination.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(f"No-preemption batch: {low} (searched through {args.max_batch}); {destination}")
+    print(f"Full decode batch: {low} (searched through {args.max_batch}); {destination}")
     return 0 if low else 1
 
 

@@ -43,7 +43,7 @@ def arguments():
     add_dtype_argument(p)
     p.add_argument(
         "--scenario",
-        choices=("throughput", "prefix", "interference", "decode", "preemption"),
+        choices=("throughput", "prefix", "interference", "decode"),
         required=True,
     )
     p.add_argument(
@@ -76,11 +76,6 @@ def arguments():
         default="mixed",
         help="exclusive mode only changes prefill scheduling",
     )
-    p.add_argument(
-        "--require-preemptions",
-        action="store_true",
-        help="fail if preemption scenario does not preempt",
-    )
     p.add_argument("--late-input-len", type=int, default=2048, help="interference scenario")
     p.add_argument("--late-after-decode-steps", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
@@ -92,7 +87,7 @@ def arguments():
     validate_positive(p, a, "input_len", "num_requests")
     if a.output_len < 2:
         p.error("output-len must be at least 2")
-    if a.scenario in ("throughput", "preemption") and a.input_len + a.output_len > a.max_model_len:
+    if a.scenario == "throughput" and a.input_len + a.output_len > a.max_model_len:
         p.error("input-len + output-len exceeds max-model-len")
     if a.scenario == "prefix":
         if a.target_requests < 1:
@@ -108,8 +103,6 @@ def arguments():
             p.error("decode requires input-len + warmup-steps + measure-steps + 2 <= max-model-len")
     if a.schedule_mode != "mixed" and a.scenario != "interference":
         p.error("exclusive_decode_first is supported only for interference")
-    if a.require_preemptions and a.scenario != "preemption":
-        p.error("require-preemptions requires scenario=preemption")
     if a.scenario == "interference":
         if a.num_requests >= a.max_num_seqs:
             p.error("reserve one max-num-seqs slot for the injected long request")
@@ -126,11 +119,6 @@ def tokens_hash(seqs):
     # Hash all complete token sequences in order without bloating result files.
     data = json.dumps([list(s.completion_token_ids) for s in seqs], separators=(",", ":"))
     return hashlib.sha256(data.encode()).hexdigest()
-
-
-def validate_preemptions(count: int, *, required: bool) -> None:
-    if required and count == 0:
-        raise RuntimeError("no preemptions observed; increase pressure or lower GPU budget")
 
 
 def make_requests(engine, prompts, max_tokens):
@@ -248,17 +236,9 @@ def run(a):
         if a.schedule_mode == "exclusive_decode_first":
             # Same scheduler/resources. Skip Prefill while at least one Decode is scheduled.
             # This is Decode-first step exclusivity, NOT a Prefill-first baseline.
-            def exclusive_prefill(
-                prefill_chunks, decode_count, num_batched_tokens, *, reserved_free_blocks=0
-            ):
-                if decode_count:
-                    return num_batched_tokens
-                return original_prefill_pass(
-                    prefill_chunks,
-                    decode_count,
-                    num_batched_tokens,
-                    reserved_free_blocks=reserved_free_blocks,
-                )
+            def exclusive_prefill(prefill_chunks, decode_count, num_batched_tokens):
+                if not decode_count:
+                    original_prefill_pass(prefill_chunks, decode_count, num_batched_tokens)
 
             engine.scheduler._schedule_prefill_pass = exclusive_prefill
 
@@ -275,7 +255,7 @@ def run(a):
         if a.scenario == "decode":
             metrics, details = run_fixed_decode(engine, a, graph_replays)
 
-        elif a.scenario in ("throughput", "preemption"):
+        elif a.scenario == "throughput":
             prompts = [
                 [rng.randrange(vocab) for _ in range(a.input_len)] for _ in range(a.num_requests)
             ]
@@ -283,10 +263,6 @@ def run(a):
             metrics = run_benchmark(engine, seqs)
             completion_hash = tokens_hash(seqs)
             details = {"token_hash": completion_hash}
-            if a.scenario == "preemption":
-                validate_preemptions(
-                    engine.scheduler.preemption_count, required=a.require_preemptions
-                )
 
         elif a.scenario == "interference":
             prompts = [
@@ -344,8 +320,6 @@ def run(a):
             raise RuntimeError("Graph buckets were captured, but no replay was observed")
         if a.scenario != "decode":
             metrics["graph_replays"] = graph_replays()
-        details["preemptions"] = engine.scheduler.preemption_count
-        details["preempted_committed_tokens"] = engine.scheduler.preempted_committed_tokens
         details["scheduled_prefill_tokens_including_setup"] = sched_prefill_tokens
         result = {
             "source": "nano-vllm qwen3.5 engine, no HTTP",

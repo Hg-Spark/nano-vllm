@@ -280,7 +280,7 @@ KV_blocks = floor(KV_budget / bytes_per_block)
 
 `gpu_memory_utilization` 默认 `0.8`，未分给静态缓存的显存由 Prefill、MoE、Vision 临时激活及 CUDA Graph Capture 等共享。这是容量折中，不保证所有形状、路由分布或图像输入都不会 OOM；如出现 OOM，应降低显存利用率、Token Budget 或并发量，而不是把固定余量当作准确测量的峰值。
 
-纯文本模式默认 `max_visual_tokens_per_request=0`，跳过视觉塔加载及视觉特征显存预留；图文请求需要显式配置正整数上限（或 `None` 表示依 `max_model_len` 预留）。启用视觉时，KV 预算按该上限为最多 `max_num_seqs` 个活动单图请求的视觉特征预留 GPU 显存；请求准入强制检查这个上限；请求结束或抢占时清理 request-local 特征；执行异常后当前引擎不可继续使用。Decode CUDA Graph Capture 仍在 KV Cache 分配之后，若已配置 Bucket 捕获时 OOM 或 Plan 失败，初始化直接报错，不自动降级为 Eager。CUDA Graph 的捕获/内部预执行不属于已移除的显存 Profiling Warmup。首次真实请求可能承担算子初始化或编译延迟。
+纯文本模式默认 `max_visual_tokens_per_request=0`，跳过视觉塔加载及视觉特征显存预留；图文请求需要显式配置正整数上限（或 `None` 表示依 `max_model_len` 预留）。启用视觉时，KV 预算按该上限为最多 `max_num_seqs` 个活动单图请求的视觉特征预留 GPU 显存；请求准入强制检查这个上限；请求结束时清理 request-local 特征；执行异常后当前引擎不可继续使用。Decode CUDA Graph Capture 仍在 KV Cache 分配之后，若已配置 Bucket 捕获时 OOM 或 Plan 失败，初始化直接报错，不自动降级为 Eager。CUDA Graph 的捕获/内部预执行不属于已移除的显存 Profiling Warmup。首次真实请求可能承担算子初始化或编译延迟。
 
 ### 运行时显存预算验证（无需新增后端）
 
@@ -329,7 +329,7 @@ python -m scripts.verify_qwen3_5_multimodal "$NANOVLLM_MODEL" /path/to/image.jpg
 
 ## Hybrid Benchmark 消融实验
 
-在仓库根目录使用统一脚本执行五类离线实验：固定 Batch Decode、动态吞吐、共享前缀、长 Prompt 干扰和抢占压力。它们直接驱动 Engine，不包含 HTTP 或泊松到达流量；输出延迟不能作为在线服务 SLO 结论。
+在仓库根目录使用统一脚本执行五类离线实验：固定 Batch Decode、动态吞吐、共享前缀和长 Prompt 干扰。它们直接驱动 Engine，不包含 HTTP 或泊松到达流量；输出延迟不能作为在线服务 SLO 结论。
 
 ```bash
 export NANOVLLM_MODEL=/absolute/path/to/Qwen3.5
@@ -337,7 +337,6 @@ export NANOVLLM_DTYPE=float16
 REPEATS=1 bash benchmarks/run.sh smoke
 REPEATS=5 bash benchmarks/run.sh full
 REPEATS=5 bash benchmarks/run.sh tail
-REPEATS=5 bash benchmarks/run.sh preemption
 ```
 
 `RESULT_DIR` 可自定义保存位置。Benchmark 不会重复运行 HF 校验；正式性能对照请先运行 `check` 阶段。单组实验可运行 `python -m benchmarks.bench_experiments --help`；仅汇总可运行 `python -m benchmarks.summarize_bench results/<目录> --min-repeats 5`。
@@ -348,15 +347,14 @@ REPEATS=5 bash benchmarks/run.sh preemption
 | Prefill 干扰 | 同调度器的 Mixed 与 Decode-first Step 互斥 | 长请求 TTFT、短请求 Token Gap |
 | Joint Prefix | 缓存关闭与缓存开启，目标请求共享相同前缀 | TTFT、命中比例、恢复 Token、Snapshot 存储字节 |
 | 动态吞吐 | Eager 与 Graph Bucket | Output tok/s、TPOT、峰值显存 |
-| 抢占压力 | KV 显存预算阶梯 | 实际抢占次数、吞吐；未观察到抢占视为失败 |
 
-### Tail ITL 与无抢占并发边界
+### Tail ITL 与完整 Decode 并发边界
 
 `tail` 模式在同一组短请求 Decode 期间注入一个长 Prompt，使用 7 个短请求、每个 512 个输出 token、Batch 上限 8，分别运行 Mixed 与 Step-exclusive Decode-first。每组至少执行 5 次。公共 `scripts.bench.run_benchmark` 记录每次同步观察到的相邻输出 token 间隔（`itl_seconds` / `itl_samples`），`long_prompt_interference.short_token_gap_after_samples` 为长请求注入后的短请求间隔样本数。结果汇总只有在 **每次 A/B 运行至少 1000 个后段间隔样本** 时才打印 Synthetic P99 ITL 降幅。
 
 此处 ITL 的时间戳在 `step()` 返回、GPU 同步后获取，可能包含其他请求的 Prefill、主机调度与同步时间；它是离线合成负载下的观察间隔，不能直接称为线上服务 P99 ITL。对于正式在线 P99 仍需按实际请求到达时间戳测量，并报告分位数的请求/Token 样本量。
 
-通过已有 `benchmarks.bench_experiments --scenario throughput` 每次独立启动一个进程，可搜索固定输入输出长度下的无抢占并发上界：
+通过已有 `benchmarks.bench_experiments --scenario throughput` 每次独立启动一个进程，可搜索固定输入输出长度下的完整 Decode 并发上界：
 
 ```bash
 python -m benchmarks.capacity_search "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
@@ -364,9 +362,9 @@ python -m benchmarks.capacity_search "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE"
   --out-dir results/capacity_fp16
 ```
 
-脚本按 Batch Size 二分搜索，要求请求完成、实际最大 Decode Batch 达到目标且无抢占。每次独立进程执行，保留原始 JSON 和日志。搜索假设固定负载下容量随 Batch Size 单调；`max_verified_batch` 只代表所设上界内的验证结果，达到 `--max-batch` 仍需提高搜索上限才能判断极值。OOM 或其他运行失败会保留日志并中止，不会被误判为容量边界。FP8 KV 对比还需独立完成数值校验。
+脚本按 Batch Size 二分搜索，要求请求完成、实际最大 Decode Batch 达到目标。每次独立进程执行，保留原始 JSON 和日志。搜索假设固定负载下容量随 Batch Size 单调；`max_verified_batch` 只代表所设上界内的验证结果，达到 `--max-batch` 仍需提高搜索上限才能判断极值。OOM 或其他运行失败会保留日志并中止，不会被误判为容量边界。FP8 KV 对比还需独立完成数值校验。
 
-固定 Decode 的 `cuda_event_step_window_seconds` 是 CUDA Event 包住 Engine Step 的时间窗口，**包含可能发生的 CPU 提交间隙**；不是纯 Kernel 耗时。测量 GPU Kernel 应使用 `scripts.profile_decode` 或 Nsight。抢占次数与被抢占时的已提交 Token 数均不是恢复耗时。前缀 Snapshot 存储字节不等于 GPU→CPU 传输耗时。
+固定 Decode 的 `cuda_event_step_window_seconds` 是 CUDA Event 包住 Engine Step 的时间窗口，**包含可能发生的 CPU 提交间隙**；不是纯 Kernel 耗时。测量 GPU Kernel 应使用 `scripts.profile_decode` 或 Nsight。完整生命周期 KV 额度可能降低低显存条件下的并发度，应同时对比吞吐与 TTFT。前缀 Snapshot 存储字节不等于 GPU→CPU 传输耗时。
 
 每组独立进程执行且保留失败结果；汇总先比较同负载的完整输出 Hash，再计算 A/B 百分比。基准使用合成 Token、固定输出长度，小样本 P99 Token Gap 不代表真实在线服务尾延迟。正式结论需要至少五轮并记录 Git SHA、模型 revision、GPU、dtype 和工作负载。
 
