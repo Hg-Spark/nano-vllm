@@ -106,7 +106,7 @@ class SchedulerCoreTest(unittest.TestCase):
             num_blocks=4,
             block_size=4,
         )
-        seq = Sequence(list(range(10)))
+        seq = Sequence(list(range(10)), SamplingParams(max_tokens=1))
         scheduler.add(seq)
 
         first = scheduler.schedule()
@@ -226,7 +226,7 @@ class SchedulerCoreTest(unittest.TestCase):
             False,
         )
 
-        newcomer = Sequence([5, 6, 7])
+        newcomer = Sequence([5, 6, 7], SamplingParams(max_tokens=2))
         scheduler.add(newcomer)
         scheduled = scheduler.schedule()
 
@@ -285,24 +285,18 @@ class SchedulerCoreTest(unittest.TestCase):
         )
         self.assertEqual(third.prefill_chunks[0].num_tokens, 3)
 
-    def test_page_growth_does_not_starve_ready_decode(self):
+    def test_admitted_decode_does_not_need_preemption(self):
         scheduler = make_scheduler(
             max_num_batched_tokens=2,
             max_num_seqs=2,
-            num_blocks=2,
+            num_blocks=3,
             block_size=4,
         )
-        blocked = Sequence([1, 2, 3, 4, 5])
-        scheduler.block_manager.ensure_capacity(blocked, 4)
-        scheduler.state_manager.allocate(blocked)
-        blocked.committed_tokens = 4
-        blocked.status = SequenceStatus.RUNNING
-        scheduler.running.append(blocked)
-        ready = make_running_sequence(scheduler, [6, 7, 8])
+        first = make_running_sequence(scheduler, [1, 2, 3, 4, 5])
+        second = make_running_sequence(scheduler, [6, 7, 8])
         scheduled = scheduler.schedule()
-        self.assertEqual(scheduled_sequences(scheduled.decode_chunks), [ready])
-        self.assertIn(blocked, scheduler.waiting)
-        self.assertEqual(list(scheduler.running), [ready])
+        self.assertEqual(scheduled_sequences(scheduled.decode_chunks), [first, second])
+        self.assertEqual(list(scheduler.running), [first, second])
 
     def test_decode_budget_rotates_running_requests(self):
         scheduler = make_scheduler(

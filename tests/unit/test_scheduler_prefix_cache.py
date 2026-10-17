@@ -2,6 +2,7 @@ import unittest
 
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
+from nanovllm.sampling_params import SamplingParams
 from tests.scheduler_helpers import (
     make_scheduler,
     scheduled_sequences,
@@ -16,7 +17,7 @@ class SchedulerPrefixCacheTest(unittest.TestCase):
             num_blocks=8,
             block_size=4,
         )
-        original = Sequence([0, 1, 2, 3, 4, 5])
+        original = Sequence([0, 1, 2, 3, 4, 5], SamplingParams(max_tokens=1))
         scheduler.add(original)
 
         first = scheduler.schedule()
@@ -48,7 +49,7 @@ class SchedulerPrefixCacheTest(unittest.TestCase):
             1,
         )
 
-        newcomer = Sequence([0, 1, 2, 3, 7, 8])
+        newcomer = Sequence([0, 1, 2, 3, 7, 8], SamplingParams(max_tokens=1))
         scheduler.add(newcomer)
         resumed = scheduler.schedule()
 
@@ -77,7 +78,7 @@ class SchedulerPrefixCacheTest(unittest.TestCase):
                     num_blocks=8,
                     block_size=4,
                 )
-                seq = Sequence([0, 1, 2, 3, 4, 5])
+                seq = Sequence([0, 1, 2, 3, 4, 5], SamplingParams(max_tokens=1))
                 scheduler.add(seq)
                 scheduled = scheduler.schedule()
                 self.assertEqual(scheduled.prefill_tokens, 4)
