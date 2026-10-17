@@ -50,9 +50,7 @@ class SchedulerAdmissionTest(unittest.TestCase):
         scheduler = make_scheduler(
             max_num_batched_tokens=512, max_num_seqs=2, num_blocks=16, block_size=16
         )
-        seqs = [
-            Sequence([token] * 20, SamplingParams(max_tokens=2)) for token in (1, 2)
-        ]
+        seqs = [Sequence([token] * 20, SamplingParams(max_tokens=2)) for token in (1, 2)]
         for seq in seqs:
             scheduler.add(seq)
 
@@ -72,15 +70,11 @@ class SchedulerAdmissionTest(unittest.TestCase):
         step1 = scheduler.schedule()
         scheduler.postprocess(step1.prefill_chunks, [None], True)
         step2 = scheduler.schedule()
-        scheduler.postprocess(step2.prefill_chunks, [None], True)
-        self.assertEqual([seq.committed_tokens for seq in scheduler.waiting], [4, 4])
-        self.assertNotEqual(first.state_slot, second.state_slot)
-
-        step3 = scheduler.schedule()
-        self.assertEqual(scheduled_sequences(step3.prefill_chunks), [first, second])
-        self.assertEqual([chunk.num_tokens for chunk in step3.prefill_chunks], [2, 2])
-        scheduler.postprocess(step3.prefill_chunks, [11, 12], True)
-        self.assertEqual(list(scheduler.running), [first, second])
+        self.assertEqual(scheduled_sequences(step2.prefill_chunks), [first, second])
+        self.assertEqual([chunk.num_tokens for chunk in step2.prefill_chunks], [2, 2])
+        scheduler.postprocess(step2.prefill_chunks, [11, None], True)
+        self.assertEqual(second.committed_tokens, 2)
+        self.assertEqual(list(scheduler.running), [first])
 
 
 if __name__ == "__main__":

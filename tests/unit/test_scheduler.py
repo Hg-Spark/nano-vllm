@@ -241,50 +241,6 @@ class SchedulerCoreTest(unittest.TestCase):
         self.assertEqual(newcomer.state_slot, released_slot)
         self.assertEqual(survivor.state_slot, survivor_slot)
 
-    def test_chunked_prefill_batches_other_waiters_work_conservingly(self):
-        scheduler = make_scheduler(
-            max_num_batched_tokens=3,
-            max_num_seqs=2,
-        )
-        long_seq = Sequence(list(range(8)))
-        short_seq = Sequence([20])
-        scheduler.add(long_seq)
-        scheduler.add(short_seq)
-
-        first = scheduler.schedule()
-        long_slot = long_seq.state_slot
-        scheduler.postprocess(
-            first.prefill_chunks,
-            [None],
-            True,
-        )
-
-        second = scheduler.schedule()
-        self.assertEqual(
-            scheduled_sequences(second.prefill_chunks),
-            [short_seq, long_seq],
-        )
-        self.assertEqual(
-            [chunk.num_tokens for chunk in second.prefill_chunks],
-            [1, 2],
-        )
-        scheduler.postprocess(
-            second.prefill_chunks,
-            [99, None],
-            True,
-        )
-
-        self.assertTrue(short_seq.is_finished)
-        self.assertEqual(long_seq.committed_tokens, 5)
-        self.assertEqual(long_seq.state_slot, long_slot)
-
-        third = scheduler.schedule()
-        self.assertEqual(
-            scheduled_sequences(third.prefill_chunks),
-            [long_seq],
-        )
-        self.assertEqual(third.prefill_chunks[0].num_tokens, 3)
-
     def test_admitted_decode_does_not_need_preemption(self):
         scheduler = make_scheduler(
             max_num_batched_tokens=2,

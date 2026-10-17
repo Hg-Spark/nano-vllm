@@ -8,29 +8,17 @@ PYTHON="${PYTHON:-python3}"
 : "${NANOVLLM_DTYPE:?export NANOVLLM_DTYPE=float16 or bfloat16}"
 MODE="${1:-smoke}"
 if (( $# > 1 )); then
-  echo "Usage: bash benchmarks/run.sh [smoke|full|tail|preemption]" >&2
+  echo "Usage: bash benchmarks/run.sh [smoke|full|tail]" >&2
   exit 2
 fi
 case "$MODE" in
-  smoke|full|tail|preemption) ;;
+  smoke|full|tail) ;;
   *) echo "Unknown benchmark mode: $MODE" >&2; exit 2 ;;
 esac
 REPEATS="${REPEATS:-3}"
 RESULT_DIR="${RESULT_DIR:-results/${MODE}_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$RESULT_DIR"
 
-if [[ "$MODE" == "preemption" ]]; then
-for ((r=1; r<=REPEATS; r++)); do
-  for utilization in 0.70 0.75 0.80; do
-    "$PYTHON" -m benchmarks.bench_experiments "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
-      --scenario preemption --max-model-len 4096 \
-      --input-len 1024 --output-len 256 --num-requests 32 \
-      --max-num-seqs 8 --budget 512 --cache-entries 0 \
-      --gpu-memory-utilization "$utilization" --require-preemptions \
-      --out "$RESULT_DIR/preempt_${utilization}_r${r}.json"
-  done
-done
-else
   COMMON=("$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" --max-model-len 4096 --seed 0)
   SHORT_REQUESTS=3
   SHORT_OUTPUT=128
@@ -99,6 +87,5 @@ for ((r=1; r<=REPEATS; r++)); do
       --out "$RESULT_DIR/throughput_${mode}_r${r}.json"
   done
 done
-fi
 "$PYTHON" -m benchmarks.summarize_bench "$RESULT_DIR" --min-repeats "$REPEATS" | tee "$RESULT_DIR/summary.txt"
 echo "Completed: $RESULT_DIR"

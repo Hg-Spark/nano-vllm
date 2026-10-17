@@ -80,10 +80,10 @@ class Scheduler:
                     ):
                         self.waiting.appendleft(seq)
                         break
+                    self._try_restore_prefix(seq)
                     self.state_manager.allocate(seq)
                     active_count += 1
                     reserved_blocks += blocks
-                    self._try_restore_prefix(seq)
 
                 requested = min(
                     len(seq) - seq.committed_tokens,
@@ -98,9 +98,8 @@ class Scheduler:
                 end = seq.committed_tokens + scheduled
                 if self.prefix_cache_eager_snapshot and prefix_cache.enabled:
                     full_end = end // self.block_manager.block_size * self.block_manager.block_size
-                    if (
-                        seq.committed_tokens < full_end < end
-                        and prefix_cache.should_publish(seq, full_end)
+                    if seq.committed_tokens < full_end < end and prefix_cache.should_publish(
+                        seq, full_end
                     ):
                         end = full_end
                         scheduled = end - seq.committed_tokens
