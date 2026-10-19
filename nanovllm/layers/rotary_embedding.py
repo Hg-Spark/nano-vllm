@@ -1,59 +1,46 @@
-from functools import lru_cache
 import torch
 from torch import nn
 
 
-def apply_rotary_emb(
-    x: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-) -> torch.Tensor:
-    x1, x2 = torch.chunk(x.float(), 2, dim=-1)
-    y1 = x1 * cos - x2 * sin
-    y2 = x2 * cos + x1 * sin
-    return torch.cat((y1, y2), dim=-1).to(x.dtype)
-
-
 class RotaryEmbedding(nn.Module):
-
     def __init__(
         self,
         head_size: int,
         rotary_dim: int,
-        max_position_embeddings: int,
         base: float,
+        mrope_section: tuple[int, int, int] | None = None,
     ) -> None:
         super().__init__()
+        assert 0 < rotary_dim <= head_size and rotary_dim % 2 == 0
         self.head_size = head_size
-        assert rotary_dim == head_size
-        inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
-        t = torch.arange(max_position_embeddings, dtype=torch.float)
-        freqs = torch.einsum("i,j -> ij", t, inv_freq)
-        cos = freqs.cos()
-        sin = freqs.sin()
-        cache = torch.cat((cos, sin), dim=-1).unsqueeze_(1)
-        self.register_buffer("cos_sin_cache", cache, persistent=False)
+        self.mrope_section = mrope_section
+        inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
 
-    @torch.compile
-    def forward(
-        self,
-        positions: torch.Tensor,
+    def prepare(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # One row per packed token, shared by all attention layers in the batch.
+        if self.mrope_section is None:
+            frequencies = positions[0, :, None].float() * self.inv_freq[None, :]
+        else:
+            axes = positions[:, :, None].float() * self.inv_freq[None, None, :]
+            frequencies = axes[0].clone()
+            for axis in (1, 2):
+                stop = self.mrope_section[axis] * 3
+                frequencies[..., axis:stop:3] = axes[axis, :, axis:stop:3]
+        cache = torch.cat((frequencies.cos(), frequencies.sin()), dim=-1)
+        row_ids = torch.arange(positions.size(1), dtype=torch.int32, device=positions.device)
+        return row_ids, cache
+
+    @staticmethod
+    def apply_cached(
         query: torch.Tensor,
         key: torch.Tensor,
+        head_size: int,
+        prepared: tuple[torch.Tensor, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        cos_sin = self.cos_sin_cache[positions]
-        cos, sin = cos_sin.chunk(2, dim=-1)
-        query = apply_rotary_emb(query, cos, sin)
-        key = apply_rotary_emb(key, cos, sin)
-        return query, key
+        from flashinfer.rope import apply_rope_with_cos_sin_cache
 
-
-@lru_cache(1)
-def get_rope(
-    head_size: int,
-    rotary_dim: int,
-    max_position: int,
-    base: float,
-):
-    rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base)
-    return rotary_emb
+        row_ids, cache = prepared
+        return apply_rope_with_cos_sin_cache(
+            row_ids, query.contiguous(), key.contiguous(), head_size, cache
+        )
