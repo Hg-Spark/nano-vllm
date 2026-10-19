@@ -1,27 +1,42 @@
+from __future__ import annotations
+
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-import torch
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class Context:
     is_prefill: bool = False
-    cu_seqlens_q: torch.Tensor | None = None
-    cu_seqlens_k: torch.Tensor | None = None
-    max_seqlen_q: int = 0
-    max_seqlen_k: int = 0
-    slot_mapping: torch.Tensor | None = None
-    context_lens: torch.Tensor | None = None
-    block_tables: torch.Tensor | None = None
+    kv_batch_indices: torch.Tensor | None = None
+    kv_positions: torch.Tensor | None = None
+    qo_indptr: torch.Tensor | None = None
+    paged_kv_indptr: torch.Tensor | None = None
+    paged_kv_indices: torch.Tensor | None = None
+    paged_kv_last_page_len: torch.Tensor | None = None
+    attention_wrapper: object | None = None
+    state_slots: tuple[int, ...] | None = None
+    state_prefix_lens: tuple[int, ...] | None = None
+    prefill_q_offsets: tuple[int, ...] | None = None
+    state_slot_ids: torch.Tensor | None = None
 
-_CONTEXT = Context()
 
-def get_context():
-    return _CONTEXT
+_CONTEXT: ContextVar[Context] = ContextVar("nanovllm_context", default=Context())
 
-def set_context(is_prefill, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=0, max_seqlen_k=0, slot_mapping=None, context_lens=None, block_tables=None):
-    global _CONTEXT
-    _CONTEXT = Context(is_prefill, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, context_lens, block_tables)
 
-def reset_context():
-    global _CONTEXT
-    _CONTEXT = Context()
+def get_context() -> Context:
+    return _CONTEXT.get()
+
+
+@contextmanager
+def use_context(context: Context) -> Iterator[None]:
+    token = _CONTEXT.set(context)
+    try:
+        yield
+    finally:
+        _CONTEXT.reset(token)
