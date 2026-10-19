@@ -1,0 +1,82 @@
+import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, patch
+
+try:
+    import torch
+except ImportError as exc:
+    raise unittest.SkipTest(f"requires torch: {exc}")
+
+from nanovllm.engine.cache_runtime import (
+    _resolve_kv_cache_dtype,
+    _visual_feature_cache_nbytes,
+    allocate_runtime_caches,
+)
+
+
+class CacheRuntimeTest(unittest.TestCase):
+    def test_reservation_uses_enforced_limit(self):
+        config = SimpleNamespace(
+            root_config=SimpleNamespace(vision_config=object()),
+            max_model_len=512,
+            max_num_seqs=4,
+            text_config=SimpleNamespace(hidden_size=64),
+            max_visual_tokens_per_request=None,
+        )
+        self.assertEqual(_visual_feature_cache_nbytes(config, torch.float16), 4 * 512 * 64 * 2)
+        config.max_visual_tokens_per_request = 32
+        self.assertEqual(_visual_feature_cache_nbytes(config, torch.float16), 4 * 32 * 64 * 2)
+        config.root_config.vision_config = None
+        self.assertEqual(_visual_feature_cache_nbytes(config, torch.float16), 0)
+
+    def test_cache_dtype_mapping(self):
+        for requested, expected in (
+            ("auto", torch.bfloat16),
+            ("fp8_e4m3", torch.float8_e4m3fn),
+        ):
+            with self.subTest(dtype=requested):
+                config = SimpleNamespace(kv_cache_dtype=requested)
+                self.assertEqual(_resolve_kv_cache_dtype(config, torch.bfloat16), expected)
+
+    def test_static_kv_budget_uses_available_memory(self):
+        layer = SimpleNamespace(k_cache=None, v_cache=None)
+        state = SimpleNamespace(
+            state_cache_nbytes=lambda slots: 128,
+            allocate_state_cache=Mock(),
+        )
+        model = SimpleNamespace(
+            kv_cache_modules=lambda: [layer],
+            state_cache_modules=lambda: [state],
+            parameters=lambda: iter([torch.zeros(1, dtype=torch.float16)]),
+        )
+        config = SimpleNamespace(
+            gpu_memory_utilization=0.75,
+            kv_cache_dtype="auto",
+            kv_cache_block_size=16,
+            max_num_seqs=2,
+            text_config=SimpleNamespace(num_key_value_heads=1, head_dim=8),
+            head_dim=8,
+            root_config=SimpleNamespace(vision_config=None),
+            kv_cache_k_scale=1.0,
+            kv_cache_v_scale=1.0,
+        )
+        with (
+            patch(
+                "nanovllm.engine.cache_runtime.torch.cuda.mem_get_info",
+                return_value=(4096, 8192),
+            ),
+            patch(
+                "nanovllm.engine.cache_runtime.torch.empty",
+                return_value=MagicMock(),
+            ) as allocation,
+        ):
+            _, num_blocks = allocate_runtime_caches(model, config)
+
+        # 8192 * .75 - (8192 - 4096) - 128 = 1920; each block takes 512.
+        self.assertEqual(num_blocks, 3)
+        allocation.assert_called_once_with(2, 1, 3, 16, 1, 8, device="cuda", dtype=torch.float16)
+        state.allocate_state_cache.assert_called_once_with(2)
+
+
+if __name__ == "__main__":
+    unittest.main()
