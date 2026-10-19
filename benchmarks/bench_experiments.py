@@ -230,8 +230,8 @@ def run(a):
         if vocab < 2:
             raise RuntimeError("vocabulary is unexpectedly small")
         rng = Random(a.seed)
-        # Pre-run initialization, outside measured window. No cache match with target prompts.
-        warmup = make_requests(engine, [[1] * 16], 2)
+        # Use a sub-block setup prompt to avoid publishing an unrelated prefix.
+        warmup = make_requests(engine, [[1] * 15], 2)
         run_benchmark(engine, warmup)
 
         first_prefill_start = {}

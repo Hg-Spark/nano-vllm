@@ -108,6 +108,7 @@ prompt = tokenizer.apply_chat_template(
     [{"role": "user", "content": "请用一个例子解释 KV cache。"}],
     tokenize=True,
     add_generation_prompt=True,
+    return_dict=False,
 )
 
 llm = LLM(

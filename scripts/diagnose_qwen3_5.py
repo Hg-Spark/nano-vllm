@@ -203,6 +203,8 @@ def run(args):
     input_ids = tokenizer.encode(args.prompt)[: args.max_probe_tokens]
     if not input_ids:
         raise RuntimeError("layer probe prompt produced no tokens")
+    if len(input_ids) + 1 > args.max_model_len:
+        raise ValueError("probe prompt and sampled token exceed max_model_len")
     hf_layers = capture_hf_layers(args.model, input_ids, args.dtype, hf_experts_backend=hf_backend)
     nano_layers = capture_nano_layers(args.model, input_ids, args.max_model_len, args.dtype)
 

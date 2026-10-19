@@ -45,9 +45,11 @@ class CacheRuntimeTest(unittest.TestCase):
             allocate_state_cache=Mock(),
         )
         model = SimpleNamespace(
+            model=SimpleNamespace(
+                embed_tokens=SimpleNamespace(weight=torch.zeros(1, dtype=torch.float16))
+            ),
             kv_cache_modules=lambda: [layer],
             state_cache_modules=lambda: [state],
-            parameters=lambda: iter([torch.zeros(1, dtype=torch.float16)]),
         )
         config = SimpleNamespace(
             gpu_memory_utilization=0.75,

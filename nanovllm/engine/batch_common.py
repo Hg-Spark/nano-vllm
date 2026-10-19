@@ -101,7 +101,7 @@ def stage_pinned(host: torch.Tensor, values) -> torch.Tensor:
     import torch
 
     source = torch.as_tensor(values, dtype=host.dtype, device="cpu")
-    staged = host[: source.numel()].view(source.shape)
+    staged = host.view(-1)[: source.numel()].view(source.shape)
     staged.copy_(source)
     return staged
 

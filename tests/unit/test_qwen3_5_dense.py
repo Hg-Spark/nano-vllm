@@ -38,6 +38,17 @@ class Qwen3_5DenseTest(unittest.TestCase):
         self.assertIsNone(model.visual)
         self.assertIn("model.visual.", model.checkpoint_skip_prefixes)
 
+    def test_vision_tower_uses_runtime_dtype(self):
+        from types import SimpleNamespace
+
+        root = SimpleNamespace(text_config=dense_config(), vision_config=object())
+        with patch(
+            "nanovllm.models.qwen3_5.AutoModel.from_config",
+            return_value=torch.nn.Linear(1, 1),
+        ) as make_visual:
+            Qwen3_5ForCausalLM(root)
+        make_visual.assert_called_once_with(root.vision_config, dtype=torch.get_default_dtype())
+
     def test_strict_loading_handles_either_tied_name_and_rejects_conflicts(self):
         source = Qwen3_5ForCausalLM(dense_config())
         # Use finite deterministic weights, including GDN's uninitialized A_log.

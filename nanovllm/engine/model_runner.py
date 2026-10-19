@@ -89,7 +89,9 @@ class ModelRunner:
                 module.state_cache_nbytes(1) for module in self.model.state_cache_modules()
             )
             self.attention_spec = flashinfer_attention_spec(
-                config.text_config, next(self.model.parameters()).dtype, self.kv_cache.dtype
+                config.text_config,
+                self.model.model.embed_tokens.weight.dtype,
+                self.kv_cache.dtype,
             )
             if self.decode_graph_buckets:
                 free_before, _ = torch.cuda.mem_get_info()
@@ -184,7 +186,9 @@ class ModelRunner:
                 state.image_grid_thw.cuda(non_blocking=True),
                 state.image_end - state.image_start,
             )
-            state.visual_features = features.detach()
+            state.visual_features = features.detach().to(
+                dtype=self.model.model.embed_tokens.weight.dtype
+            )
             state.pixel_values = None
         return state.visual_features
 

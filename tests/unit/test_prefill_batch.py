@@ -16,7 +16,7 @@ class PrefillBatchLayoutTest(unittest.TestCase):
         except ImportError:
             self.skipTest("requires torch")
 
-        matrix = torch.empty((3, 2), dtype=torch.int64)
+        matrix = torch.empty((3, 4), dtype=torch.int64)
         staged = stage_pinned(matrix, ((1, 2), (3, 4), (5, 6)))
         self.assertEqual(tuple(staged.shape), (3, 2))
         torch.testing.assert_close(staged, torch.tensor([[1, 2], [3, 4], [5, 6]]))

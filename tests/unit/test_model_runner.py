@@ -1,6 +1,7 @@
 """ModelRunner CUDA Graph lifecycle and context contracts."""
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 try:
@@ -29,6 +30,27 @@ class ModelRunnerTest(unittest.TestCase):
         self.assertEqual(result, [1, 0])
         runner.sampler.assert_not_called()
         runner.metadata_pool.to_cuda.assert_not_called()
+
+    def test_visual_feature_cache_uses_text_dtype(self):
+        runner = object.__new__(ModelRunner)
+        runner.model = SimpleNamespace(
+            model=SimpleNamespace(
+                embed_tokens=SimpleNamespace(weight=torch.empty(1, dtype=torch.float16))
+            ),
+            encode_image=Mock(return_value=torch.ones((2, 4), dtype=torch.float32)),
+        )
+        state = SimpleNamespace(
+            pixel_values=Mock(),
+            image_grid_thw=Mock(),
+            image_start=1,
+            image_end=3,
+            visual_features=None,
+        )
+        seq = SimpleNamespace(image_state=state)
+        features = runner._ensure_visual_features(seq)
+        self.assertEqual(features.dtype, torch.float16)
+        self.assertIs(features, state.visual_features)
+        self.assertIsNone(state.pixel_values)
 
     def test_model_runner_exit_releases_gpu_owners(self):
         runner = object.__new__(ModelRunner)

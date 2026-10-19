@@ -41,7 +41,7 @@ class GDNStatePool(nn.Module):
         recurrent_elements = num_slots * self.num_v_heads * self.head_k_dim * self.head_v_dim
         return (
             conv_elements * self.conv_state.element_size()
-            + recurrent_elements * self.recurrent_state.element_size()
+            + recurrent_elements * torch.float32.itemsize
         )
 
     def allocate_state_cache(self, num_slots: int) -> None:

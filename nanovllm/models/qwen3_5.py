@@ -117,7 +117,7 @@ class Qwen3_5ForCausalLM(nn.Module):
         vision_config = getattr(config, "vision_config", None)
         self.root_config = config
         self.visual = (
-            AutoModel.from_config(vision_config)
+            AutoModel.from_config(vision_config, dtype=torch.get_default_dtype())
             if load_vision and vision_config is not None
             else None
         )

@@ -30,6 +30,7 @@ def main():
             [{"role": "user", "content": prompt}],
             tokenize=True,
             add_generation_prompt=True,
+            return_dict=False,
         )
         for prompt in prompts
     ]

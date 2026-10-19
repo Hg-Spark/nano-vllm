@@ -57,7 +57,7 @@ class Scheduler:
         prefix_cache = self.block_manager.prefix_cache
         planned_prefixes: set[tuple[int, ...]] = set()
 
-        # Preserve FIFO order independently for admitted and new requests.
+        # Resume admitted prefills round-robin; admit waiting requests in FIFO order.
         for admitted, queue in ((True, self.prefilling), (False, self.waiting)):
             for _ in range(len(queue)):
                 if (

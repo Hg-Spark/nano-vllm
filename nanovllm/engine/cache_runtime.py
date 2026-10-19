@@ -62,7 +62,7 @@ def allocate_runtime_caches(
     state_cache_bytes = sum(
         module.state_cache_nbytes(config.max_num_seqs) for module in state_modules
     )
-    model_param = next(model.parameters())
+    model_param = model.model.embed_tokens.weight
     cache_dtype = _resolve_kv_cache_dtype(
         config,
         model_param.dtype,

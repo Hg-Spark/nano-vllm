@@ -93,7 +93,7 @@ python -m scripts.profile_decode "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE"
 
 | 类型 | 主要测试 |
 | --- | --- |
-| 模型/权重 | `test_qwen3_5_dense.py`、`test_qwen3_5_moe.py`、`test_config.py` |
+| 模型/权重 | `test_qwen3_5_dense.py`、`test_qwen3_5_moe.py` |
 | GDN/Attention/FP8 | CUDA: `tests/integration/test_flashinfer_gdn.py`、`test_flashinfer_attention.py`、`test_flashinfer_ops.py` |
 | 批次/调度/状态 | `test_prefill_batch.py`、`test_scheduler*.py` |
 | 前缀/多模态/Graph | `test_prefix_cache.py`、`test_multimodal.py`、`test_model_runner.py` |
