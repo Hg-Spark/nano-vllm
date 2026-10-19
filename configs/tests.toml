@@ -1,0 +1,26 @@
+# Paths support ~ and environment variables; relative paths use the project root.
+model = "~/models/Qwen3.5-2B"
+dtype = "float16"                  # float16 or bfloat16
+gpu = "0"                         # CUDA_VISIBLE_DEVICES
+stage = "check"                     # all, check, bench, tail, capacity
+repeats = 1
+output_dir = "results"             # Each run creates a new run_* directory.
+
+[benchmark]
+mode = "smoke"                    # Existing benchmarks/run.sh matrix: smoke or full.
+
+[correctness]
+max_jobs = 1                      # Parallel Ninja compiler jobs.
+nvcc_threads = 1                  # Threads within each nvcc process.
+prompt = "What is the capital of France?"
+max_new_tokens = 32
+max_model_len = 512
+prefix_block_size = 16
+
+[capacity]
+max_batch = 64
+budget = 512
+input_len = 2048
+output_len = 128
+max_model_len = 4096
+gpu_memory_utilization = 0.75
