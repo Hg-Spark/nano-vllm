@@ -2,7 +2,6 @@ import unittest
 
 from nanovllm.engine.schedule import ScheduledChunk
 from nanovllm.engine.sequence import Sequence, SequenceStatus
-from nanovllm.engine.state_manager import GDNStateSnapshot
 from nanovllm.sampling_params import SamplingParams
 from tests.scheduler_helpers import (
     make_running_sequence,
@@ -84,27 +83,30 @@ class SchedulerCoreTest(unittest.TestCase):
             [],
         )
 
-    def test_unaligned_prompt_schedules_complete_prefix_block(self):
-        for prompt_len, boundary in ((20, 16), (100, 96)):
+    def test_power_of_two_checkpoint_grid(self):
+        cases = (
+            (20, ()),
+            (100, (64,)),
+            (320, (64, 128, 192, 256)),
+            (321, (128, 256)),
+            (400, (128, 256, 384)),
+            (1024, (256, 512, 768)),
+            (2049, (512, 1024, 1536, 2048)),
+        )
+        for prompt_len, positions in cases:
             with self.subTest(prompt_len=prompt_len):
                 scheduler = make_scheduler(
-                    max_num_batched_tokens=512,
-                    max_num_seqs=2,
-                    num_blocks=16,
+                    max_num_batched_tokens=4096,
+                    max_num_seqs=1,
+                    num_blocks=256,
                     block_size=16,
                 )
-                seqs = [
-                    Sequence(list(range(prompt_len)), SamplingParams(max_tokens=1)),
-                    Sequence([prompt_len] * prompt_len, SamplingParams(max_tokens=1)),
-                ]
-                for seq in seqs:
-                    scheduler.add(seq)
+                seq = Sequence(list(range(prompt_len)), SamplingParams(max_tokens=1))
+                scheduler.add(seq)
                 chunks = scheduler.schedule().prefill_chunks
-                self.assertEqual(scheduled_sequences(chunks), seqs)
-                self.assertEqual(
-                    [(chunk.start, chunk.end, chunk.capture_snapshot) for chunk in chunks],
-                    [(0, boundary, True)] * 2,
-                )
+                self.assertEqual(len(chunks), 1)
+                self.assertEqual((chunks[0].start, chunks[0].end), (0, prompt_len))
+                self.assertEqual(chunks[0].checkpoint_positions, positions)
 
     def test_disabled_prefix_publication_does_not_split_prefill(self):
         cases = (
@@ -147,19 +149,18 @@ class SchedulerCoreTest(unittest.TestCase):
             True,
         )
         second = scheduler.schedule()
-        self.assertEqual(second.prefill_tokens, 1)
-        self.assertEqual(len(seq.block_table), 1)
-        self.assertTrue(second.prefill_chunks[0].capture_snapshot)
+        self.assertEqual(second.prefill_tokens, 3)
+        self.assertEqual(len(seq.block_table), 2)
+        self.assertFalse(second.prefill_chunks[0].capture_snapshot)
 
         scheduler.postprocess(
             second.prefill_chunks,
             [None],
             True,
-            {seq.seq_id: GDNStateSnapshot(num_tokens=4, layers=())},
         )
         third = scheduler.schedule()
         self.assertEqual(third.prefill_tokens, 3)
-        self.assertEqual(len(seq.block_table), 2)
+        self.assertEqual(len(seq.block_table), 3)
 
     def test_any_configured_eos_finishes_request(self):
         scheduler = make_scheduler(

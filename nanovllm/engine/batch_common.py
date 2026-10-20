@@ -234,8 +234,22 @@ def prepare_prefill(
 ) -> PreparedBatch:
     layout = build_prefill_batch_layout(chunks, block_size)
     upload = host_pool.to_cuda
+    intervals = [chunk.checkpoint_interval for chunk in chunks if chunk.checkpoint_interval]
+    checkpoint_interval = min(intervals) if intervals else 0
+    checkpoint_offsets = [0]
+    for chunk in chunks:
+        count = chunk.num_tokens // checkpoint_interval if checkpoint_interval else 0
+        checkpoint_offsets.append(checkpoint_offsets[-1] + count)
     context = Context(
         is_prefill=True,
+        prefill_checkpoint_interval=checkpoint_interval,
+        prefill_checkpoint_positions=tuple(chunk.checkpoint_positions for chunk in chunks),
+        prefill_checkpoint_offsets=tuple(checkpoint_offsets),
+        checkpoint_cu_starts=(
+            upload("gdn_checkpoint_offsets", checkpoint_offsets, "int64")
+            if checkpoint_interval
+            else None
+        ),
         kv_batch_indices=upload("prefill_kv_batch_indices", layout.kv_batch_indices, "int32"),
         kv_positions=upload("prefill_kv_positions", layout.kv_positions, "int32"),
         qo_indptr=upload("prefill_q_offsets", layout.q_offsets, "int32"),

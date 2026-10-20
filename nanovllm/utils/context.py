@@ -24,6 +24,10 @@ class Context:
     state_prefix_lens: tuple[int, ...] | None = None
     prefill_q_offsets: tuple[int, ...] | None = None
     state_slot_ids: torch.Tensor | None = None
+    prefill_checkpoint_interval: int = 0
+    prefill_checkpoint_positions: tuple[tuple[int, ...], ...] = ()
+    prefill_checkpoint_offsets: tuple[int, ...] = ()
+    checkpoint_cu_starts: torch.Tensor | None = None
 
 
 _CONTEXT: ContextVar[Context] = ContextVar("nanovllm_context", default=Context())

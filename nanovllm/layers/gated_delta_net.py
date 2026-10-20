@@ -121,18 +121,44 @@ class GatedDeltaNet(nn.Module):
         q_offsets: tuple[int, ...],
         offsets: torch.Tensor,
         slot_ids: torch.Tensor,
+        checkpoint_interval: int,
+        checkpoint_positions: tuple[tuple[int, ...], ...],
+        checkpoint_offsets: tuple[int, ...],
+        checkpoint_cu_starts: torch.Tensor | None,
     ) -> torch.Tensor:
         from flashinfer.gdn_prefill import chunk_gated_delta_rule as flashinfer_prefill
 
         mixed_qkv, z, b, a = self._project_inputs(hidden_states)
         beta, decay = self._gates(b, a)
         conv_parts = []
+        intermediate_conv = []
+        self.state_pool.prefill_checkpoints.clear()
         for seq_idx, slot_id in enumerate(state_slots):
             q_start, q_end = q_offsets[seq_idx], q_offsets[seq_idx + 1]
             conv_state, recurrent_state = self.state_pool.slot(slot_id)
-            if state_prefix_lens[seq_idx] == 0:
+            start = state_prefix_lens[seq_idx]
+            if start == 0:
                 conv_state.zero_()
                 recurrent_state.zero_()
+            width = self.conv_kernel_size - 1
+            for position in checkpoint_positions[seq_idx]:
+                if position == start + q_end - q_start:
+                    continue  # The final state comes from the live state pool.
+                local_end = position - start
+                if local_end >= width:
+                    conv = mixed_qkv[
+                        q_start + local_end - width : q_start + local_end
+                    ].T.contiguous()
+                else:
+                    conv = torch.cat(
+                        (
+                            conv_state[:, local_end:],
+                            mixed_qkv[q_start : q_start + local_end].T,
+                        ),
+                        dim=1,
+                    ).contiguous()
+                cp_index = checkpoint_offsets[seq_idx] + local_end // checkpoint_interval - 1
+                intermediate_conv.append((slot_id, position, cp_index, conv))
             conv_parts.append(self._causal_conv(mixed_qkv[q_start:q_end], conv_state))
 
         packed_conv = conv_parts[0] if len(conv_parts) == 1 else torch.cat(conv_parts, dim=0)
@@ -140,6 +166,18 @@ class GatedDeltaNet(nn.Module):
         # FlashInfer 0.7.0's prefill path ignores its Q/K normalization flag.
         query = _l2norm(query.float()).to(query.dtype).contiguous()
         key = _l2norm(key.float()).to(key.dtype).contiguous()
+        state_checkpoints = (
+            torch.empty(
+                checkpoint_offsets[-1],
+                self.num_v_heads,
+                self.head_v_dim,
+                self.head_k_dim,
+                device=hidden_states.device,
+                dtype=torch.float32,
+            )
+            if checkpoint_interval
+            else None
+        )
         with record_function("nanovllm::gdn_prefill_flashinfer"):
             core, _ = flashinfer_prefill(
                 query,
@@ -156,6 +194,14 @@ class GatedDeltaNet(nn.Module):
                 use_qk_l2norm_in_kernel=False,
                 use_cp=False,
                 backend="flashinfer",
+                state_checkpoints=state_checkpoints,
+                checkpoint_cu_starts=checkpoint_cu_starts,
+                checkpoint_every_n_tokens=checkpoint_interval,
+            )
+        for slot_id, position, cp_index, conv in intermediate_conv:
+            self.state_pool.prefill_checkpoints[(slot_id, position)] = (
+                conv.detach().to(device="cpu", copy=True),
+                state_checkpoints[cp_index].detach().to(device="cpu", copy=True),
             )
         return self._finalize_output(core, z)
 
@@ -208,5 +254,9 @@ class GatedDeltaNet(nn.Module):
                 q_offsets,
                 context.qo_indptr,
                 context.state_slot_ids,
+                context.prefill_checkpoint_interval,
+                context.prefill_checkpoint_positions,
+                context.prefill_checkpoint_offsets,
+                context.checkpoint_cu_starts,
             )
         return self._forward_decode_batch(hidden_states, context.state_slot_ids)

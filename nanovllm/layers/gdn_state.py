@@ -22,6 +22,7 @@ class GDNStatePool(nn.Module):
         self.num_v_heads = num_v_heads
         self.head_k_dim = head_k_dim
         self.head_v_dim = head_v_dim
+        self.prefill_checkpoints: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]] = {}
 
         # These zero-sized buffers act as device/dtype anchors before the
         # runtime knows how many active request slots can fit.
@@ -88,6 +89,11 @@ class GDNStatePool(nn.Module):
                 copy=True,
             ),
         )
+
+    def checkpoint_state_slot(
+        self, slot_id: int, position: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.prefill_checkpoints.pop((slot_id, position))
 
     def restore_state_slot(
         self,

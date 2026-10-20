@@ -15,6 +15,7 @@ class BlockManager:
         max_prefix_entries: int = 0,
         max_prefix_cache_snapshot_bytes: int | None = None,
         snapshot_nbytes: int = 0,
+        max_checkpoints_per_path: int = 4,
     ) -> None:
         if num_blocks <= 0 or max_prefix_entries < 0:
             raise ValueError("num_blocks must be positive and max_prefix_entries non-negative")
@@ -29,6 +30,7 @@ class BlockManager:
             self.release_blocks,
             max_snapshot_bytes=max_prefix_cache_snapshot_bytes,
             snapshot_nbytes=snapshot_nbytes,
+            max_checkpoints_per_path=max_checkpoints_per_path,
         )
 
     def _allocate_block(self) -> int:

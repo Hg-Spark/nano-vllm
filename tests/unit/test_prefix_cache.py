@@ -96,6 +96,36 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         self.assertFalse(manager.prefix_cache.should_publish(seq, 8))
         self.assertEqual(len(manager.prefix_cache), 0)
 
+    def test_shared_history_reuses_snapshots_and_evicts_shortest(self):
+        manager = BlockManager(
+            num_blocks=64,
+            block_size=16,
+            max_prefix_entries=8,
+            max_checkpoints_per_path=4,
+        )
+        original = Sequence(list(range(320)))
+        longer = Sequence(list(range(400)))
+        manager.ensure_capacity(original, 256)
+        manager.ensure_capacity(longer, 384)
+
+        history = {}
+        for position in (64, 128, 192, 256):
+            snapshot = GDNStateSnapshot(position, ())
+            history[position] = snapshot
+            manager.prefix_cache.publish(original, snapshot, position)
+
+        for position in (128, 256):
+            manager.prefix_cache.publish(longer, GDNStateSnapshot(position, ()), position)
+        self.assertEqual(len(manager.prefix_cache), 4)
+        reused = manager.prefix_cache.find(longer, max_tokens=256)
+        self.assertIs(reused.state_snapshot, history[256])
+
+        manager.prefix_cache.publish(longer, GDNStateSnapshot(384, ()), 384)
+        self.assertEqual(len(manager.prefix_cache), 4)
+        self.assertEqual(manager.prefix_cache.find(longer, max_tokens=399).num_tokens, 384)
+        self.assertEqual(manager.prefix_cache.find(original, max_tokens=80), None)
+        self.assertEqual(manager.block_refcounts[original.block_table[0]], 4)
+
 
 if __name__ == "__main__":
     unittest.main()

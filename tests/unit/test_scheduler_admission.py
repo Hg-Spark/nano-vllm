@@ -32,7 +32,9 @@ class SchedulerAdmissionTest(unittest.TestCase):
                 scheduler.postprocess(output.decode_chunks, [2] * len(output.decode_chunks), False)
             if output.prefill_chunks:
                 snapshots = {
-                    chunk.seq.seq_id: GDNStateSnapshot(chunk.end, ())
+                    chunk.seq.seq_id: tuple(
+                        GDNStateSnapshot(position, ()) for position in chunk.checkpoint_positions
+                    )
                     for chunk in output.prefill_chunks
                     if chunk.capture_snapshot
                 }

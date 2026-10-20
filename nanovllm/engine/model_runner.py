@@ -13,12 +13,12 @@ from nanovllm.engine.batch_common import (
 )
 from nanovllm.engine.cache_runtime import (
     allocate_runtime_caches,
-    capture_gdn_state,
     restore_pending_states,
 )
 from nanovllm.engine.decode_graph import FLASHINFER_GRAPH_WORKSPACE_BYTES, DecodeGraphBucket
 from nanovllm.engine.schedule import BatchResult, ScheduledChunk
 from nanovllm.engine.sequence import Sequence
+from nanovllm.engine.state_manager import GDNStateSnapshot
 from nanovllm.layers.attention import flashinfer_attention_spec
 from nanovllm.layers.sampler import Sampler
 from nanovllm.models.qwen3_5 import Qwen3_5ForCausalLM
@@ -278,9 +278,21 @@ class ModelRunner:
             else:
                 results = [None for _ in seqs]
 
-        prefix_snapshots = {
-            chunk.seq.seq_id: capture_gdn_state(self.model, chunk)
-            for chunk in chunks
-            if chunk.capture_snapshot
-        }
+        prefix_snapshots: dict[int, tuple[GDNStateSnapshot, ...]] = {}
+        if is_prefill:
+            state_modules = self.model.state_cache_modules()
+            for chunk in chunks:
+                if not chunk.checkpoint_positions:
+                    continue
+                seq = chunk.seq
+                checkpoints = []
+                for position in chunk.checkpoint_positions:
+                    layers = tuple(
+                        module.snapshot_state_slot(seq.state_slot)
+                        if position == chunk.end
+                        else module.checkpoint_state_slot(seq.state_slot, position)
+                        for module in state_modules
+                    )
+                    checkpoints.append(GDNStateSnapshot(num_tokens=position, layers=layers))
+                prefix_snapshots[seq.seq_id] = tuple(checkpoints)
         return BatchResult(results, prefix_snapshots)

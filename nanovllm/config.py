@@ -93,6 +93,7 @@ class Config:
     gpu_memory_utilization: float = 0.8
     kv_cache_block_size: int = 16
     max_prefix_cache_entries: int = 0
+    max_gdn_checkpoints: int = 4
     max_prefix_cache_snapshot_bytes: int | None = None
     prefix_cache_eager_snapshot: bool = True
     max_visual_tokens_per_request: int | None = 0
@@ -125,6 +126,8 @@ class Config:
         self.decode_graph_batch_sizes = tuple(sorted(graph_sizes))
         if self.max_prefix_cache_entries < 0:
             raise ValueError("max_prefix_cache_entries must be non-negative")
+        if self.max_gdn_checkpoints <= 0:
+            raise ValueError("max_gdn_checkpoints must be positive")
         if (
             self.max_prefix_cache_snapshot_bytes is not None
             and self.max_prefix_cache_snapshot_bytes < 0

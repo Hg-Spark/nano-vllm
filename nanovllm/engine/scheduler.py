@@ -2,6 +2,7 @@ from collections import deque
 
 from nanovllm.config import Config
 from nanovllm.engine.block_manager import BlockManager
+from nanovllm.engine.prefix_cache import gdn_checkpoint_interval
 from nanovllm.engine.schedule import ScheduledChunk, SchedulerOutput
 from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.engine.state_manager import GDNStateSnapshot, StateSlotManager
@@ -12,6 +13,7 @@ class Scheduler:
         self.max_num_seqs = config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.prefix_cache_eager_snapshot = config.prefix_cache_eager_snapshot
+        self.max_gdn_checkpoints = config.max_gdn_checkpoints
         self.eos_token_ids = set(config.eos_token_ids)
         self.block_manager = BlockManager(
             num_kv_cache_blocks,
@@ -19,6 +21,7 @@ class Scheduler:
             max_prefix_entries=config.max_prefix_cache_entries,
             max_prefix_cache_snapshot_bytes=config.max_prefix_cache_snapshot_bytes,
             snapshot_nbytes=snapshot_nbytes,
+            max_checkpoints_per_path=config.max_gdn_checkpoints,
         )
         self.state_manager = StateSlotManager(config.max_num_seqs)
         self.waiting: deque[Sequence] = deque()
@@ -90,31 +93,37 @@ class Scheduler:
                 if scheduled == 0:
                     raise RuntimeError("admitted prefill cannot acquire reserved KV blocks")
 
-                end = seq.committed_tokens + scheduled
-                capture_snapshot = False
+                start = seq.committed_tokens
+                end = start + scheduled
+                positions: tuple[int, ...] = ()
+                interval = 0
                 if self.prefix_cache_eager_snapshot and prefix_cache.enabled:
-                    block_size = self.block_manager.block_size
-                    full_end = min(end, seq.num_prompt_tokens - 1) // block_size * block_size
-                    if seq.committed_tokens < full_end < end and prefix_cache.should_publish(
-                        seq, full_end
-                    ):
-                        key = tuple(seq.token_ids[:full_end])
-                        if key not in planned_prefixes:
-                            end = full_end
-                            scheduled = end - seq.committed_tokens
-                            planned_prefixes.add(key)
-                            capture_snapshot = True
-
-                if not capture_snapshot and prefix_cache.should_publish(seq, end):
-                    key = tuple(seq.token_ids[:end])
-                    if key not in planned_prefixes:
-                        planned_prefixes.add(key)
-                        capture_snapshot = True
+                    interval = gdn_checkpoint_interval(
+                        seq.num_prompt_tokens, self.max_gdn_checkpoints
+                    )
+                    first = (start // interval + 1) * interval
+                    targets = [
+                        p
+                        for p in range(first, min(end, seq.num_prompt_tokens - 1) + 1, interval)
+                        if prefix_cache.should_publish(seq, p)
+                        and tuple(seq.token_ids[:p]) not in planned_prefixes
+                    ]
+                    if targets:
+                        if start % interval:
+                            end = targets[0]
+                            targets = targets[:1]
+                            scheduled = end - start
+                        positions = tuple(targets)
+                        planned_prefixes.update(tuple(seq.token_ids[:p]) for p in positions)
 
                 self.block_manager.ensure_capacity(seq, end)
                 prefill_chunks.append(
                     ScheduledChunk(
-                        seq, seq.committed_tokens, end, capture_snapshot=capture_snapshot
+                        seq,
+                        start,
+                        end,
+                        checkpoint_positions=positions,
+                        checkpoint_interval=interval if any(p < end for p in positions) else 0,
                     )
                 )
                 num_batched_tokens += scheduled
@@ -170,7 +179,7 @@ class Scheduler:
         chunks: tuple[ScheduledChunk, ...],
         token_ids: list[int | None],
         is_prefill: bool,
-        prefix_snapshots: dict[int, GDNStateSnapshot] | None = None,
+        prefix_snapshots: dict[int, tuple[GDNStateSnapshot, ...]] | None = None,
     ) -> None:
         prefix_snapshots = prefix_snapshots or {}
         if len(chunks) != len(token_ids):
@@ -184,11 +193,8 @@ class Scheduler:
             if not partial_prefill and token_id is None:
                 raise RuntimeError("completed model step did not produce a token")
 
-            snapshot = prefix_snapshots.get(seq.seq_id)
-            if snapshot is not None:
-                if not is_prefill or not isinstance(snapshot, GDNStateSnapshot):
-                    raise RuntimeError("invalid GDN state snapshot")
-                self.block_manager.prefix_cache.publish(seq, snapshot, chunk.end)
+            for snapshot in prefix_snapshots.get(seq.seq_id, ()):
+                self.block_manager.prefix_cache.publish(seq, snapshot, snapshot.num_tokens)
 
             seq.committed_tokens = chunk.end
             if seq.image_state is not None and chunk.end >= seq.image_state.image_end:
