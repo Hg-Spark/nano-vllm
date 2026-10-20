@@ -83,6 +83,26 @@ class CacheRuntimeTest(unittest.TestCase):
         allocation.assert_called_once_with(2, 1, 3, 16, 1, 8, device="cuda", dtype=torch.float16)
         state.allocate_state_cache.assert_called_once_with(2)
 
+        # Non-eager captures still stack active GDN states before D2H.
+        config.max_prefix_cache_entries = 2
+        config.max_num_batched_tokens = 64
+        for eager, expected_blocks in ((False, 4), (True, 3)):
+            with (
+                self.subTest(eager=eager),
+                patch(
+                    "nanovllm.engine.cache_runtime.torch.cuda.mem_get_info",
+                    return_value=(4736, 8192),
+                ),
+                patch(
+                    "nanovllm.engine.cache_runtime.torch.empty",
+                    return_value=MagicMock(),
+                ) as allocation,
+            ):
+                config.prefix_cache_eager_snapshot = eager
+                _, num_blocks = allocate_runtime_caches(model, config)
+                self.assertEqual(num_blocks, expected_blocks)
+                self.assertEqual(allocation.call_args.args[2], expected_blocks)
+
 
 if __name__ == "__main__":
     unittest.main()
