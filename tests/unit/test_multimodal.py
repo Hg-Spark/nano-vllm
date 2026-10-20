@@ -144,7 +144,7 @@ class MultimodalRequestTest(unittest.TestCase):
 
         layout = build_decode_batch_layout((ScheduledChunk(seq, 7, 8),), block_size=4)
         self.assertEqual(layout.input_ids, (42,))
-        self.assertEqual(layout.rope_positions, ((5,), (5,), (5,)))
+        self.assertEqual(layout.rope_positions, ((5,),))
         self.assertEqual(layout.kv_positions, (7,))
         self.assertEqual(layout.kv_batch_indices, (0,))
 
