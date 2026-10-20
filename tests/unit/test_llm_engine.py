@@ -196,6 +196,8 @@ class LLMEngineStepTest(unittest.TestCase):
         engine.max_kv_tokens = 4
         engine.tokenizer = SimpleNamespace(encode=lambda text: [1] * len(text))
 
+        with self.assertRaisesRegex(TypeError, "expects a list"):
+            engine.generate("ok", SamplingParams(max_tokens=1), use_tqdm=False)
         with self.assertRaisesRegex(ValueError, "exceeds max_model_len"):
             engine.generate(
                 ["ok", "too_long"],
