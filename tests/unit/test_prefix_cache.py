@@ -173,7 +173,10 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         manager.ensure_capacity(seq, 1024)
         publish_snapshot(manager, seq, 512)
         candidates, cached = manager.prefix_cache.candidates(seq, 512, 1024)
-        self.assertEqual([p for p, _ in manager.prefix_cache.select_checkpoints(candidates, cached)], [1024])
+        self.assertEqual(
+            [p for p, _ in manager.prefix_cache.select_checkpoints(candidates, cached)],
+            [1024],
+        )
         publish_snapshot(manager, seq, 1024)
         self.assertEqual(len(manager.prefix_cache), 1)
         self.assertEqual(manager.prefix_cache.find(seq, 1024).num_tokens, 1024)
