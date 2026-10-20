@@ -24,7 +24,7 @@ class DecodeGraphBucket:
 
         self.max_page_indices = self.batch_size * math.ceil(self.max_model_len / self.block_size)
         self.input_ids = torch.zeros(self.batch_size, dtype=torch.int64, device="cuda")
-        self.rope_positions = torch.zeros(3, self.batch_size, dtype=torch.int64, device="cuda")
+        self.rope_positions = torch.zeros(1, self.batch_size, dtype=torch.int64, device="cuda")
         self.kv_batch_indices = torch.arange(self.batch_size, dtype=torch.int32, device="cuda")
         self.kv_positions = torch.zeros(self.batch_size, dtype=torch.int32, device="cuda")
         self.state_slot_ids = torch.zeros(self.batch_size, dtype=torch.int32, device="cuda")
