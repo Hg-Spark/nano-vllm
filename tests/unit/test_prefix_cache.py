@@ -168,6 +168,27 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
             [256],
         )
 
+        manager = BlockManager(num_blocks=96, block_size=16, max_prefix_entries=1)
+        seq = Sequence(list(range(1024)) + [9])
+        manager.ensure_capacity(seq, 1024)
+        publish_snapshot(manager, seq, 512)
+        candidates, cached = manager.prefix_cache.candidates(seq, 512, 1024)
+        self.assertEqual([p for p, _ in manager.prefix_cache.select_checkpoints(candidates, cached)], [1024])
+        publish_snapshot(manager, seq, 1024)
+        self.assertEqual(len(manager.prefix_cache), 1)
+        self.assertEqual(manager.prefix_cache.find(seq, 1024).num_tokens, 1024)
+
+        shorter = BlockManager(num_blocks=32, block_size=16, max_prefix_entries=1)
+        original = Sequence(list(range(128)) + [9])
+        shorter.ensure_capacity(original, 128)
+        publish_snapshot(shorter, original, 128)
+        other = Sequence(list(range(1, 193)) + [9])
+        candidates, cached = shorter.prefix_cache.candidates(other, 0, 192)
+        self.assertEqual(
+            [p for p, _ in shorter.prefix_cache.select_checkpoints(candidates, cached)],
+            [128],
+        )
+
     def test_backfilled_shorter_checkpoint_does_not_delete_longer(self):
         manager = BlockManager(
             num_blocks=16, block_size=16, max_prefix_entries=2, max_checkpoints_per_path=1
@@ -178,6 +199,16 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         publish_snapshot(manager, seq, 64)
         self.assertEqual(len(manager.prefix_cache), 1)
         self.assertEqual(manager.prefix_cache.find(seq, 128).num_tokens, 128)
+
+        manager = BlockManager(
+            num_blocks=32, block_size=16, max_prefix_entries=4, max_checkpoints_per_path=2
+        )
+        seq = Sequence(list(range(256)) + [9])
+        manager.ensure_capacity(seq, 256)
+        for position in (64, 256, 128):
+            publish_snapshot(manager, seq, position)
+        self.assertEqual(len(manager.prefix_cache), 2)
+        self.assertEqual(manager.prefix_cache.find(seq, 256).num_tokens, 256)
 
     def test_batch_publish_rejects_misaligned_boundary(self):
         manager = BlockManager(num_blocks=10, block_size=16, max_prefix_entries=2)
@@ -235,9 +266,9 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
             max_checkpoints_per_path=4,
         )
         original = Sequence(list(range(320)))
-        longer = Sequence(list(range(400)))
+        longer = Sequence(list(range(528)))
         manager.ensure_capacity(original, 256)
-        manager.ensure_capacity(longer, 384)
+        manager.ensure_capacity(longer, 512)
 
         history = {}
         for position in (64, 128, 192, 256):
@@ -251,11 +282,13 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         reused = manager.prefix_cache.find(longer, max_tokens=256)
         self.assertIs(reused.state_snapshot, history[256])
 
-        publish_snapshot(manager, longer, 384)
+        for position in (384, 448, 512):
+            publish_snapshot(manager, longer, position)
         self.assertEqual(len(manager.prefix_cache), 4)
-        self.assertEqual(manager.prefix_cache.find(longer, max_tokens=399).num_tokens, 384)
+        self.assertEqual(manager.prefix_cache.find(longer, max_tokens=527).num_tokens, 512)
+        self.assertEqual(manager.prefix_cache.find(original, max_tokens=319).num_tokens, 256)
         self.assertEqual(manager.prefix_cache.find(original, max_tokens=80).num_tokens, 64)
-        self.assertEqual(manager.block_refcounts[original.block_table[0]], 4)
+        self.assertEqual(manager.block_refcounts[original.block_table[0]], 3)
 
 
 if __name__ == "__main__":
