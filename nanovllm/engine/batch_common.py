@@ -25,6 +25,7 @@ class PreparedBatch:
     input_ids: torch.Tensor
     positions: torch.Tensor
     context: Context
+    layout: PrefillBatchLayout | DecodeBatchLayout
     image_copy_spans: tuple[ImageCopySpan, ...] = ()
 
 
@@ -299,6 +300,7 @@ def prepare_prefill(
                 "int64",
             ),
             context=context,
+            layout=layout,
             image_copy_spans=layout.image_copy_spans,
         )
 
@@ -325,4 +327,5 @@ def prepare_decode(
             input_ids=upload("decode_input_ids", layout.input_ids, "int64"),
             positions=upload("decode_positions", layout.rope_positions, "int64"),
             context=context,
+            layout=layout,
         )
