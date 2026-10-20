@@ -1,4 +1,5 @@
 from collections import deque
+from math import lcm
 
 from nanovllm.config import Config
 from nanovllm.engine.block_manager import BlockManager
@@ -127,15 +128,17 @@ class Scheduler:
                                     for pair in candidates
                                     if pair[0] - start >= interval and end - pair[0] >= interval
                                 ]
-                                if eligible:
-                                    end = eligible[-1][0]
+                                selected = prefix_cache.select_checkpoints(eligible, cached)
+                                if selected:
+                                    end = selected[-1][0]
                                     scheduled = end - start
-                                    candidates = eligible[-1:]
-                                else:
-                                    candidates = []
+                                candidates = selected
                         elif end < len(seq) and end % interval:
-                            last = end - end % interval
-                            if last > start and any(p == last for p, _ in alignment_candidates):
+                            step = lcm(interval, self.block_manager.block_size)
+                            last = end - end % step
+                            if last > start and (
+                                last in cached or any(p == last for p, _ in alignment_candidates)
+                            ):
                                 end = last
                                 scheduled = end - start
                             candidates = [pair for pair in candidates if pair[0] <= end]
