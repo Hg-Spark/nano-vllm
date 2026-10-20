@@ -174,6 +174,10 @@ class SchedulerCoreTest(unittest.TestCase):
             (scheduled.prefill_chunks[0].start, scheduled.prefill_chunks[0].end),
             (0, 384),
         )
+        scheduler.postprocess(scheduled.decode_chunks, [7], False)
+        scheduler.postprocess(scheduled.prefill_chunks, [None], True)
+        continued = scheduler.schedule().prefill_chunks[0]
+        self.assertEqual((continued.start, continued.end), (384, 512))
 
     def test_natural_64_checkpoint_after_small_prefill_chunks(self):
         scheduler = make_scheduler(
