@@ -109,24 +109,24 @@ check result count
 | `num_tokens` | 给出共同的历史边界 |
 | `GDNStateSnapshot` | 保存同一边界处所有 GDN 层的卷积和循环状态 |
 
-[BlockManager](../nanovllm/engine/block_manager.py)负责 KV block 的所有权与引用计数；[PrefixCache](../nanovllm/engine/prefix_cache.py)负责 prefix entry、最长匹配和 LRU 淘汰，Scheduler 直接通过 BlockManager.prefix_cache 访问前缀缓存；GDN snapshot 只是与完整 KV 前缀绑定的附加 metadata。[Scheduler](../nanovllm/engine/scheduler.py)负责 KV/GDN 资源预留、联合恢复及释放。联合前缀缓存默认关闭（`max_prefix_cache_entries=0`），用于显式验证/实验时再开启，避免默认承担 GDN 快照的 D2H 成本。
+[BlockManager](../nanovllm/engine/block_manager.py)负责 KV block 的所有权与引用计数；[PrefixCache](../nanovllm/engine/prefix_cache.py)负责 prefix entry、最长匹配和最短前缀优先淘汰，Scheduler 直接通过 BlockManager.prefix_cache 访问前缀缓存；GDN snapshot 只是与完整 KV 前缀绑定的附加 metadata。[Scheduler](../nanovllm/engine/scheduler.py)负责 KV/GDN 资源预留、联合恢复及释放。联合前缀缓存默认关闭（`max_prefix_cache_entries=0`），用于显式验证/实验时再开启，避免默认承担 GDN 快照的 D2H 成本。
 
 ### 什么时候能发布
 
 自动快照来自 prefill 成功执行后的边界，并且必须满足：
 
 - 前缀缓存已启用，请求有状态槽且本轮安排了 token；
-- 边界大于零且不超过原始 prompt 长度；
-- **本轮结束位置恰好是完整 KV 块边界**；
+- 边界位于原始 prompt 内部，且为 **64 Token 的整数倍**；
+- 边界同时是完整 KV 块边界；
 - 该精确 token 前缀尚未存在。
 
-例如块容量为 16、20-token Prompt 且启用 Prefix Cache：Scheduler 会先选取 `[0,16)`，在该边界捕获并发布 KV + GDN 快照，再执行 `[16,20)`。不启用缓存时保持 `[0,20)`；已有缓存条目、视觉 Token 边界及 Token Budget 仍受原有约束。只在可以发布新完整块且 `prefix_cache_eager_snapshot=True`（默认）时额外切分，避免每块都执行一次 Forward；设为 `False` 可禁止为快照额外切分，但自然到达完整块边界时仍会发布，长前缀的缓存命中机会可能减少。
+例如 KV 块容量为 16、130-token Prompt 且启用 Prefix Cache：64 和 128 是有效候选边界。默认 Eager 模式可在一次 `[0,130)` Prefill 中捕获两个 GDN Checkpoint；若从非 64 对齐的历史位置开始且跨越目标边界，则先在第一个待捕获边界截断。20-token Prompt 不产生 Checkpoint。设为 `prefix_cache_eager_snapshot=False` 后，不额外切分，只有本轮自然结束于有效 64 Token 边界时才发布。若 KV 块大于 64 Token，候选边界还需满足完整 KV 块约束。每条前缀链默认最多保留 4 个 Checkpoint（`max_gdn_checkpoints`），超过上限时优先淘汰最短前缀。
 
 整块边界还能避免共享一个将被继续写入的半满块；新请求续写时分配后续块，不会覆盖共享前缀。
 
 ### 怎样查找和恢复
 
-缓存用 `OrderedDict` 保存有上限的 LRU 条目。查找会扫描已有条目，比较精确 token 前缀，选择最长命中，并更新其最近使用顺序。
+缓存用字典保存有上限的精确前缀条目。查找会扫描已有条目并选择最长匹配；淘汰优先选择最短前缀，不维护最近使用顺序。
 
 ```text
 新接纳的请求
@@ -158,7 +158,7 @@ check result count
 
 ## GDN 快照的精度与空间代价
 
-[GDNStatePool](../nanovllm/layers/gdn_state.py)将活动状态复制到 CPU，并保持继续计算所需的原始精度：卷积状态保持活动缓冲区 dtype，循环矩阵保持 FP32。恢复时要求快照 dtype 与活动槽一致。
+[ModelRunner](../nanovllm/engine/model_runner.py)集中将各 GDN 层的状态传至 CPU，按 Checkpoint 拆分为独立存储，并保持继续计算所需的原始精度：卷积状态保持活动缓冲区 dtype，循环矩阵保持 FP32。恢复时要求快照 dtype 与活动槽一致。
 
 ```text
 运行中：卷积 = 模型 dtype，循环矩阵 = FP32
@@ -166,7 +166,7 @@ check result count
 恢复后：卷积 = 原 dtype，循环矩阵 = FP32
 ```
 
-这样不会因 snapshot 本身引入 BF16 量化误差。代价是循环状态主机占用约为 BF16 方案的两倍；条目上限约束的是缓存项数，不是精确字节数，缓存还会持有 GPU KV 引用并产生设备到主机的快照传输。单份快照大小由启动时的 GDN 状态池计算；如果配置的 CPU 快照预算连一份也容纳不了，调度器不会为发布前缀主动分片或捕获状态，发布时使用启动时估算的固定 `snapshot_nbytes` 计账并按 LRU 维护总预算，不重新逐条计算张量大小。
+这样不会因 snapshot 本身引入 BF16 量化误差。代价是循环状态主机占用约为 BF16 方案的两倍；条目上限约束的是缓存项数，不是精确字节数，缓存还会持有 GPU KV 引用并产生设备到主机的快照传输。单份快照大小由启动时的 GDN 状态池计算；如果配置的 CPU 快照预算连一份也容纳不了，调度器不会为发布前缀主动分片或捕获状态，发布时使用启动时估算的固定 `snapshot_nbytes` 计账并按最短前缀优先策略维护总预算，不重新逐条计算张量大小。
 
 ## 阅读代码时应检查的约束
 

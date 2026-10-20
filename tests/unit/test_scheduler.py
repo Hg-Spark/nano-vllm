@@ -84,17 +84,8 @@ class SchedulerCoreTest(unittest.TestCase):
             [],
         )
 
-    def test_power_of_two_checkpoint_grid(self):
-        cases = (
-            (20, ()),
-            (100, (64,)),
-            (320, (64, 128, 192, 256)),
-            (321, (128, 256)),
-            (400, (128, 256, 384)),
-            (1024, (256, 512, 768)),
-            (2049, (512, 1024, 1536, 2048)),
-        )
-        for prompt_len, positions in cases:
+    def test_fixed_64_token_checkpoint_grid(self):
+        for prompt_len in (20, 100, 320, 321, 400, 1024, 2049):
             with self.subTest(prompt_len=prompt_len):
                 scheduler = make_scheduler(
                     max_num_batched_tokens=4096,
@@ -107,7 +98,7 @@ class SchedulerCoreTest(unittest.TestCase):
                 chunks = scheduler.schedule().prefill_chunks
                 self.assertEqual(len(chunks), 1)
                 self.assertEqual((chunks[0].start, chunks[0].end), (0, prompt_len))
-                self.assertEqual(chunks[0].checkpoint_positions, positions)
+                self.assertEqual(chunks[0].checkpoint_positions, tuple(range(64, prompt_len, 64)))
 
     def test_disabled_prefix_publication_does_not_split_prefill(self):
         cases = (

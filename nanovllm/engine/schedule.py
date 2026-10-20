@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING
 
 from nanovllm.engine.sequence import Sequence
 
+GDN_CHECKPOINT_INTERVAL = 64
+
 if TYPE_CHECKING:
     from nanovllm.engine.state_manager import GDNStateSnapshot
 

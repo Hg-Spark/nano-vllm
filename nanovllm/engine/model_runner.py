@@ -308,7 +308,8 @@ class ModelRunner:
                 for index, (seq_id, position, _) in enumerate(captured):
                     offset = index * num_layers
                     layers = tuple(
-                        (conv_cpu[offset + i], recurrent_cpu[offset + i]) for i in range(num_layers)
+                        (conv_cpu[offset + i].clone(), recurrent_cpu[offset + i].clone())
+                        for i in range(num_layers)
                     )
                     collected.setdefault(seq_id, []).append(GDNStateSnapshot(position, layers))
                 prefix_snapshots = {

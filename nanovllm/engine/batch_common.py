@@ -234,8 +234,9 @@ def prepare_prefill(
 ) -> PreparedBatch:
     layout = build_prefill_batch_layout(chunks, block_size)
     upload = host_pool.to_cuda
-    intervals = [chunk.checkpoint_interval for chunk in chunks if chunk.checkpoint_interval]
-    checkpoint_interval = min(intervals) if intervals else 0
+    checkpoint_interval = next(
+        (chunk.checkpoint_interval for chunk in chunks if chunk.checkpoint_interval), 0
+    )
     checkpoint_offsets = [0]
     for chunk in chunks:
         count = chunk.num_tokens // checkpoint_interval if checkpoint_interval else 0

@@ -137,21 +137,21 @@ class SchedulerPrefixCacheTest(unittest.TestCase):
         first = scheduler.schedule().prefill_chunks
         self.assertEqual(
             (first[0].start, first[0].end, first[0].checkpoint_positions),
-            (1100, 2048, (2048,)),
+            (1100, 1152, (1152,)),
         )
         scheduler.postprocess(
             first,
             [None],
             True,
-            {seq.seq_id: (GDNStateSnapshot(2048, ()),)},
+            {seq.seq_id: (GDNStateSnapshot(1152, ()),)},
         )
 
         second = scheduler.schedule().prefill_chunks
         self.assertEqual(
             (second[0].start, second[0].end, second[0].checkpoint_positions),
-            (2048, 4097, (3072, 4096)),
+            (1152, 4097, tuple(range(1216, 4097, 64))),
         )
-        self.assertEqual(second[0].checkpoint_interval, 1024)
+        self.assertEqual(second[0].checkpoint_interval, 64)
 
 
 if __name__ == "__main__":

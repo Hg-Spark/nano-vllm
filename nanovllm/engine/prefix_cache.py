@@ -7,13 +7,6 @@ from nanovllm.engine.state_manager import GDNStateSnapshot
 PrefixCacheKey = tuple[int, ...]
 
 
-def gdn_checkpoint_interval(prompt_tokens: int, max_checkpoints: int = 4) -> int:
-    """Return a power-of-two multiple of 64 for the complete prompt length."""
-    blocks = (prompt_tokens - 1) // 64
-    required = max(1, (blocks + max_checkpoints - 1) // max_checkpoints)
-    return 64 << (required - 1).bit_length()
-
-
 @dataclass(frozen=True, slots=True)
 class PrefixEntry:
     block_ids: tuple[int, ...]
@@ -116,12 +109,14 @@ class PrefixCache:
             state_snapshot=state_snapshot,
         )
         self._snapshot_bytes += self.snapshot_nbytes
-        for leaf in tuple(self._entries):
-            if leaf not in self._entries:
+        # A new entry can only increase the depth of its descendant chains.
+        for leaf in self._entries:
+            if leaf[: len(key)] != key:
                 continue
-            chain = [key for key in self._entries if leaf[: len(key)] == key]
+            chain = [prefix for prefix in self._entries if leaf[: len(prefix)] == prefix]
             if len(chain) > self.max_checkpoints_per_path:
                 self._evict_key(min(chain, key=len))
+                break
         while len(self._entries) > self.max_entries or (
             self.max_snapshot_bytes is not None and self._snapshot_bytes > self.max_snapshot_bytes
         ):

@@ -2,8 +2,7 @@ from collections import deque
 
 from nanovllm.config import Config
 from nanovllm.engine.block_manager import BlockManager
-from nanovllm.engine.prefix_cache import gdn_checkpoint_interval
-from nanovllm.engine.schedule import ScheduledChunk, SchedulerOutput
+from nanovllm.engine.schedule import GDN_CHECKPOINT_INTERVAL, ScheduledChunk, SchedulerOutput
 from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.engine.state_manager import GDNStateSnapshot, StateSlotManager
 
@@ -13,7 +12,6 @@ class Scheduler:
         self.max_num_seqs = config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.prefix_cache_eager_snapshot = config.prefix_cache_eager_snapshot
-        self.max_gdn_checkpoints = config.max_gdn_checkpoints
         self.eos_token_ids = set(config.eos_token_ids)
         self.block_manager = BlockManager(
             num_kv_cache_blocks,
@@ -98,9 +96,7 @@ class Scheduler:
                 positions: tuple[int, ...] = ()
                 interval = 0
                 if prefix_cache.enabled:
-                    interval = gdn_checkpoint_interval(
-                        seq.num_prompt_tokens, self.max_gdn_checkpoints
-                    )
+                    interval = GDN_CHECKPOINT_INTERVAL
                     if self.prefix_cache_eager_snapshot:
                         first = (start // interval + 1) * interval
                         targets = [
