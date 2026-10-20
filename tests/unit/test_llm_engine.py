@@ -142,18 +142,16 @@ class LLMEngineStepTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "prompt token IDs"):
                 engine.add_request(invalid_ids, SamplingParams(max_tokens=1))
         self.assertFalse(engine.scheduler.waiting)
+        # SamplingParams already tests the invalid-value matrix; the engine
+        # only needs to prove it revalidates parameters modified after creation.
         params = SamplingParams(max_tokens=1)
-        for value in (True, 1.5, float("nan"), "2"):
-            with self.subTest(max_tokens=value):
-                params.max_tokens = value
-                with self.assertRaisesRegex(ValueError, "positive integer"):
-                    engine.add_request([1, 2], params)
-        for temperature in (-1.0, float("nan"), float("inf")):
-            with self.subTest(temperature=temperature):
-                params = SamplingParams()
-                params.temperature = temperature
-                with self.assertRaisesRegex(ValueError, "temperature"):
-                    engine.add_request([1, 2], params)
+        params.max_tokens = True
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            engine.add_request([1, 2], params)
+        params = SamplingParams()
+        params.temperature = float("nan")
+        with self.assertRaisesRegex(ValueError, "temperature"):
+            engine.add_request([1, 2], params)
         params = SamplingParams()
         params.ignore_eos = "true"
         with self.assertRaisesRegex(ValueError, "ignore_eos"):
