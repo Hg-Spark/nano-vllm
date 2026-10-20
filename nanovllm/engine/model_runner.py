@@ -7,6 +7,7 @@ from torch.profiler import record_function
 from nanovllm.config import Config
 from nanovllm.engine.batch_common import (
     PinnedMetadataPool,
+    PreparedBatch,
     build_decode_batch_layout,
     prepare_decode,
     prepare_prefill,
@@ -140,16 +141,20 @@ class ModelRunner:
             torch.cuda.synchronize()
         self._release_cuda_resources()
 
-    def _plan_attention(self, context: Context) -> Context:
+    def _plan_attention(self, batch: PreparedBatch) -> Context:
+        context = batch.context
+        layout = batch.layout
+        kv_indptr = torch.tensor(layout.paged_kv_indptr, dtype=torch.int32, device="cpu")
+        last_page_len = torch.tensor(layout.paged_kv_last_page_len, dtype=torch.int32, device="cpu")
         num_qo_heads, num_kv_heads, head_dim, common = self.attention_spec
         if context.is_prefill:
             if context.qo_indptr is None:
                 raise RuntimeError("FlashInfer paged prefill requires query offsets")
             self.prefill_wrapper.plan(
-                context.qo_indptr,
-                context.paged_kv_indptr,
+                torch.tensor(layout.q_offsets, dtype=torch.int32, device="cpu"),
+                kv_indptr,
                 context.paged_kv_indices,
-                context.paged_kv_last_page_len,
+                last_page_len,
                 num_qo_heads,
                 num_kv_heads,
                 head_dim,
@@ -160,9 +165,9 @@ class ModelRunner:
             wrapper = self.prefill_wrapper
         else:
             self.decode_wrapper.plan(
-                context.paged_kv_indptr,
+                kv_indptr,
                 context.paged_kv_indices,
-                context.paged_kv_last_page_len,
+                last_page_len,
                 num_qo_heads,
                 num_kv_heads,
                 head_dim,
@@ -246,7 +251,7 @@ class ModelRunner:
             if is_prefill
             else prepare_decode(chunks, self.block_size, self.metadata_pool)
         )
-        context = self._plan_attention(batch.context)
+        context = self._plan_attention(batch)
         profile_range = "nanovllm::prefill_model" if is_prefill else "nanovllm::decode_model"
 
         with use_context(context):
