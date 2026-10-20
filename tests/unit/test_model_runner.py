@@ -10,13 +10,57 @@ except ImportError:
     torch = None
 
 if torch is not None:
+    from nanovllm.engine.decode_graph import DecodeGraphBucket
     from nanovllm.engine.model_runner import ModelRunner
     from nanovllm.engine.sequence import Sequence
     from nanovllm.sampling_params import SamplingParams
+    from nanovllm.utils.context import Context
 
 
 @unittest.skipIf(torch is None, "requires torch")
 class ModelRunnerTest(unittest.TestCase):
+    def test_attention_plan_uses_cpu_metadata(self):
+        runner = object.__new__(ModelRunner)
+        runner.block_size = 16
+        runner.attention_spec = (8, 2, 128, {})
+        runner.prefill_wrapper = Mock()
+        runner.decode_wrapper = Mock()
+        indices = object()
+        layout = SimpleNamespace(
+            q_offsets=(0, 3),
+            paged_kv_indptr=(0, 1),
+            paged_kv_last_page_len=(3,),
+        )
+        for prefill, wrapper in (
+            (True, runner.prefill_wrapper),
+            (False, runner.decode_wrapper),
+        ):
+            context = Context(
+                is_prefill=prefill,
+                qo_indptr=object() if prefill else None,
+                paged_kv_indices=indices,
+            )
+            runner._plan_attention(SimpleNamespace(context=context, layout=layout))
+            args = wrapper.plan.call_args.args
+            cpu_args = (0, 1, 3) if prefill else (0, 2)
+            for index in cpu_args:
+                self.assertEqual(args[index].device.type, "cpu")
+            self.assertIs(args[2 if prefill else 1], indices)
+
+        bucket = object.__new__(DecodeGraphBucket)
+        bucket.block_size = 16
+        bucket.attention_spec = (8, 2, 128, {})
+        bucket.wrapper = Mock()
+        bucket.paged_kv_indices = torch.tensor([1], dtype=torch.int32)
+        bucket._host_buffers = {
+            "paged_kv_indptr": torch.tensor([0, 1], dtype=torch.int32),
+            "paged_kv_last_page_len": torch.tensor([3], dtype=torch.int32),
+        }
+        bucket._plan(1)
+        args = bucket.wrapper.plan.call_args.args
+        self.assertIs(args[0], bucket._host_buffers["paged_kv_indptr"])
+        self.assertIs(args[2], bucket._host_buffers["paged_kv_last_page_len"])
+
     def test_all_greedy_batch_avoids_temperature_upload(self):
         runner = object.__new__(ModelRunner)
         runner.sampler = Mock(side_effect=AssertionError("sampling is unnecessary"))
