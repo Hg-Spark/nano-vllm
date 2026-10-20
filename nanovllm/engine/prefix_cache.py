@@ -219,7 +219,12 @@ class PrefixCache:
                     if digest in path:
                         path.remove(digest)
                     return
-                victim = next((key for key in interior if key not in self._reused), interior[0])
+                victim = next((key for key in interior if key not in self._reused), None)
+                if victim is None:
+                    self._evict_hash(digest)
+                    if digest in path:
+                        path.remove(digest)
+                    return
                 self._evict_hash(victim)
 
         # Refresh the deepest checkpoint of an already cached path when the
@@ -231,7 +236,8 @@ class PrefixCache:
                 and self._snapshot_bytes > self.max_snapshot_bytes
             )
         ):
-            victim = path[-2]
+            interior = path[1:-1]
+            victim = next((key for key in interior if key not in self._reused), interior[-1])
             self._evict_hash(victim)
             path.remove(victim)
 
