@@ -269,7 +269,8 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
             max_checkpoints_per_path=4,
         )
         original = Sequence(list(range(320)))
-        longer = Sequence(list(range(528)))
+        # Both requests share 256 tokens, then diverge on separate branches.
+        longer = Sequence(list(range(256)) + list(range(1000, 1272)))
         manager.ensure_capacity(original, 256)
         manager.ensure_capacity(longer, 512)
 
