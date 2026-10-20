@@ -467,7 +467,7 @@ class FlashInferKVAppendGraphTest(unittest.TestCase):
         def layout(positions, pages, indptr, last_page_len):
             return DecodeBatchLayout(
                 input_ids=(1, 2),
-                rope_positions=((0, 0), (0, 0), (0, 0)),
+                rope_positions=((0, 0),),
                 kv_batch_indices=(0, 1),
                 kv_positions=positions,
                 state_slots=(0, 1),
