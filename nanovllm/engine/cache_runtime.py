@@ -66,16 +66,15 @@ def allocate_runtime_caches(
     checkpoint_workspace_bytes = 0
     snapshot_size = sum(module.state_cache_nbytes(1) for module in state_modules)
     if (
-        config.prefix_cache_eager_snapshot
-        and config.max_prefix_cache_entries > 0
+        config.max_prefix_cache_entries > 0
         and (
             config.max_prefix_cache_snapshot_bytes is None
             or config.max_prefix_cache_snapshot_bytes >= snapshot_size
         )
     ):
-        checkpoint_slots = (
-            config.max_num_batched_tokens // GDN_CHECKPOINT_INTERVAL + config.max_num_seqs
-        )
+        checkpoint_slots = config.max_num_seqs
+        if config.prefix_cache_eager_snapshot:
+            checkpoint_slots += config.max_num_batched_tokens // GDN_CHECKPOINT_INTERVAL
         checkpoint_workspace_bytes = 2 * checkpoint_slots * snapshot_size
     model_param = model.model.embed_tokens.weight
     cache_dtype = _resolve_kv_cache_dtype(
