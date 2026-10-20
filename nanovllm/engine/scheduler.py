@@ -110,7 +110,7 @@ class Scheduler:
                 interval = 0
                 if prefix_cache.enabled:
                     interval = GDN_CHECKPOINT_INTERVAL
-                    candidates = prefix_cache.candidates(seq, start, end)
+                    candidates, cached = prefix_cache.candidates(seq, start, end)
                     alignment_candidates = candidates
                     candidates = [pair for pair in candidates if pair[1] not in planned_prefixes]
                     if self.prefix_cache_eager_snapshot:
@@ -134,7 +134,7 @@ class Scheduler:
                                 end = last
                                 scheduled = end - start
                             candidates = [pair for pair in candidates if pair[0] <= end]
-                        candidates = prefix_cache.select_checkpoints(seq, candidates)
+                        candidates = prefix_cache.select_checkpoints(candidates, cached)
                     else:
                         candidates = [pair for pair in candidates if pair[0] == end]
                     positions = tuple(p for p, _ in candidates)

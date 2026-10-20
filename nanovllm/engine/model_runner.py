@@ -206,8 +206,11 @@ class ModelRunner:
         else:
             values = [seqs[idx].temperature for idx in sample_indices]
             temperatures = self.metadata_pool.to_cuda("sample_temperatures", values, "float32")
+            positions = [index for index, value in enumerate(values) if value > 1e-10]
             token_ids = self.sampler(
-                logits, temperatures, all_sampling=all(value > 1e-10 for value in values)
+                logits,
+                temperatures,
+                sample_positions=positions if len(positions) < len(values) else None,
             ).tolist()
         for idx, token_id in zip(sample_indices, token_ids):
             results[idx] = token_id

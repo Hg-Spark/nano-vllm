@@ -288,7 +288,13 @@ def prepare_prefill(
         )
         return PreparedBatch(
             input_ids=upload("prefill_input_ids", layout.input_ids, "int64"),
-            positions=upload("prefill_positions", layout.rope_positions, "int64"),
+            positions=upload(
+                "prefill_positions",
+                layout.rope_positions[:1]
+                if layout.rope_positions[0] == layout.rope_positions[1] == layout.rope_positions[2]
+                else layout.rope_positions,
+                "int64",
+            ),
             context=context,
             image_copy_spans=layout.image_copy_spans,
         )
@@ -314,6 +320,12 @@ def prepare_decode(
         )
         return PreparedBatch(
             input_ids=upload("decode_input_ids", layout.input_ids, "int64"),
-            positions=upload("decode_positions", layout.rope_positions, "int64"),
+            positions=upload(
+                "decode_positions",
+                layout.rope_positions[:1]
+                if layout.rope_positions[0] == layout.rope_positions[1] == layout.rope_positions[2]
+                else layout.rope_positions,
+                "int64",
+            ),
             context=context,
         )

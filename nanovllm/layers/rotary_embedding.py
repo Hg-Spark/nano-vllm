@@ -19,7 +19,7 @@ class RotaryEmbedding(nn.Module):
 
     def prepare(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # One row per packed token, shared by all attention layers in the batch.
-        if self.mrope_section is None:
+        if self.mrope_section is None or positions.size(0) == 1:
             frequencies = positions[0, :, None].float() * self.inv_freq[None, :]
         else:
             axes = positions[:, :, None].float() * self.inv_freq[None, None, :]

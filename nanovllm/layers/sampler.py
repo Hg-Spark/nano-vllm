@@ -8,16 +8,18 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         temperatures: torch.Tensor,
         *,
-        all_sampling: bool = False,
+        sample_positions: list[int] | None = None,
     ):
         logits = logits.float()
-        if all_sampling:
+        if sample_positions is None:
             return self._sample(logits, temperatures)
-        greedy = temperatures <= 1e-10
         result = logits.argmax(dim=-1)
-
-        sample_mask = ~greedy
-        result[sample_mask] = self._sample(logits[sample_mask], temperatures[sample_mask])
+        if sample_positions:
+            indices = torch.tensor(sample_positions, device=logits.device, dtype=torch.long)
+            selected = self._sample(
+                logits.index_select(0, indices), temperatures.index_select(0, indices)
+            )
+            result.index_copy_(0, indices, selected)
         return result
 
     @staticmethod

@@ -16,7 +16,7 @@ class SamplingTest(unittest.TestCase):
         logits = torch.tensor([[1.0, 4.0, 2.0], [5.0, 3.0, 6.0]])
         temperatures = torch.tensor([0.0, 1.0])
         with patch.object(Sampler, "_sample", return_value=torch.tensor([0])) as sample:
-            tokens = Sampler()(logits, temperatures)
+            tokens = Sampler()(logits, temperatures, sample_positions=[1])
         torch.testing.assert_close(tokens, torch.tensor([1, 0]))
         sample.assert_called_once()
         torch.testing.assert_close(sample.call_args.args[0], logits[1:].float())

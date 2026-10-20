@@ -96,7 +96,7 @@ class GatedDeltaNet(nn.Module):
 
     def _gates(self, b: torch.Tensor, a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         beta = b.sigmoid().float()
-        decay = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+        decay = -self.A_log.exp() * F.softplus(a.float() + self.dt_bias)
         return beta, decay
 
     def _split_qkv(
