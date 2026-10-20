@@ -159,6 +159,19 @@ class SchedulerCoreTest(unittest.TestCase):
         self.assertEqual(second.prefill_chunks[0].start, 448)
         self.assertIn(running, [chunk.seq for chunk in second.decode_chunks])
 
+        # KV pages larger than the GDN grid still align to full-page checkpoints.
+        scheduler = make_scheduler(
+            max_num_batched_tokens=512,
+            max_num_seqs=2,
+            num_blocks=20,
+            block_size=128,
+        )
+        make_running_sequence(scheduler, [1, 2])
+        candidate = Sequence(list(range(512)), SamplingParams(max_tokens=1))
+        scheduler.add(candidate)
+        scheduled = scheduler.schedule()
+        self.assertEqual((scheduled.prefill_chunks[0].start, scheduled.prefill_chunks[0].end), (0, 384))
+
     def test_natural_64_checkpoint_after_small_prefill_chunks(self):
         scheduler = make_scheduler(
             max_num_batched_tokens=16, max_num_seqs=1, num_blocks=16, block_size=16
