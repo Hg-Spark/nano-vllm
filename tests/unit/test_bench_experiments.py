@@ -87,6 +87,19 @@ class BenchmarkExperimentsTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "no measured replay"):
                 experiments.run(args)
 
+            calls = 0
+
+            def measured_benchmark(_engine, _sequences):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    bucket.replay_count += 1
+                return {}
+
+            with patch("scripts.bench.run_benchmark", side_effect=measured_benchmark):
+                result = experiments.run(args)
+            self.assertEqual(result["metrics"]["graph_replays"], 1)
+
     def test_capacity_search_uses_fixed_decode(self):
         with tempfile.TemporaryDirectory() as folder:
             args = SimpleNamespace(
@@ -154,6 +167,16 @@ class BenchmarkExperimentsTest(unittest.TestCase):
             )
             with redirect_stdout(StringIO()):
                 summary.main([folder, "--min-repeats", "1"])
+
+            # An incomplete metric or zero baseline must print n/a, not fail formatting.
+            base["result"]["metrics"]["output_throughput_tok_s"] = 0
+            base["result"]["metrics"].pop("tpot_seconds")
+            (Path(folder) / "eager.json").write_text(json.dumps(base), encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                summary.main([folder, "--min-repeats", "1"])
+            self.assertIn("Output throughput improvement: n/a", output.getvalue())
+            self.assertIn("tpot_seconds reduction: n/a", output.getvalue())
 
             graph["result"]["details"]["token_hash"] = "different"
             graph_file.write_text(json.dumps(graph), encoding="utf-8")
