@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -111,31 +112,52 @@ class PinnedMetadataPool:
 
     def __init__(self) -> None:
         self.buffers = {}
-        self.events = {}
+        self._transfer_done = None
+        self._pending = False
+        self._batching = False
+
+    def _wait_for_transfers(self) -> None:
+        if self._pending:
+            self._transfer_done.synchronize()
+            self._pending = False
+
+    @contextmanager
+    def batch(self):
+        """Protect all pinned metadata buffers using one event per batch."""
+        import torch
+
+        self._wait_for_transfers()
+        self._batching = True
+        try:
+            yield self.to_cuda
+        finally:
+            self._batching = False
+            if self._transfer_done is not None:
+                self._transfer_done.record(torch.cuda.current_stream())
+                self._pending = True
 
     def to_cuda(self, name: str, values, dtype: str) -> torch.Tensor:
         import torch
 
+        if not self._batching:
+            self._wait_for_transfers()
         source = torch.as_tensor(values, dtype=getattr(torch, dtype), device="cpu")
         required = source.numel()
-        event = self.events.get(name)
-        if event is not None:
-            event.synchronize()
-        else:
-            event = torch.cuda.Event()
-            self.events[name] = event
         host = self.buffers.get(name)
         if host is None or host.numel() < required:
             host = torch.empty(required, dtype=source.dtype, device="cpu", pin_memory=True)
             self.buffers[name] = host
         result = stage_pinned(host, source).cuda(non_blocking=True)
-        event.record(torch.cuda.current_stream())
+        if self._transfer_done is None:
+            self._transfer_done = torch.cuda.Event()
+        if not self._batching:
+            self._transfer_done.record(torch.cuda.current_stream())
+            self._pending = True
         return result
 
     def clear(self) -> None:
-        for event in self.events.values():
-            event.synchronize()
-        self.events.clear()
+        self._wait_for_transfers()
+        self._transfer_done = None
         self.buffers.clear()
 
 
@@ -233,41 +255,43 @@ def prepare_prefill(
     host_pool: PinnedMetadataPool,
 ) -> PreparedBatch:
     layout = build_prefill_batch_layout(chunks, block_size)
-    upload = host_pool.to_cuda
-    checkpoint_interval = next(
-        (chunk.checkpoint_interval for chunk in chunks if chunk.checkpoint_interval), 0
-    )
-    checkpoint_offsets = [0]
-    for chunk in chunks:
-        count = chunk.num_tokens // checkpoint_interval if checkpoint_interval else 0
-        checkpoint_offsets.append(checkpoint_offsets[-1] + count)
-    context = Context(
-        is_prefill=True,
-        prefill_checkpoint_interval=checkpoint_interval,
-        prefill_checkpoint_positions=tuple(chunk.checkpoint_positions for chunk in chunks),
-        prefill_checkpoint_offsets=tuple(checkpoint_offsets),
-        checkpoint_cu_starts=(
-            upload("gdn_checkpoint_offsets", checkpoint_offsets, "int64")
-            if checkpoint_interval
-            else None
-        ),
-        kv_batch_indices=upload("prefill_kv_batch_indices", layout.kv_batch_indices, "int32"),
-        kv_positions=upload("prefill_kv_positions", layout.kv_positions, "int32"),
-        qo_indptr=upload("prefill_q_offsets", layout.q_offsets, "int32"),
-        paged_kv_indptr=upload("prefill_kv_indptr", layout.paged_kv_indptr, "int32"),
-        paged_kv_indices=upload("prefill_kv_indices", layout.paged_kv_indices, "int32"),
-        paged_kv_last_page_len=upload("prefill_page_len", layout.paged_kv_last_page_len, "int32"),
-        state_slots=layout.state_slots,
-        state_slot_ids=upload("prefill_state_slots", layout.state_slots, "int32"),
-        state_prefix_lens=layout.state_prefix_lens,
-        prefill_q_offsets=layout.q_offsets,
-    )
-    return PreparedBatch(
-        input_ids=upload("prefill_input_ids", layout.input_ids, "int64"),
-        positions=upload("prefill_positions", layout.rope_positions, "int64"),
-        context=context,
-        image_copy_spans=layout.image_copy_spans,
-    )
+    with host_pool.batch() as upload:
+        checkpoint_interval = next(
+            (chunk.checkpoint_interval for chunk in chunks if chunk.checkpoint_interval), 0
+        )
+        checkpoint_offsets = [0]
+        for chunk in chunks:
+            count = chunk.num_tokens // checkpoint_interval if checkpoint_interval else 0
+            checkpoint_offsets.append(checkpoint_offsets[-1] + count)
+        context = Context(
+            is_prefill=True,
+            prefill_checkpoint_interval=checkpoint_interval,
+            prefill_checkpoint_positions=tuple(chunk.checkpoint_positions for chunk in chunks),
+            prefill_checkpoint_offsets=tuple(checkpoint_offsets),
+            checkpoint_cu_starts=(
+                upload("gdn_checkpoint_offsets", checkpoint_offsets, "int64")
+                if checkpoint_interval
+                else None
+            ),
+            kv_batch_indices=upload("prefill_kv_batch_indices", layout.kv_batch_indices, "int32"),
+            kv_positions=upload("prefill_kv_positions", layout.kv_positions, "int32"),
+            qo_indptr=upload("prefill_q_offsets", layout.q_offsets, "int32"),
+            paged_kv_indptr=upload("prefill_kv_indptr", layout.paged_kv_indptr, "int32"),
+            paged_kv_indices=upload("prefill_kv_indices", layout.paged_kv_indices, "int32"),
+            paged_kv_last_page_len=upload(
+                "prefill_page_len", layout.paged_kv_last_page_len, "int32"
+            ),
+            state_slots=layout.state_slots,
+            state_slot_ids=upload("prefill_state_slots", layout.state_slots, "int32"),
+            state_prefix_lens=layout.state_prefix_lens,
+            prefill_q_offsets=layout.q_offsets,
+        )
+        return PreparedBatch(
+            input_ids=upload("prefill_input_ids", layout.input_ids, "int64"),
+            positions=upload("prefill_positions", layout.rope_positions, "int64"),
+            context=context,
+            image_copy_spans=layout.image_copy_spans,
+        )
 
 
 def prepare_decode(
@@ -276,18 +300,20 @@ def prepare_decode(
     host_pool: PinnedMetadataPool,
 ) -> PreparedBatch:
     layout = build_decode_batch_layout(chunks, block_size)
-    upload = host_pool.to_cuda
-    context = Context(
-        is_prefill=False,
-        kv_batch_indices=upload("decode_kv_batch_indices", layout.kv_batch_indices, "int32"),
-        kv_positions=upload("decode_kv_positions", layout.kv_positions, "int32"),
-        paged_kv_indptr=upload("decode_kv_indptr", layout.paged_kv_indptr, "int32"),
-        paged_kv_indices=upload("decode_kv_indices", layout.paged_kv_indices, "int32"),
-        paged_kv_last_page_len=upload("decode_page_len", layout.paged_kv_last_page_len, "int32"),
-        state_slot_ids=upload("decode_state_slots", layout.state_slots, "int32"),
-    )
-    return PreparedBatch(
-        input_ids=upload("decode_input_ids", layout.input_ids, "int64"),
-        positions=upload("decode_positions", layout.rope_positions, "int64"),
-        context=context,
-    )
+    with host_pool.batch() as upload:
+        context = Context(
+            is_prefill=False,
+            kv_batch_indices=upload("decode_kv_batch_indices", layout.kv_batch_indices, "int32"),
+            kv_positions=upload("decode_kv_positions", layout.kv_positions, "int32"),
+            paged_kv_indptr=upload("decode_kv_indptr", layout.paged_kv_indptr, "int32"),
+            paged_kv_indices=upload("decode_kv_indices", layout.paged_kv_indices, "int32"),
+            paged_kv_last_page_len=upload(
+                "decode_page_len", layout.paged_kv_last_page_len, "int32"
+            ),
+            state_slot_ids=upload("decode_state_slots", layout.state_slots, "int32"),
+        )
+        return PreparedBatch(
+            input_ids=upload("decode_input_ids", layout.input_ids, "int64"),
+            positions=upload("decode_positions", layout.rope_positions, "int64"),
+            context=context,
+        )

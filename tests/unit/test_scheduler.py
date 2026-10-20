@@ -99,7 +99,7 @@ class SchedulerCoreTest(unittest.TestCase):
                 self.assertEqual(len(chunks), 1)
                 self.assertEqual((chunks[0].start, chunks[0].end), (0, prompt_len))
                 candidates = list(range(64, prompt_len + 1, 64))
-                expected = candidates[:3] + candidates[-1:] if len(candidates) > 4 else candidates
+                expected = candidates[:1] + candidates[-1:] if len(candidates) > 2 else candidates
                 self.assertEqual(chunks[0].checkpoint_positions, tuple(expected))
 
     def test_disabled_prefix_publication_does_not_split_prefill(self):

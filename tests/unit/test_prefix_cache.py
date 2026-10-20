@@ -112,6 +112,32 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
             128,
         )
 
+    def test_global_one_entry_captures_only_deepest_checkpoint(self):
+        manager = BlockManager(num_blocks=20, block_size=16, max_prefix_entries=1)
+        seq = Sequence(list(range(256)))
+        candidates = manager.prefix_cache.candidates(seq, 0, 256)
+        self.assertEqual(
+            [position for position, _ in manager.prefix_cache.select_checkpoints(seq, candidates)],
+            [256],
+        )
+
+    def test_backfilled_shorter_checkpoint_does_not_delete_longer(self):
+        manager = BlockManager(
+            num_blocks=16, block_size=16, max_prefix_entries=2, max_checkpoints_per_path=1
+        )
+        seq = Sequence(list(range(128)) + [9])
+        manager.ensure_capacity(seq, 128)
+        manager.prefix_cache.publish(seq, GDNStateSnapshot(128, ()), 128)
+        manager.prefix_cache.publish(seq, GDNStateSnapshot(64, ()), 64)
+        self.assertEqual(len(manager.prefix_cache), 1)
+        self.assertEqual(manager.prefix_cache.find(seq, 128).num_tokens, 128)
+
+    def test_batch_publish_rejects_misaligned_boundary(self):
+        manager = BlockManager(num_blocks=10, block_size=16, max_prefix_entries=2)
+        seq = Sequence(list(range(128)))
+        with self.assertRaisesRegex(RuntimeError, "invalid GDN snapshot"):
+            manager.prefix_cache.publish_many(seq, (GDNStateSnapshot(63, ()),))
+
     def test_zero_snapshot_budget_skips_publication(self):
         manager = BlockManager(
             num_blocks=4,

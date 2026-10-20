@@ -132,6 +132,17 @@ def parse_args(argv=None):
 
 def run(args):
     is_moe = validate_model_family(args.model)
+    from transformers import AutoConfig, AutoTokenizer
+
+    cfg = AutoConfig.from_pretrained(args.model)
+    text_cfg = getattr(cfg, "text_config", cfg)
+    effective_len = min(args.max_model_len, text_cfg.max_position_embeddings)
+    prompt_len = len(AutoTokenizer.from_pretrained(args.model, use_fast=True).encode(args.prompt))
+    if prompt_len + args.max_new_tokens > effective_len:
+        raise ValueError(
+            f"prompt ({prompt_len}) + max_new_tokens ({args.max_new_tokens}) "
+            f"exceeds effective max_model_len ({effective_len})"
+        )
     hf_backend = args.hf_experts_backend if is_moe else None
     hf_tokens, hf_logits = run_hf(
         args.model, args.prompt, args.max_new_tokens, args.dtype, hf_backend

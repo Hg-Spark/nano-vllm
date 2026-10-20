@@ -58,7 +58,6 @@ def load_model(model: nn.Module, path: str) -> None:
                     )
 
                 loaded_weight = f.get_tensor(checkpoint_name)
-                loaded_weight = model.transform_checkpoint_weight(weight_name, loaded_weight)
                 destination = param if shard is None else param[shard[1] : shard[2]]
                 if tuple(destination.shape) != tuple(loaded_weight.shape):
                     raise ValueError(
@@ -70,18 +69,25 @@ def load_model(model: nn.Module, path: str) -> None:
                 if shard is not None:
                     if weight_name in seen_shards or canonical_name in loaded:
                         raise ValueError(f"duplicate packed checkpoint shard: {weight_name}")
-                    destination.data.copy_(loaded_weight)
+                    model.copy_checkpoint_weight(weight_name, destination.data, loaded_weight)
                     seen_shards.add(weight_name)
                     if required_shards[canonical_name].issubset(seen_shards):
                         loaded.add(canonical_name)
                 elif canonical_name in loaded:
-                    if not torch.equal(param.detach(), loaded_weight.to(param)):
+                    if weight_name.endswith(".mlp.experts.gate_up_proj"):
+                        split = loaded_weight.size(1) // 2
+                        equal = torch.equal(
+                            param[:, :split], loaded_weight[:, split:].to(param)
+                        ) and torch.equal(param[:, split:], loaded_weight[:, :split].to(param))
+                    else:
+                        equal = torch.equal(param.detach(), loaded_weight.to(param))
+                    if not equal:
                         raise ValueError(
                             "conflicting checkpoint weights for shared parameter: "
                             f"{checkpoint_name!r} -> {canonical_name!r}"
                         )
                 else:
-                    param.data.copy_(loaded_weight)
+                    model.copy_checkpoint_weight(weight_name, param.data, loaded_weight)
                     loaded.add(canonical_name)
 
     missing = sorted(set(expected) - loaded)

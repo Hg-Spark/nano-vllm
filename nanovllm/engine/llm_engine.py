@@ -242,24 +242,25 @@ class LLMEngine:
             pbar = None
         outputs: dict[int, list[int]] = {}
         prefill_throughput = decode_throughput = 0.0
-        while not self.is_finished():
-            output, stats = self.step()
-            if stats.prefill_tokens and stats.prefill_seconds:
-                prefill_throughput = stats.prefill_tokens / stats.prefill_seconds
-            if stats.decode_tokens and stats.decode_seconds:
-                decode_throughput = stats.decode_tokens / stats.decode_seconds
-            if pbar is not None:
-                pbar.set_postfix(
-                    Prefill=f"{int(prefill_throughput)}tok/s",
-                    Decode=f"{int(decode_throughput)}tok/s",
-                )
-            for seq_id, token_ids in output:
-                outputs[seq_id] = token_ids
+        try:
+            while not self.is_finished():
+                output, stats = self.step()
+                if stats.prefill_tokens and stats.prefill_seconds:
+                    prefill_throughput = stats.prefill_tokens / stats.prefill_seconds
+                if stats.decode_tokens and stats.decode_seconds:
+                    decode_throughput = stats.decode_tokens / stats.decode_seconds
                 if pbar is not None:
-                    pbar.update(1)
-
-        if pbar is not None:
-            pbar.close()
+                    pbar.set_postfix(
+                        Prefill=f"{int(prefill_throughput)}tok/s",
+                        Decode=f"{int(decode_throughput)}tok/s",
+                    )
+                for seq_id, token_ids in output:
+                    outputs[seq_id] = token_ids
+                    if pbar is not None:
+                        pbar.update(1)
+        finally:
+            if pbar is not None:
+                pbar.close()
         return [
             {
                 "text": self.tokenizer.decode(outputs[seq_id], skip_special_tokens=True),

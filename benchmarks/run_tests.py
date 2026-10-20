@@ -145,6 +145,7 @@ def main(argv=None):
     output = Path(config["output_dir"]) / f"run_{stamp}"
     output.mkdir(parents=True)
     (output / "config.toml").write_bytes(args.config.read_bytes())
+    (output / "effective_stage.txt").write_text(config["stage"] + "\n", encoding="utf-8")
     print(f"Results: {output}", flush=True)
     return execute(config, output)
 

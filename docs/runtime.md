@@ -205,12 +205,13 @@ KV 的逻辑位置与 mRoPE 三轴位置分别维护：图片展开可能改变 
 
 ## 启动时怎样分配缓存
 
-[ModelRunner](../nanovllm/engine/model_runner.py)先加载模型并调用 `eval()`，由 [allocate_runtime_caches()](../nanovllm/engine/cache_runtime.py)根据 `gpu_memory_utilization` 和当下已使用显存计算静态 KV 预算，同时扣除 `max_num_seqs` 个 GDN 槽位及启用视觉模式时的视觉特征预留。不再运行模型来测量历史激活峰值，剩余显存作为 Prefill、MoE、Vision 临时激活和 Graph Capture 的余量；这不是 OOM 安全证明。
+[ModelRunner](../nanovllm/engine/model_runner.py)先加载模型并调用 `eval()`，由 [allocate_runtime_caches()](../nanovllm/engine/cache_runtime.py)根据 `gpu_memory_utilization` 和当下已使用显存计算静态 KV 预算，同时扣除 `max_num_seqs` 个 GDN 槽位、符合 Eager Snapshot 捕获条件时的 GDN Checkpoint 工作区，以及启用视觉模式时的视觉特征预留。不再运行模型来测量历史激活峰值，剩余显存作为 Prefill、MoE、Vision 临时激活和 Graph Capture 的余量；这不是 OOM 安全证明。
 
 ```text
 GPU_used = total_GPU_memory - CUDA_free_at_allocation
 KV_budget = floor(total_GPU_memory × gpu_memory_utilization)
-            - GPU_used - GDN_pool_bytes - visual_feature_reserve_bytes
+            - GPU_used - GDN_pool_bytes - checkpoint_workspace_bytes
+            - visual_feature_reserve_bytes
 KV_blocks = floor(KV_budget / KV_block_bytes)
 ```
 
@@ -301,7 +302,7 @@ generate(prompts, sampling_params) 或 add_request(prompt, params)
 
 ### 4. ModelRunner 每次 forward 具体准备什么
 
-[ScheduledChunk](../nanovllm/engine/schedule.py) 是不可变的 `(seq,start,end,capture_snapshot)`，把本轮计划与请求的长期状态分开。两条 Batch 路径有不同的张量契约：
+[ScheduledChunk](../nanovllm/engine/schedule.py) 是不可变的 `(seq,start,end,checkpoint_positions,checkpoint_interval)`，把本轮计划与请求的长期状态分开。两条 Batch 路径有不同的张量契约：
 
 | 数据 | Prefill：`prepare_prefill()` | Decode：`prepare_decode()` |
 | --- | --- | --- |

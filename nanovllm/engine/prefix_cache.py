@@ -84,18 +84,28 @@ class PrefixCache:
     def select_checkpoints(
         self, seq: Sequence, candidates: list[tuple[int, bytes]]
     ) -> list[tuple[int, bytes]]:
-        """Bound capture work before GPU forward, retaining short roots and the last boundary."""
+        """Capture only the earliest useful root and the deepest new boundary."""
         if not candidates:
             return []
-        tokens = seq.token_ids
-        existing = sum(
-            entry.num_tokens <= len(tokens) and tokens[: entry.num_tokens] == entry.tokens
-            for entry in self._entries.values()
-        )
-        available = max(1, self.max_checkpoints_per_path - existing)
-        if len(candidates) <= available:
-            return candidates
-        return candidates[: available - 1] + candidates[-1:]
+        limit = min(self.max_entries, self.max_checkpoints_per_path)
+        if self.max_snapshot_bytes is not None and self.snapshot_nbytes:
+            limit = min(limit, self.max_snapshot_bytes // self.snapshot_nbytes)
+        if limit <= 0:
+            return []
+        existing = [
+            (position, digest)
+            for position, digest in _block_hashes(
+                seq.token_ids[: seq.num_prompt_tokens], self.block_size
+            )
+            if digest in self._entries
+        ]
+        # With one checkpoint per path, an older, shorter insertion cannot
+        # replace a deeper, already cached state.
+        if limit == 1 and existing and existing[-1][0] > candidates[-1][0]:
+            return []
+        if limit == 1 or existing:
+            return candidates[-1:]
+        return candidates[:1] if len(candidates) == 1 else [candidates[0], candidates[-1]]
 
     def find(self, seq: Sequence, max_tokens: int) -> PrefixEntry | None:
         if not self.enabled or max_tokens <= 0:
@@ -122,6 +132,14 @@ class PrefixCache:
         if not snapshots or not self._can_capture():
             return
         by_position = {snapshot.num_tokens: snapshot for snapshot in snapshots}
+        if len(by_position) != len(snapshots) or any(
+            position <= 0
+            or position > seq.num_prompt_tokens
+            or position % self.block_size
+            or position % 64
+            for position in by_position
+        ):
+            raise RuntimeError("invalid GDN snapshot checkpoint boundary")
         for position, digest in _block_hashes(seq.token_ids[: max(by_position)], self.block_size):
             snapshot = by_position.get(position)
             if snapshot is not None:
@@ -144,21 +162,28 @@ class PrefixCache:
         self._entries[digest] = entry
         self._snapshot_bytes += self.snapshot_nbytes
 
-        # Only descendant paths gain a checkpoint. Keep their shortest common root.
-        for leaf_hash, leaf in tuple(self._entries.items()):
-            if leaf_hash not in self._entries or leaf.tokens[:position] != entry.tokens:
+        # Reconcile affected descendant paths using the existing hash index,
+        # never evicting the checkpoint just captured.
+        for leaf in tuple(self._entries.values()):
+            if leaf.num_tokens < position or leaf.tokens[:position] != entry.tokens:
                 continue
-            chain = sorted(
-                (
-                    (hash_key, candidate)
-                    for hash_key, candidate in self._entries.items()
-                    if leaf.tokens[: candidate.num_tokens] == candidate.tokens
-                ),
-                key=lambda item: item[1].num_tokens,
-            )
+            chain = [
+                key
+                for _, key in _block_hashes(leaf.tokens, self.block_size)
+                if key in self._entries
+            ]
             if len(chain) > self.max_checkpoints_per_path:
-                victim = chain[1] if self.max_checkpoints_per_path > 1 else chain[0]
-                self._evict_hash(victim[0])
+                old = [key for key in chain if key != digest]
+                # For a single-slot path, retain the deepest checkpoint.
+                if self.max_checkpoints_per_path == 1 and leaf.num_tokens > position:
+                    self._evict_hash(digest)
+                    return
+                victim = (
+                    old[0]
+                    if self.max_checkpoints_per_path == 1
+                    else (old[1] if len(old) > 1 else old[0])
+                )
+                self._evict_hash(victim)
 
         # New checkpoints must not be inserted and immediately evicted.
         while len(self._entries) > self.max_entries or (
@@ -166,7 +191,6 @@ class PrefixCache:
         ):
             victims = [(key, value) for key, value in self._entries.items() if key != digest]
             if not victims:
-                self._evict_hash(digest)
                 break
             self._evict_hash(max(victims, key=lambda item: item[1].num_tokens)[0])
 

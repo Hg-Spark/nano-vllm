@@ -104,7 +104,7 @@ def main():
         batch = (low + high) // 2
         passed = probe(args, batch)
         trials.append({"batch_size": batch, "passed": passed})
-        print(f"batch={batch}: {'pass' if passed else 'partial'}", flush=True)
+        print(f"batch={batch}: {'pass' if passed else 'capacity-exceeded'}", flush=True)
         if passed:
             low = batch
         else:

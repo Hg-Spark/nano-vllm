@@ -102,6 +102,10 @@ def run_nanovllm(
         request = build_nano_prompt(processor, image, prompt)
         tokens = run_nano_greedy(llm, request, max_new_tokens)
         torch.cuda.synchronize()
+        if use_decode_graph and not any(
+            bucket.replay_count > 0 for bucket in llm.model_runner.decode_graph_buckets.values()
+        ):
+            raise RuntimeError("decode graph was requested but no replay occurred")
         return tokens
     finally:
         llm.exit()

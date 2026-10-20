@@ -164,19 +164,17 @@ class Qwen3_5ForCausalLM(nn.Module):
         return shards
 
     @staticmethod
-    def transform_checkpoint_weight(
-        weight_name: str,
-        weight: torch.Tensor,
-    ) -> torch.Tensor:
-        if not weight_name.endswith(".mlp.experts.gate_up_proj"):
-            return weight
-        if weight.size(1) % 2:
-            raise ValueError("packed expert gate/up rows must be even")
-        split = weight.size(1) // 2
-        gate = weight[:, :split].clone()
-        weight[:, :split].copy_(weight[:, split:])
-        weight[:, split:].copy_(gate)
-        return weight
+    def copy_checkpoint_weight(
+        weight_name: str, destination: torch.Tensor, weight: torch.Tensor
+    ) -> None:
+        if weight_name.endswith(".mlp.experts.gate_up_proj"):
+            if weight.size(1) % 2:
+                raise ValueError("packed expert gate/up rows must be even")
+            split = weight.size(1) // 2
+            destination[:, :split].copy_(weight[:, split:])
+            destination[:, split:].copy_(weight[:, :split])
+        else:
+            destination.copy_(weight)
 
     def bind_moe_runtime(
         self,

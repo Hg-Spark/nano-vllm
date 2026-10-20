@@ -65,11 +65,12 @@ class Qwen3_5MoeTest(unittest.TestCase):
         original = weight.clone()
         split = self.config.moe_intermediate_size
 
-        transformed = Qwen3_5ForCausalLM.transform_checkpoint_weight(
-            "model.layers.0.mlp.experts.gate_up_proj",
-            weight,
+        transformed = torch.empty_like(weight)
+        Qwen3_5ForCausalLM.copy_checkpoint_weight(
+            "model.layers.0.mlp.experts.gate_up_proj", transformed, weight
         )
 
+        torch.testing.assert_close(weight, original)
         torch.testing.assert_close(
             transformed[:, :split],
             original[:, split:],

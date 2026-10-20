@@ -186,14 +186,18 @@ class Config:
             or any(t not in ("linear_attention", "full_attention") for t in layer_types)
         ):
             raise ValueError("Qwen3.5 layer_types must match num_hidden_layers")
+        if "linear_attention" not in layer_types or "full_attention" not in layer_types:
+            raise ValueError("Qwen3.5 requires both GDN and full-attention layers")
+        if self.text_config.hidden_act != "silu":
+            raise ValueError("Qwen3.5 requires silu activation")
         if "linear_attention" in layer_types:
             text = self.text_config
             if (
                 text.linear_num_key_heads <= 0
                 or text.linear_num_value_heads <= 0
                 or text.linear_num_value_heads % text.linear_num_key_heads
-                or text.linear_key_head_dim <= 0
-                or text.linear_value_head_dim <= 0
+                or text.linear_key_head_dim != 128
+                or text.linear_value_head_dim != 128
                 or text.linear_conv_kernel_dim < 2
             ):
                 raise ValueError("invalid Qwen3.5 GDN dimensions or convolution kernel")

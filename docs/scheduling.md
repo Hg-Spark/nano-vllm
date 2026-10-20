@@ -109,7 +109,7 @@ check result count
 | `num_tokens` | 给出共同的历史边界 |
 | `GDNStateSnapshot` | 保存同一边界处所有 GDN 层的卷积和循环状态 |
 
-[BlockManager](../nanovllm/engine/block_manager.py)负责 KV block 的所有权与引用计数；[PrefixCache](../nanovllm/engine/prefix_cache.py)分别用链式 Block Hash 与 GDN Checkpoint 索引查找共同恢复边界，并在全局容量受限时优先淘汰最长叶子，Scheduler 直接通过 BlockManager.prefix_cache 访问前缀缓存；GDN snapshot 只是与完整 KV 前缀绑定的附加 metadata。[Scheduler](../nanovllm/engine/scheduler.py)负责 KV/GDN 资源预留、联合恢复及释放。联合前缀缓存默认关闭（`max_prefix_cache_entries=0`），用于显式验证/实验时再开启，避免默认承担 GDN 快照的 D2H 成本。
+[BlockManager](../nanovllm/engine/block_manager.py)负责 KV block 的所有权与引用计数；[PrefixCache](../nanovllm/engine/prefix_cache.py)用单一链式 Block Hash 联合索引查找 KV/GDN 共同恢复边界，并在全局容量受限时保护新条目、优先淘汰最长的旧前缀，Scheduler 直接通过 BlockManager.prefix_cache 访问前缀缓存；GDN snapshot 只是与完整 KV 前缀绑定的附加 metadata。[Scheduler](../nanovllm/engine/scheduler.py)负责 KV/GDN 资源预留、联合恢复及释放。联合前缀缓存默认关闭（`max_prefix_cache_entries=0`），用于显式验证/实验时再开启，避免默认承担 GDN 快照的 D2H 成本。
 
 ### 什么时候能发布
 
@@ -120,13 +120,13 @@ check result count
 - 边界同时是完整 KV 块边界；
 - 该精确 token 前缀尚未存在。
 
-例如 KV 块容量为 16、130-token Prompt 且启用 Prefix Cache：64 和 128 是有效候选边界。默认 Eager 模式可在一次 `[0,130)` Prefill 中捕获两个 GDN Checkpoint；遇到非 64 对齐的 Chunk 起点时，不再强制截断到最近的 64 边界，而是在划分足够大的 Chunk 时使用尾部完整边界。20-token Prompt 不产生 Checkpoint。设为 `prefix_cache_eager_snapshot=False` 后，不额外切分，只有本轮自然结束于有效 64 Token 边界时才发布。若 KV 块大于 64 Token，候选边界还需满足完整 KV 块约束。每条前缀链默认最多保留 4 个 Checkpoint（`max_gdn_checkpoints`），Scheduler 提前筛选本轮捕获位置，若历史链超限则裁剪中间 Checkpoint 以保留公共根节点。
+例如 KV 块容量为 16、130-token Prompt 且启用 Prefix Cache：64 和 128 是有效候选边界。默认 Eager 模式可在一次 `[0,130)` Prefill 中捕获两个 GDN Checkpoint；遇到非 64 对齐的 Chunk 起点时，不再强制截断到最近的 64 边界，而是在划分足够大的 Chunk 时使用尾部完整边界。20-token Prompt 不产生 Checkpoint。设为 `prefix_cache_eager_snapshot=False` 后，不额外切分，只有本轮自然结束于有效 64 Token 边界时才发布。若 KV 块大于 64 Token，候选边界还需满足完整 KV 块约束。每条前缀链默认最多保留 4 个 Checkpoint（`max_gdn_checkpoints`），Scheduler 每轮优先选择首个有用边界与最深边界（并受全局条目/字节预算约束），路径超限时裁剪旧的中间 Checkpoint；不再为填满单路径配额而捕获大量很快会被淘汰的状态。
 
 整块边界还能避免共享一个将被继续写入的半满块；新请求续写时分配后续块，不会覆盖共享前缀。
 
 ### 怎样查找和恢复
 
-缓存以链式 SHA-256 Block Hash 直接定位联合 `PrefixEntry`：其中 KV Block 与 GDN Snapshot 已绑定到同一有效边界，无需维护冗余的两套索引。发布批次连续计算 Hash，查找不依赖缓存条目数。全局容量与 CPU 预算采用最长叶子优先、优先淘汰旧条目；当 GPU KV 页不足时优先淘汰确实能释放物理页的缓存条目。单路径检查点数量限制仍独立生效。
+缓存以链式 SHA-256 Block Hash 直接定位联合 `PrefixEntry`：其中 KV Block 与 GDN Snapshot 已绑定到同一有效边界，无需维护冗余的两套索引。发布批次连续计算 Hash，查找不依赖缓存条目数。全局容量与 CPU 预算优先淘汰最长旧前缀并保护本轮新插入的条目（可能涉及删除新条目的祖先，并非严格的树叶优先）；当 GPU KV 页不足时优先淘汰确实能释放物理页的缓存条目。单路径检查点数量限制仍独立生效。
 
 ```text
 新接纳的请求

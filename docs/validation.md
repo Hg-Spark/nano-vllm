@@ -81,7 +81,7 @@ python -m scripts.profile_decode "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE"
 | 合成单元测试 | `tests/unit/` | 调度、所有权、张量形状和局部数值行为符合预期 | 真实检查点一定正确 |
 | 真实权重贪心对齐 | `verify_qwen3_5.py` | 给定输入上的 HF 与本实现输出 token 一致 | 所有输入和配置都一致 |
 | 联合前缀恢复 | `verify_prefix_resume.py`（独立入口） | 本实现关闭联合前缀复用的基线路径与恢复联合前缀的路径生成一致 | 所有输入和设备执行路径都一致 |
-| 单图 + Decode Graph | `verify_qwen3_5_multimodal.py` | 视觉展开、mRoPE、Chunk 回填及可选 B=1 Graph 的贪心 token 与 HF 一致 | 多图/视频或所有 batch size 都正确，或实际执行了 Graph replay |
+| 单图 + Decode Graph | `verify_qwen3_5_multimodal.py` | 视觉展开、mRoPE、Chunk 回填、贪心 token 与 HF 一致，并在启用 Graph 时检查实际 Replay 计数 | 多图/视频或其他 batch size 都正确 |
 | 逐层诊断 | `diagnose_qwen3_5.py` | 定位所测输入中最早超过误差阈值的 decoder 层 | 自动确定层内哪一个算子有错 |
 | 基准与 profile | `bench_experiments.py`、`profile_decode.py` | 给定设备和负载下的性能、热点 | 模型数值正确、所有负载都同样快 |
 
@@ -136,7 +136,7 @@ python -m scripts.verify_qwen3_5_multimodal "$NANOVLLM_MODEL" /path/to/image.jpg
   --decode-graph
 ```
 
-脚本使用官方 `AutoProcessor` 与 HF image-text-to-text 模型生成参考 token；nano-vLLM 使用同一 chat template 和图片。`max_num_batched_tokens` 足够小时，展开后的视觉区间会跨多个 Prefill Chunk；`--decode-graph` 同时启用 B=1 固定地址 Decode Graph。应分别跑一次不带和带 `--decode-graph` 的命令。脚本报告请求配置与 token 对齐；实际 Graph replay 未独立确认，不能仅凭开关证明 Graph 路径已执行。
+脚本使用官方 `AutoProcessor` 与 HF image-text-to-text 模型生成参考 token；nano-vLLM 使用同一 chat template 和图片。`max_num_batched_tokens` 足够小时，展开后的视觉区间会跨多个 Prefill Chunk；`--decode-graph` 同时启用 B=1 固定地址 Decode Graph。应分别跑一次不带和带 `--decode-graph` 的命令。脚本报告请求配置与 token 对齐，并在启用 Graph 时要求至少发生一次实际 Replay；不能仅凭捕获成功或配置开关证明 Graph 路径已执行。
 
 ## 不一致时做逐层诊断
 
@@ -177,7 +177,7 @@ python -m scripts.verify_prefix_resume "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYP
 
 前缀探针按如下流程执行：
 
-1. 构造 A/B 两个输入，共享一个完整块的 token 前缀，后缀不同。
+1. 构造 A/B 两个输入，共享至少 64 Token 且对齐 KV 页的 token 前缀，后缀不同。
 2. 关闭前缀缓存运行 B，得到基线 token。
 3. 在启用缓存的实例中运行 A，使共享边界的 KV/GDN 状态发布到缓存。
 4. 运行 B，复用共享 KV 并恢复保持原始状态精度的 GDN 快照。
@@ -354,7 +354,7 @@ REPEATS=5 bash benchmarks/run.sh tail
 
 此处 ITL 的时间戳在 `step()` 返回、GPU 同步后获取，可能包含其他请求的 Prefill、主机调度与同步时间；它是离线合成负载下的观察间隔，不能直接称为线上服务 P99 ITL。对于正式在线 P99 仍需按实际请求到达时间戳测量，并报告分位数的请求/Token 样本量。
 
-通过已有 `benchmarks.bench_experiments --scenario throughput` 每次独立启动一个进程，可搜索固定输入输出长度下的完整 Decode 并发上界：
+通过已有 `benchmarks.bench_experiments --scenario decode` 每次独立启动一个进程，可搜索固定输入输出长度下的完整 Decode 并发上界：
 
 ```bash
 python -m benchmarks.capacity_search "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
@@ -362,7 +362,7 @@ python -m benchmarks.capacity_search "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE"
   --out-dir results/capacity_fp16
 ```
 
-脚本按 Batch Size 二分搜索，要求请求完成、实际最大 Decode Batch 达到目标。每次独立进程执行，保留原始 JSON 和日志。搜索假设固定负载下容量随 Batch Size 单调；`max_verified_batch` 只代表所设上界内的验证结果，达到 `--max-batch` 仍需提高搜索上限才能判断极值。OOM 或其他运行失败会保留日志并中止，不会被误判为容量边界。FP8 KV 对比还需独立完成数值校验。
+脚本按 Batch Size 二分搜索，要求请求完成、实际最大 Decode Batch 达到目标。每次独立进程执行，保留原始 JSON 和日志。搜索假设固定负载下容量随 Batch Size 单调；`max_verified_batch` 只代表所设上界内的验证结果，达到 `--max-batch` 仍需提高搜索上限才能判断极值。OOM 或已知 KV 容量不足会被视为本轮批次不通过并继续二分搜索；其他未知运行错误会保留日志并中止。FP8 KV 对比还需独立完成数值校验。
 
 固定 Decode 的 `cuda_event_step_window_seconds` 是 CUDA Event 包住 Engine Step 的时间窗口，**包含可能发生的 CPU 提交间隙**；不是纯 Kernel 耗时。测量 GPU Kernel 应使用 `scripts.profile_decode` 或 Nsight。完整生命周期 KV 额度可能降低低显存条件下的并发度，应同时对比吞吐与 TTFT。前缀 Snapshot 存储字节不等于 GPU→CPU 传输耗时。
 
@@ -396,7 +396,11 @@ python -m scripts.profile_decode "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
 | `nanovllm::kv_cache_store` | K/V 写入，不包含在上述 attention 读取范围内 |
 | `nanovllm::gdn_layer` | GDN 层计算 |
 | `nanovllm::moe_layer` | 路由、专家执行与合并 |
-| `nanovllm::gdn_snapshot_d2h` | 前缀快照传输，通常不出现在纯 decode 窗口 |
+| `nanovllm::prefill_model` | Prefill 模型前向范围（Snapshot D2H 当前不在命名区间内） |
+| `nanovllm::gdn_prefill_flashinfer` | FlashInfer GDN Prefill |
+| `nanovllm::gdn_decode_flashinfer` | FlashInfer GDN Decode |
+| `nanovllm::full_attention_prefill` | Full Attention Prefill |
+| `nanovllm::ffn_layer` | Dense FFN 层 |
 
 脚本用 CUDA event 测量窗口时间，并将命名范围的设备时间与之比较。`dominant_profiled_hotspot` 只是在 Full Attention、GDN、Dense FFN、MoE 四个范围里选最大者，不能理解为所有开销的完整分类。这些占比也不要求精确相加为 100%。命名范围全部为零时，最大热点为 null，hotspot_evidence 为 unavailable，不能据此选择优化方向。
 
