@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# uv installs dependencies into system Python; tests reuse that interpreter.
+# Run tests in an already provisioned Python environment.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then
@@ -8,11 +8,8 @@ if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then
   exit 0
 fi
 (( $# <= 2 )) || { echo 'Expected a config path and an optional stage.' >&2; exit 2; }
-command -v uv >/dev/null || { echo 'uv is required; install it before running this script.' >&2; exit 2; }
 cd "$ROOT"
-PYTHON="$(uv python find --system 3.12)"
-uv pip install --system --python "$PYTHON" --break-system-packages \
-  -r pyproject.toml --extra dev
+PYTHON="${PYTHON:-python3}"
 ARGS=(--config "${1:-configs/tests.toml}")
 if (( $# == 2 )); then ARGS+=(--stage "$2"); fi
 exec "$PYTHON" -m benchmarks.run_tests "${ARGS[@]}"
