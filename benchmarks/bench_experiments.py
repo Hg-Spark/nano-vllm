@@ -15,6 +15,7 @@ from pathlib import Path
 from random import Random
 from time import perf_counter
 
+from nanovllm.engine.schedule import GDN_CHECKPOINT_INTERVAL
 from scripts._common import (
     add_dtype_argument,
     add_model_argument,
@@ -92,8 +93,12 @@ def arguments():
     if a.scenario == "prefix":
         if a.target_requests < 1:
             p.error("target-requests must be positive")
-        if a.shared_prefix_len < 16 or a.shared_prefix_len % 16 or a.suffix_len < 1:
-            p.error("prefix must be a multiple of 16 and >=16; suffix-len >= 1")
+        if (
+            a.shared_prefix_len < GDN_CHECKPOINT_INTERVAL
+            or a.shared_prefix_len % GDN_CHECKPOINT_INTERVAL
+            or a.suffix_len < 1
+        ):
+            p.error("shared-prefix-len must be a positive multiple of 64; suffix-len >= 1")
         if a.shared_prefix_len + a.suffix_len + a.output_len > a.max_model_len:
             p.error("prefix-len + suffix-len + output-len exceeds max-model-len")
     if a.scenario == "decode":
