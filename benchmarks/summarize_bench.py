@@ -61,6 +61,10 @@ def format_percent(value):
     return f"{value:+.2f}%" if value is not None else "n/a"
 
 
+def format_ms(value, width=7):
+    return f"{value:{width}.2f}" if value is not None else f"{'n/a':>{width}}"
+
+
 def percent(base, changed, higher_better=True):
     if base is None or changed is None or base <= 0:
         return None
@@ -120,8 +124,8 @@ def main(argv=None):
             f"{p['scenario']:19} {p['max_num_seqs']:5} {p['budget']:6} "
             f"{','.join(map(str, v[0])) or '-':11} {v[1]:5} {v[2]:23} "
             f"{len(runs):4} {number(runs, 'output_throughput_tok_s'):6.1f} "
-            f"{milliseconds(runs, 'tpot_seconds'):8.2f} "
-            f"{ttft if ttft is not None else float('nan'):7.2f} "
+            f"{format_ms(milliseconds(runs, 'tpot_seconds'), 8)} "
+            f"{format_ms(ttft)} "
             f"{hit:5.2f} {replay:7.0f}"
         )
 
