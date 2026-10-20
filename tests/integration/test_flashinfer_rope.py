@@ -30,7 +30,15 @@ class RotaryEmbeddingTest(unittest.TestCase):
         self.assertEqual(k_out.shape, k.shape)
         torch.testing.assert_close(q_out[..., rotary_dim:], q[..., rotary_dim:])
         torch.testing.assert_close(k_out[..., rotary_dim:], k[..., rotary_dim:])
-        self.assertFalse(torch.equal(q_out[..., :rotary_dim], q[..., :rotary_dim]))
+        frequencies = positions[0, :, None].float() * rope.inv_freq[None, :]
+        cos, sin = frequencies.cos()[:, None, :], frequencies.sin()[:, None, :]
+        for actual, source in ((q_out, q), (k_out, k)):
+            left, right = source[..., :rotary_dim].float().chunk(2, dim=-1)
+            expected = torch.cat(
+                (left * cos - right * sin, right * cos + left * sin),
+                dim=-1,
+            ).to(source.dtype)
+            torch.testing.assert_close(actual[..., :rotary_dim], expected, atol=2e-2, rtol=2e-2)
 
     def test_flashinfer_mrope_matches_reference(self):
         rope = RotaryEmbedding(64, 64, 10000, mrope_section=(11, 11, 10)).cuda()
@@ -52,6 +60,17 @@ class RotaryEmbeddingTest(unittest.TestCase):
         actual_q, actual_k = rope.apply_cached(q, k, rope.head_size, rope.prepare(positions))
         torch.testing.assert_close(actual_q, reference(q), atol=2e-2, rtol=2e-2)
         torch.testing.assert_close(actual_k, reference(k), atol=2e-2, rtol=2e-2)
+
+        # Text-only Decode uses a single RoPE axis; repeated axes must be equivalent.
+        text_positions = torch.tensor([[1, 2, 3]] * 3, device="cuda")
+        one_q, one_k = rope.apply_cached(
+            q, k, rope.head_size, rope.prepare(text_positions[:1])
+        )
+        three_q, three_k = rope.apply_cached(
+            q, k, rope.head_size, rope.prepare(text_positions)
+        )
+        torch.testing.assert_close(one_q, three_q, atol=2e-2, rtol=2e-2)
+        torch.testing.assert_close(one_k, three_k, atol=2e-2, rtol=2e-2)
 
         changed_height = positions.clone()
         changed_height[1, 0] += 3
