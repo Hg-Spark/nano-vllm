@@ -2,6 +2,7 @@ import unittest
 
 from nanovllm.engine.schedule import ScheduledChunk
 from nanovllm.engine.sequence import Sequence, SequenceStatus
+from nanovllm.engine.state_manager import GDNStateSnapshot
 from nanovllm.sampling_params import SamplingParams
 from tests.scheduler_helpers import (
     make_running_sequence,
@@ -124,9 +125,25 @@ class SchedulerCoreTest(unittest.TestCase):
                 scheduler.add(Sequence(list(range(20))))
                 chunks = scheduler.schedule().prefill_chunks
                 self.assertEqual(
-                    [(c.start, c.end, c.capture_snapshot) for c in chunks],
+                    [(c.start, c.end, bool(c.checkpoint_positions)) for c in chunks],
                     [(0, 20, False)],
                 )
+
+    def test_non_eager_captures_natural_checkpoint_boundaries(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=64,
+            max_num_seqs=1,
+            num_blocks=16,
+            block_size=16,
+            prefix_cache_eager_snapshot=False,
+        )
+        seq = Sequence(list(range(130)), SamplingParams(max_tokens=1))
+        scheduler.add(seq)
+        first = scheduler.schedule().prefill_chunks
+        self.assertEqual((first[0].end, first[0].checkpoint_positions), (64, (64,)))
+        scheduler.postprocess(first, [None], True, {seq.seq_id: (GDNStateSnapshot(64, ()),)})
+        second = scheduler.schedule().prefill_chunks
+        self.assertEqual((second[0].end, second[0].checkpoint_positions), (128, (128,)))
 
     def test_chunked_prefill_allocates_only_scheduled_kv_range(self):
         scheduler = make_scheduler(
@@ -151,7 +168,7 @@ class SchedulerCoreTest(unittest.TestCase):
         second = scheduler.schedule()
         self.assertEqual(second.prefill_tokens, 3)
         self.assertEqual(len(seq.block_table), 2)
-        self.assertFalse(second.prefill_chunks[0].capture_snapshot)
+        self.assertFalse(second.prefill_chunks[0].checkpoint_positions)
 
         scheduler.postprocess(
             second.prefill_chunks,

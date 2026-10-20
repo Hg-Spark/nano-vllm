@@ -25,10 +25,6 @@ class ScheduledChunk:
     checkpoint_positions: tuple[int, ...] = ()
     checkpoint_interval: int = 0
 
-    @property
-    def capture_snapshot(self) -> bool:
-        return bool(self.checkpoint_positions)
-
     def __post_init__(self) -> None:
         if self.start < 0 or self.end <= self.start:
             raise ValueError("scheduled chunk must have a non-empty range")

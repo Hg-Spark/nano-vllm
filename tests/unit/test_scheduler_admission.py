@@ -36,7 +36,7 @@ class SchedulerAdmissionTest(unittest.TestCase):
                         GDNStateSnapshot(position, ()) for position in chunk.checkpoint_positions
                     )
                     for chunk in output.prefill_chunks
-                    if chunk.capture_snapshot
+                    if chunk.checkpoint_positions
                 }
                 sampled = [
                     2 if chunk.end == len(chunk.seq) else None for chunk in output.prefill_chunks

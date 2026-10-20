@@ -281,18 +281,37 @@ class ModelRunner:
         prefix_snapshots: dict[int, tuple[GDNStateSnapshot, ...]] = {}
         if is_prefill:
             state_modules = self.model.state_cache_modules()
-            for chunk in chunks:
-                if not chunk.checkpoint_positions:
-                    continue
-                seq = chunk.seq
-                checkpoints = []
-                for position in chunk.checkpoint_positions:
-                    layers = tuple(
-                        module.snapshot_state_slot(seq.state_slot)
+            captured = [
+                (
+                    chunk.seq.seq_id,
+                    position,
+                    tuple(
+                        module.slot(chunk.seq.state_slot)
                         if position == chunk.end
-                        else module.checkpoint_state_slot(seq.state_slot, position)
+                        else module.checkpoint_state_slot(chunk.seq.state_slot, position)
                         for module in state_modules
+                    ),
+                )
+                for chunk in chunks
+                for position in chunk.checkpoint_positions
+            ]
+            if captured:
+                # Collect all layers and boundaries in two contiguous D2H transfers.
+                conv_cpu = torch.stack(
+                    [conv for _, _, layers in captured for conv, _ in layers]
+                ).cpu()
+                recurrent_cpu = torch.stack(
+                    [state for _, _, layers in captured for _, state in layers]
+                ).cpu()
+                num_layers = len(state_modules)
+                collected: dict[int, list[GDNStateSnapshot]] = {}
+                for index, (seq_id, position, _) in enumerate(captured):
+                    offset = index * num_layers
+                    layers = tuple(
+                        (conv_cpu[offset + i], recurrent_cpu[offset + i]) for i in range(num_layers)
                     )
-                    checkpoints.append(GDNStateSnapshot(num_tokens=position, layers=layers))
-                prefix_snapshots[seq.seq_id] = tuple(checkpoints)
+                    collected.setdefault(seq_id, []).append(GDNStateSnapshot(position, layers))
+                prefix_snapshots = {
+                    seq_id: tuple(snapshots) for seq_id, snapshots in collected.items()
+                }
         return BatchResult(results, prefix_snapshots)

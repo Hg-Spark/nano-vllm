@@ -101,6 +101,10 @@ class FlashInferGDNTest(unittest.TestCase):
             (0, 5, 69),
             torch.tensor([0, 5, 69], device="cuda", dtype=torch.int32),
             torch.tensor([0, 1], device="cuda", dtype=torch.int32),
+            0,
+            ((), ()),
+            (0, 0, 0),
+            None,
         )
         actual_state = self.layer.state_pool.recurrent_state.clone()
         self.layer.state_pool.conv_state.copy_(conv_state)
@@ -115,12 +119,63 @@ class FlashInferGDNTest(unittest.TestCase):
                     (0, end - start),
                     torch.tensor([0, end - start], device="cuda", dtype=torch.int32),
                     torch.tensor([slot], device="cuda", dtype=torch.int32),
+                    0,
+                    ((),),
+                    (0, 0),
+                    None,
                 )
             )
         torch.testing.assert_close(actual, torch.cat(parts), atol=5e-2, rtol=5e-2)
         torch.testing.assert_close(
             actual_state, self.layer.state_pool.recurrent_state, atol=5e-2, rtol=5e-2
         )
+
+    @torch.no_grad()
+    def test_intermediate_checkpoints_match_chunked_resume(self):
+        inputs = torch.randn(192, 256, device="cuda", dtype=torch.bfloat16)
+        offsets = torch.tensor([0, 192], device="cuda", dtype=torch.int32)
+        slot_ids = torch.tensor([0], device="cuda", dtype=torch.int32)
+        checkpoints = torch.tensor([0, 3], device="cuda", dtype=torch.int64)
+        full_output = self.layer._forward_prefill_batch(
+            inputs,
+            (0,),
+            (0,),
+            (0, 192),
+            offsets,
+            slot_ids,
+            64,
+            ((64, 128),),
+            (0, 3),
+            checkpoints,
+        )
+        pool = self.layer.state_pool
+        checkpoint_states = {
+            position: tuple(state.clone() for state in pool.checkpoint_state_slot(0, position))
+            for position in (64, 128)
+        }
+        final_states = tuple(state.clone() for state in pool.slot(0))
+        pool.conv_state.zero_()
+        pool.recurrent_state.zero_()
+        outputs = []
+        for start in (0, 64, 128):
+            outputs.append(
+                self.layer._forward_prefill_batch(
+                    inputs[start : start + 64],
+                    (0,),
+                    (start,),
+                    (0, 64),
+                    torch.tensor([0, 64], device="cuda", dtype=torch.int32),
+                    slot_ids,
+                    0,
+                    ((),),
+                    (0, 0),
+                    None,
+                )
+            )
+            expected = checkpoint_states.get(start + 64, final_states)
+            for actual, reference in zip(pool.slot(0), expected):
+                torch.testing.assert_close(actual, reference, atol=5e-2, rtol=5e-2)
+        torch.testing.assert_close(full_output, torch.cat(outputs), atol=5e-2, rtol=5e-2)
 
     @torch.no_grad()
     def test_decode_tracks_slot_permutations_across_steps(self):

@@ -106,9 +106,11 @@ class MultimodalRequestTest(unittest.TestCase):
                 [99 if chunk.end == len(seq) else None],
                 True,
                 {
-                    seq.seq_id: GDNStateSnapshot(chunk.end, ())
+                    chunk.seq.seq_id: tuple(
+                        GDNStateSnapshot(position, ()) for position in chunk.checkpoint_positions
+                    )
                     for chunk in chunks
-                    if chunk.capture_snapshot
+                    if chunk.checkpoint_positions
                 },
             )
             if chunk.end >= state.image_end:

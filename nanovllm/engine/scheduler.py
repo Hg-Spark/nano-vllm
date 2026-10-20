@@ -97,24 +97,31 @@ class Scheduler:
                 end = start + scheduled
                 positions: tuple[int, ...] = ()
                 interval = 0
-                if self.prefix_cache_eager_snapshot and prefix_cache.enabled:
+                if prefix_cache.enabled:
                     interval = gdn_checkpoint_interval(
                         seq.num_prompt_tokens, self.max_gdn_checkpoints
                     )
-                    first = (start // interval + 1) * interval
-                    targets = [
-                        p
-                        for p in range(first, min(end, seq.num_prompt_tokens - 1) + 1, interval)
-                        if prefix_cache.should_publish(seq, p)
-                        and tuple(seq.token_ids[:p]) not in planned_prefixes
-                    ]
-                    if targets:
-                        if start % interval:
-                            end = targets[0]
-                            targets = targets[:1]
-                            scheduled = end - start
-                        positions = tuple(targets)
-                        planned_prefixes.update(tuple(seq.token_ids[:p]) for p in positions)
+                    if self.prefix_cache_eager_snapshot:
+                        first = (start // interval + 1) * interval
+                        targets = [
+                            p
+                            for p in range(first, min(end, seq.num_prompt_tokens - 1) + 1, interval)
+                            if prefix_cache.should_publish(seq, p)
+                            and tuple(seq.token_ids[:p]) not in planned_prefixes
+                        ]
+                        if targets:
+                            if start % interval:
+                                end = targets[0]
+                                targets = targets[:1]
+                                scheduled = end - start
+                            positions = tuple(targets)
+                    elif end % interval == 0 and prefix_cache.should_publish(seq, end):
+                        positions = (end,)
+
+                    positions = tuple(
+                        p for p in positions if tuple(seq.token_ids[:p]) not in planned_prefixes
+                    )
+                    planned_prefixes.update(tuple(seq.token_ids[:p]) for p in positions)
 
                 self.block_manager.ensure_capacity(seq, end)
                 prefill_chunks.append(

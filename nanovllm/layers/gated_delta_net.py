@@ -200,8 +200,8 @@ class GatedDeltaNet(nn.Module):
             )
         for slot_id, position, cp_index, conv in intermediate_conv:
             self.state_pool.prefill_checkpoints[(slot_id, position)] = (
-                conv.detach().to(device="cpu", copy=True),
-                state_checkpoints[cp_index].detach().to(device="cpu", copy=True),
+                conv.detach(),
+                state_checkpoints[cp_index].detach(),
             )
         return self._finalize_output(core, z)
 
