@@ -170,7 +170,10 @@ class SchedulerCoreTest(unittest.TestCase):
         candidate = Sequence(list(range(512)), SamplingParams(max_tokens=1))
         scheduler.add(candidate)
         scheduled = scheduler.schedule()
-        self.assertEqual((scheduled.prefill_chunks[0].start, scheduled.prefill_chunks[0].end), (0, 384))
+        self.assertEqual(
+            (scheduled.prefill_chunks[0].start, scheduled.prefill_chunks[0].end),
+            (0, 384),
+        )
 
     def test_natural_64_checkpoint_after_small_prefill_chunks(self):
         scheduler = make_scheduler(
