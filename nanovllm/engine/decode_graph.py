@@ -96,18 +96,16 @@ class DecodeGraphBucket:
         self._copy_layout("rope_positions", layout.rope_positions)
         self._copy_layout("kv_positions", layout.kv_positions)
         self._copy_layout("state_slot_ids", layout.state_slots)
-        self._copy_layout("paged_kv_indptr", layout.paged_kv_indptr)
+        stage_pinned(self._host_buffers["paged_kv_indptr"], layout.paged_kv_indptr)
         self._copy_layout("paged_kv_indices", layout.paged_kv_indices)
-        self._copy_layout("paged_kv_last_page_len", layout.paged_kv_last_page_len)
-        self._host_transfer_done.record(torch.cuda.current_stream())
-        self._has_pending_host_transfer = True
+        stage_pinned(self._host_buffers["paged_kv_last_page_len"], layout.paged_kv_last_page_len)
 
     def _plan(self, num_page_indices: int) -> None:
         num_qo_heads, num_kv_heads, head_dim, plan_kwargs = self.attention_spec
         self.wrapper.plan(
-            self.paged_kv_indptr,
+            self._host_buffers["paged_kv_indptr"],
             self.paged_kv_indices[:num_page_indices],
-            self.paged_kv_last_page_len,
+            self._host_buffers["paged_kv_last_page_len"],
             num_qo_heads,
             num_kv_heads,
             head_dim,
@@ -118,6 +116,9 @@ class DecodeGraphBucket:
     def prepare(self, layout: DecodeBatchLayout) -> None:
         self.load(layout)
         self._plan(len(layout.paged_kv_indices))
+        # Include FlashInfer's async H2D copies before reusing pinned buffers.
+        self._host_transfer_done.record(torch.cuda.current_stream())
+        self._has_pending_host_transfer = True
 
     def _seed_capture_inputs(self) -> None:
         seq_ids = torch.arange(self.batch_size, dtype=torch.int32, device="cuda")
@@ -130,6 +131,10 @@ class DecodeGraphBucket:
         )
         self.paged_kv_indices[: self.batch_size].copy_(seq_ids)
         self.paged_kv_last_page_len.fill_(1)
+        self._host_buffers["paged_kv_indptr"].copy_(
+            torch.arange(self.batch_size + 1, dtype=torch.int32)
+        )
+        self._host_buffers["paged_kv_last_page_len"].fill_(1)
 
     def _clear_capture_state(self, model, kv_cache: torch.Tensor) -> None:
         kv_cache[:, :, : self.batch_size].zero_()
