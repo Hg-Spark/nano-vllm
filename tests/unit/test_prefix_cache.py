@@ -47,6 +47,28 @@ def publish_prefix(
 
 
 class BlockManagerPrefixCacheTest(unittest.TestCase):
+    def test_complete_block_hashes_are_reused_after_append(self):
+        manager = BlockManager(num_blocks=12, block_size=16, max_prefix_entries=4)
+        seq = Sequence(list(range(130)))
+        cache = manager.prefix_cache
+
+        cache.find(seq, max_tokens=64)
+        first = tuple(seq.prefix_block_hashes)
+        self.assertEqual(len(first), 4)
+
+        cache.candidates(seq, 64, 128)
+        self.assertEqual(tuple(seq.prefix_block_hashes[:4]), first)
+        self.assertEqual(len(seq.prefix_block_hashes), 8)
+
+        for token in range(130, 144):
+            seq.append_token(token)
+        cache.find(seq, max_tokens=144)
+        self.assertEqual(len(seq.prefix_block_hashes), 9)
+        self.assertEqual(
+            seq.prefix_block_hashes,
+            [digest for _, digest in _block_hashes(seq.token_ids, 16, 144)],
+        )
+
     def test_longest_exact_prefix_and_max_tokens_cap(self):
         manager = BlockManager(num_blocks=8, block_size=4, max_prefix_entries=4)
         publish_prefix(manager, [1, 2, 3, 4, 9], 4)

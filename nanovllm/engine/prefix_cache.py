@@ -8,14 +8,25 @@ from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
 
 
-def _block_hashes(tokens: list[int] | tuple[int, ...], block_size: int, stop: int | None = None):
-    """Yield (prefix length, chained SHA-256) at each complete KV block."""
+def _block_hashes(
+    tokens: list[int] | tuple[int, ...],
+    block_size: int,
+    stop: int | None = None,
+    *,
+    cached_hashes: list[bytes] | None = None,
+):
+    """Yield chained SHA-256 hashes, computing only new complete blocks when cached."""
     parent = bytes(32)
     limit = min(stop, len(tokens)) if stop is not None else len(tokens)
-    for start in range(0, limit - block_size + 1, block_size):
-        parent = sha256(
-            parent + pack(f"<{block_size}I", *tokens[start : start + block_size])
-        ).digest()
+    for index, start in enumerate(range(0, limit - block_size + 1, block_size)):
+        if cached_hashes is not None and index < len(cached_hashes):
+            parent = cached_hashes[index]
+        else:
+            parent = sha256(
+                parent + pack(f"<{block_size}I", *tokens[start : start + block_size])
+            ).digest()
+            if cached_hashes is not None:
+                cached_hashes.append(parent)
         yield start + block_size, parent
 
 
@@ -81,7 +92,9 @@ class PrefixCache:
             end = min(end, seq.image_state.image_start)
         candidates = []
         cached = []
-        for position, digest in _block_hashes(seq.token_ids, self.block_size, end):
+        for position, digest in _block_hashes(
+            seq.token_ids, self.block_size, end, cached_hashes=seq.prefix_block_hashes
+        ):
             if position % GDN_CHECKPOINT_INTERVAL:
                 continue
             if digest in self._entries:
@@ -127,7 +140,9 @@ class PrefixCache:
         if seq.image_state is not None:
             max_tokens = min(max_tokens, seq.image_state.image_start)
         best_entry: PrefixEntry | None = None
-        for _, digest in _block_hashes(seq.token_ids, self.block_size, max_tokens):
+        for _, digest in _block_hashes(
+            seq.token_ids, self.block_size, max_tokens, cached_hashes=seq.prefix_block_hashes
+        ):
             entry = self._entries.get(digest)
             if entry is not None:
                 best_entry = entry
@@ -146,7 +161,9 @@ class PrefixCache:
         ):
             raise RuntimeError("invalid GDN snapshot checkpoint boundary")
         path = []
-        for position, digest in _block_hashes(seq.token_ids, self.block_size, max(by_position)):
+        for position, digest in _block_hashes(
+            seq.token_ids, self.block_size, max(by_position), cached_hashes=seq.prefix_block_hashes
+        ):
             if digest in self._entries:
                 path.append(digest)
             snapshot = by_position.get(position)

@@ -93,13 +93,13 @@ class FlashInferGDNTest(unittest.TestCase):
         recurrent_state = torch.randn_like(self.layer.state_pool.recurrent_state) * 0.01
         self.layer.state_pool.conv_state.copy_(conv_state)
         self.layer.state_pool.recurrent_state.copy_(recurrent_state)
-        inputs = torch.randn(69, 256, device="cuda", dtype=torch.bfloat16)
+        inputs = torch.randn(66, 256, device="cuda", dtype=torch.bfloat16)
         actual = self.layer._forward_prefill_batch(
             inputs,
             (0, 1),
             (4, 3),
-            (0, 5, 69),
-            torch.tensor([0, 5, 69], device="cuda", dtype=torch.int32),
+            (0, 2, 66),
+            torch.tensor([0, 2, 66], device="cuda", dtype=torch.int32),
             torch.tensor([0, 1], device="cuda", dtype=torch.int32),
             0,
             ((), ()),
@@ -107,10 +107,11 @@ class FlashInferGDNTest(unittest.TestCase):
             None,
         )
         actual_state = self.layer.state_pool.recurrent_state.clone()
+        actual_conv = self.layer.state_pool.conv_state.clone()
         self.layer.state_pool.conv_state.copy_(conv_state)
         self.layer.state_pool.recurrent_state.copy_(recurrent_state)
         parts = []
-        for slot, start, end, prefix_len in ((0, 0, 5, 4), (1, 5, 69, 3)):
+        for slot, start, end, prefix_len in ((0, 0, 2, 4), (1, 2, 66, 3)):
             parts.append(
                 self.layer._forward_prefill_batch(
                     inputs[start:end],
@@ -129,6 +130,7 @@ class FlashInferGDNTest(unittest.TestCase):
         torch.testing.assert_close(
             actual_state, self.layer.state_pool.recurrent_state, atol=5e-2, rtol=5e-2
         )
+        torch.testing.assert_close(actual_conv, self.layer.state_pool.conv_state)
 
     @torch.no_grad()
     def test_intermediate_checkpoints_match_chunked_resume(self):

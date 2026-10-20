@@ -31,6 +31,8 @@ class Sequence:
         self.seq_id = next(Sequence.counter)
         self.status = SequenceStatus.WAITING
         self.token_ids = list(token_ids)
+        # Chained hashes of immutable complete KV blocks, populated on demand.
+        self.prefix_block_hashes: list[bytes] = []
         self.num_prompt_tokens = len(token_ids)
         # Single logical boundary represented by both paged KV and GDN state.
         # Hybrid history is committed atomically after a successful model step.

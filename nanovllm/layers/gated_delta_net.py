@@ -84,6 +84,41 @@ class GatedDeltaNet(nn.Module):
         conv_state.copy_(final_states[0])
         return out.squeeze(0).transpose(0, 1)
 
+    def _causal_conv_batch(
+        self,
+        mixed_qkv: torch.Tensor,
+        conv_states: list[torch.Tensor],
+        q_offsets: tuple[int, ...],
+    ) -> torch.Tensor:
+        if len(conv_states) == 1:
+            return self._causal_conv(mixed_qkv, conv_states[0])
+
+        from causal_conv1d import causal_conv1d_fn
+
+        # An explicit history window before every chunk isolates the sequences
+        # while allowing one convolution over the packed, variable-length input.
+        history = self.conv_kernel_size - 1
+        segments = []
+        for index, state in enumerate(conv_states):
+            segments.extend((state.T, mixed_qkv[q_offsets[index] : q_offsets[index + 1]]))
+        packed = torch.cat(segments, dim=0)
+        output = causal_conv1d_fn(
+            packed.T.unsqueeze(0),
+            self.conv1d.weight.squeeze(1),
+            activation="silu",
+        ).squeeze(0).T
+
+        parts = []
+        cursor = 0
+        for index, state in enumerate(conv_states):
+            start = cursor + history
+            end = start + q_offsets[index + 1] - q_offsets[index]
+            parts.append(output[start:end])
+            # Convolution history stores raw projected inputs, not SiLU outputs.
+            state.copy_(packed[end - history : end].T)
+            cursor = end
+        return torch.cat(parts, dim=0)
+
     def _project_inputs(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -130,7 +165,7 @@ class GatedDeltaNet(nn.Module):
 
         mixed_qkv, z, b, a = self._project_inputs(hidden_states)
         beta, decay = self._gates(b, a)
-        conv_parts = []
+        conv_states = []
         intermediate_conv = []
         self.state_pool.prefill_checkpoints.clear()
         for seq_idx, slot_id in enumerate(state_slots):
@@ -159,9 +194,9 @@ class GatedDeltaNet(nn.Module):
                     ).contiguous()
                 cp_index = checkpoint_offsets[seq_idx] + local_end // checkpoint_interval - 1
                 intermediate_conv.append((slot_id, position, cp_index, conv))
-            conv_parts.append(self._causal_conv(mixed_qkv[q_start:q_end], conv_state))
+            conv_states.append(conv_state)
 
-        packed_conv = conv_parts[0] if len(conv_parts) == 1 else torch.cat(conv_parts, dim=0)
+        packed_conv = self._causal_conv_batch(mixed_qkv, conv_states, q_offsets)
         query, key, value = self._split_qkv(packed_conv)
         # FlashInfer 0.7.0's prefill path ignores its Q/K normalization flag.
         query = _l2norm(query.float()).to(query.dtype).contiguous()
