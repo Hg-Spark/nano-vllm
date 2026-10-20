@@ -46,7 +46,7 @@ class PrefillBatchLayout:
 @dataclass(frozen=True, slots=True)
 class DecodeBatchLayout:
     input_ids: tuple[int, ...]
-    rope_positions: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]
+    rope_positions: tuple[tuple[int, ...]]
     kv_batch_indices: tuple[int, ...]
     kv_positions: tuple[int, ...]
     state_slots: tuple[int, ...]
@@ -231,17 +231,18 @@ def build_decode_batch_layout(
     if not chunks:
         raise ValueError("decode batch must not be empty")
     seqs = [chunk.seq for chunk in chunks]
-    rope_positions: list[list[int]] = [[], [], []]
-    for seq in seqs:
-        _append_rope_positions(rope_positions, seq, len(seq) - 1, len(seq))
-
+    # Generated tokens are text: all three mRoPE axes share one position.
+    rope_positions = tuple(
+        len(seq) - 1 + (seq.image_state.rope_delta if seq.image_state is not None else 0)
+        for seq in seqs
+    )
     kv_lens = [len(seq) for seq in seqs]
     paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len = _paged_kv_metadata(
         seqs, kv_lens, block_size
     )
     return DecodeBatchLayout(
         input_ids=tuple(seq[-1] for seq in seqs),
-        rope_positions=tuple(tuple(axis) for axis in rope_positions),
+        rope_positions=(rope_positions,),
         kv_batch_indices=tuple(range(len(seqs))),
         kv_positions=tuple(len(seq) - 1 for seq in seqs),
         state_slots=tuple(seq.state_slot for seq in seqs),
@@ -322,12 +323,6 @@ def prepare_decode(
         )
         return PreparedBatch(
             input_ids=upload("decode_input_ids", layout.input_ids, "int64"),
-            positions=upload(
-                "decode_positions",
-                layout.rope_positions[:1]
-                if all(chunk.seq.image_state is None for chunk in chunks)
-                else layout.rope_positions,
-                "int64",
-            ),
+            positions=upload("decode_positions", layout.rope_positions, "int64"),
             context=context,
         )
