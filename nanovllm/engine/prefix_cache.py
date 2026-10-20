@@ -62,6 +62,7 @@ class PrefixCache:
         self._retain_blocks = retain_blocks
         self._release_blocks = release_blocks
         self._entries: dict[bytes, PrefixEntry] = {}
+        self._reused: set[bytes] = set()
 
     @property
     def enabled(self) -> bool:
@@ -103,36 +104,29 @@ class PrefixCache:
                 candidates.append((position, digest))
         return candidates, cached
 
+    def _path_limit(self) -> int:
+        limit = min(self.max_entries, self.max_checkpoints_per_path)
+        if self.max_snapshot_bytes is not None and self.snapshot_nbytes:
+            limit = min(limit, self.max_snapshot_bytes // self.snapshot_nbytes)
+        return limit
+
     def select_checkpoints(
         self, candidates: list[tuple[int, bytes]], cached: list[int]
     ) -> list[tuple[int, bytes]]:
-        """Select useful checkpoints before D2H; global capacity evicts longest leaves."""
+        """Choose useful checkpoints within the effective global/per-path capacity."""
         if not candidates:
             return []
-        capacity = self.max_entries
-        if self.max_snapshot_bytes is not None and self.snapshot_nbytes:
-            capacity = min(capacity, self.max_snapshot_bytes // self.snapshot_nbytes)
-        limit = min(capacity, self.max_checkpoints_per_path)
+        limit = self._path_limit()
         if limit <= 0:
             return []
-        if limit == 1 and cached and cached[-1] > candidates[-1][0]:
-            return []
-        selected = (
-            candidates[-1:]
-            if limit == 1 or cached
-            else (candidates[:1] if len(candidates) == 1 else [candidates[0], candidates[-1]])
-        )
-        # When global capacity is full, a new longest prefix would be evicted
-        # immediately, unless it can first replace an older path checkpoint.
-        if len(self._entries) >= capacity and len(cached) < self.max_checkpoints_per_path:
+        if len(self._entries) >= limit and not cached:
             longest = max(entry.num_tokens for entry in self._entries.values())
-            selected = [
-                candidate
-                for candidate in selected
-                if candidate[0] <= longest
-                or (capacity >= 2 and len(cached) >= 2 and candidate[0] > cached[-1])
-            ]
-        return selected
+            candidates = [candidate for candidate in candidates if candidate[0] <= longest]
+        if not candidates or (limit == 1 and cached and cached[-1] > candidates[-1][0]):
+            return []
+        if limit == 1 or cached:
+            return candidates[-1:]
+        return candidates[:1] if len(candidates) == 1 else [candidates[0], candidates[-1]]
 
     def find(self, seq: Sequence, max_tokens: int) -> PrefixEntry | None:
         if not self.enabled or max_tokens <= 0:
@@ -140,12 +134,15 @@ class PrefixCache:
         if seq.image_state is not None:
             max_tokens = min(max_tokens, seq.image_state.image_start)
         best_entry: PrefixEntry | None = None
+        best_digest = None
         for _, digest in _block_hashes(
             seq.token_ids, self.block_size, max_tokens, cached_hashes=seq.prefix_block_hashes
         ):
             entry = self._entries.get(digest)
             if entry is not None:
-                best_entry = entry
+                best_entry, best_digest = entry, digest
+        if best_digest is not None:
+            self._reused.add(best_digest)
         return best_entry
 
     def publish_many(self, seq: Sequence, snapshots: tuple[GDNStateSnapshot, ...]) -> None:
@@ -191,14 +188,19 @@ class PrefixCache:
         self._snapshot_bytes += self.snapshot_nbytes
 
         path.append(digest)
-        # Common ordered publication needs only the already hashed request path.
-        if len(path) > self.max_checkpoints_per_path:
-            old = [key for key in path if key != digest]
-            victim = old[0] if self.max_checkpoints_per_path == 1 else old[1]
+        limit = self._path_limit()
+        # Preserve checkpoints actually reused by other requests when growing a
+        # branch; prefer removing intermediate, unshared positions.
+        if len(path) > limit:
+            interior = path[1:-1]
+            victim = next((key for key in interior if key not in self._reused), None)
+            if victim is None:
+                victim = interior[0] if interior else path[0]
             self._evict_hash(victim)
             path.remove(victim)
 
-        # An out-of-order insertion can affect previously cached descendants.
+        # An out-of-order insertion may make existing descendants exceed their
+        # path quota. Reject the new intermediate node if no old interior can go.
         for leaf in tuple(self._entries.values()):
             if leaf.num_tokens <= position or leaf.tokens[:position] != entry.tokens:
                 continue
@@ -207,12 +209,14 @@ class PrefixCache:
                 for _, key in _block_hashes(leaf.tokens, self.block_size)
                 if key in self._entries
             ]
-            if len(chain) > self.max_checkpoints_per_path:
-                if self.max_checkpoints_per_path == 1:
+            if len(chain) > limit:
+                interior = [key for key in chain[1:-1] if key != digest]
+                if not interior:
                     self._evict_hash(digest)
-                    path.remove(digest)
+                    if digest in path:
+                        path.remove(digest)
                     return
-                victim = next(key for key in chain[1:] if key != digest)
+                victim = next((key for key in interior if key not in self._reused), interior[0])
                 self._evict_hash(victim)
 
         # Refresh the deepest checkpoint of an already cached path when the
@@ -238,6 +242,7 @@ class PrefixCache:
     def _evict_hash(self, digest: bytes) -> None:
         entry = self._entries.pop(digest)
         self._snapshot_bytes -= self.snapshot_nbytes
+        self._reused.discard(digest)
         self._release_blocks(entry.block_ids)
 
     def evict(self, block_refcounts: list[int] | None = None) -> bool:
