@@ -57,6 +57,10 @@ def milliseconds(values, field, percentile="mean"):
     return median(x[percentile] * 1000 for x in items)
 
 
+def format_percent(value):
+    return f"{value:+.2f}%" if value is not None else "n/a"
+
+
 def percent(base, changed, higher_better=True):
     if base is None or changed is None or base <= 0:
         return None
@@ -161,14 +165,14 @@ def main(argv=None):
             print(
                 f"\n{label}: {scenario}, batch={p['max_num_seqs']}, budget={p['budget']}, variant={v}"
             )
-            print(f"  Output throughput improvement: {throughput:+.2f}%")
+            print(f"  Output throughput improvement: {format_percent(throughput)}")
             if latency_key:
                 improvement = percent(
                     milliseconds(baseline, latency_key),
                     milliseconds(treatment, latency_key),
                     higher_better=False,
                 )
-                print(f"  {latency_key} reduction: {improvement:+.2f}%")
+                print(f"  {latency_key} reduction: {format_percent(improvement)}")
             if scenario == "interference":
 
                 def long_ttft(rs):
@@ -180,7 +184,7 @@ def main(argv=None):
                 b, t = long_ttft(baseline), long_ttft(treatment)
                 print(
                     f"  Late long request TTFT: {b:.2f} -> {t:.2f} ms "
-                    f"(reduction {percent(b, t, higher_better=False):+.2f}%)"
+                    f"(reduction {format_percent(percent(b, t, higher_better=False))})"
                 )
                 # Small synthetic samples: mean only; do not label tail latency as production P99.
                 tail_stats = []
@@ -213,7 +217,7 @@ def main(argv=None):
                     )
                 if min(samples for _, samples in tail_stats) >= args.min_itl_samples:
                     reduction = percent(tail_stats[0][0], tail_stats[1][0], higher_better=False)
-                    print(f"  Synthetic P99 ITL reduction: {reduction:+.2f}%")
+                    print(f"  Synthetic P99 ITL reduction: {format_percent(reduction)}")
                 else:
                     print(
                         "  Synthetic P99 ITL comparison withheld: fewer than "
