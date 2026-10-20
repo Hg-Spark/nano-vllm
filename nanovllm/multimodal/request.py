@@ -60,6 +60,11 @@ def _build_rope_positions(
             current_pos += length
         elif modality == 1:
             grid_t, grid_h, grid_w = grid
+            if (
+                grid_t <= 0 or grid_h <= 0 or grid_w <= 0
+                or grid_h % spatial_merge_size or grid_w % spatial_merge_size
+            ):
+                raise ValueError("image grid must have positive dimensions aligned to spatial merge")
             llm_t = grid_t
             llm_h = grid_h // spatial_merge_size
             llm_w = grid_w // spatial_merge_size
@@ -73,7 +78,7 @@ def _build_rope_positions(
                         positions[0].append(current_pos + t)
                         positions[1].append(current_pos + h)
                         positions[2].append(current_pos + w)
-            current_pos += max(grid_h, grid_w) // spatial_merge_size
+            current_pos += max(llm_t, llm_h, llm_w)
         else:
             raise ValueError(
                 f"ImagePrompt supports text and one image only; found modality type {modality}"
