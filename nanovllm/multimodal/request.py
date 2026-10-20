@@ -61,10 +61,15 @@ def _build_rope_positions(
         elif modality == 1:
             grid_t, grid_h, grid_w = grid
             if (
-                grid_t <= 0 or grid_h <= 0 or grid_w <= 0
-                or grid_h % spatial_merge_size or grid_w % spatial_merge_size
+                grid_t <= 0
+                or grid_h <= 0
+                or grid_w <= 0
+                or grid_h % spatial_merge_size
+                or grid_w % spatial_merge_size
             ):
-                raise ValueError("image grid must have positive dimensions aligned to spatial merge")
+                raise ValueError(
+                    "image grid must have positive dimensions aligned to spatial merge"
+                )
             llm_t = grid_t
             llm_h = grid_h // spatial_merge_size
             llm_w = grid_w // spatial_merge_size
