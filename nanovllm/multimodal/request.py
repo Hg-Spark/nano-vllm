@@ -75,7 +75,8 @@ def _build_rope_positions(
             llm_w = grid_w // spatial_merge_size
             if llm_t * llm_h * llm_w != length:
                 raise ValueError(
-                    f"image placeholder count ({length}) does not match merged grid ({llm_t * llm_h * llm_w})"
+                    f"image placeholder count ({length}) does not match "
+                    f"merged grid ({llm_t * llm_h * llm_w})"
                 )
             for t in range(llm_t):
                 for h in range(llm_h):
