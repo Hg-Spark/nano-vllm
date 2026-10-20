@@ -131,6 +131,8 @@ class LLMEngine:
         elif isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
         else:
+            if not isinstance(prompt, (list, tuple)):
+                raise TypeError("prompt must be text, ImagePrompt, or a list/tuple of token IDs")
             vocab_size = self.config.text_config.vocab_size
             if any(
                 isinstance(token_id, bool)
@@ -225,6 +227,8 @@ class LLMEngine:
             raise RuntimeError(
                 "generate requires an idle engine; use add_request()/step() for continuous batching"
             )
+        if not isinstance(prompts, list):
+            raise TypeError("generate expects a list of prompts")
         if not isinstance(sampling_params, list):
             sampling_params = [sampling_params] * len(prompts)
         if len(sampling_params) != len(prompts):
