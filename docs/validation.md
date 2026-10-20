@@ -4,7 +4,7 @@
 
 ## 顺序测试脚本
 
-本地模型和 CUDA 环境准备好后，使用 uv 和 [TOML 配置](../configs/tests.toml) 调用 [run_tests.sh](../benchmarks/run_tests.sh)。先修改配置中的 `model` 路径。在项目根目录使用已有的系统 Python 3.12：
+本地模型和 CUDA 环境准备好后，先准备 Python 环境，再通过 [TOML 配置](../configs/tests.toml) 调用 [run_tests.sh](../benchmarks/run_tests.sh)。先修改配置中的 `model` 路径。以下以系统 Python 3.12 为例：
 
 ```bash
 uv pip install --system --python 3.12 --break-system-packages -r pyproject.toml --extra dev
@@ -18,7 +18,7 @@ flashinfer download-kernels
 bash benchmarks/run_tests.sh configs/tests.toml
 ```
 
-启动器通过 `uv python find --system 3.12` 选择非虚拟环境的解释器，再用 `uv pip install --system` 安装依赖，所有阶段复用该解释器。[pyproject.toml](../pyproject.toml) 指定依赖和 Linux x86_64 的 PyTorch CUDA 13.0 包源；`--break-system-packages` 允许向 Ubuntu 管理的 Python 安装包。模型和匹配的 NVIDIA 驱动需预先准备。
+测试启动器复用已安装依赖的 `python3`（也可通过 `PYTHON` 指定解释器），不重复安装依赖。[pyproject.toml](../pyproject.toml) 指定依赖和 Linux x86_64 的 PyTorch CUDA 13.0 包源；`--break-system-packages` 仅用于上面的系统 Python 安装示例。模型和匹配的 NVIDIA 驱动需预先准备。
 
 普通依赖默认使用[清华 PyPI 镜像](https://mirrors.tuna.tsinghua.edu.cn/help/pypi/)，PyTorch 使用官方 CUDA 源。临时切换普通依赖的镜像可在运行前设置 `export UV_DEFAULT_INDEX=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple`。
 
