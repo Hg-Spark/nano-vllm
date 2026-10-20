@@ -183,11 +183,11 @@ python -m scripts.verify_prefix_resume "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYP
 4. 运行 B，复用共享 KV 并恢复保持原始状态精度的 GDN 快照。
 5. 比较 B 的两条生成序列，并输出快照边界和大小。
 
-第二阶段比较的是“不开启联合前缀复用”与“恢复联合前缀快照”，**两者都使用正常 Paged KV 和持久 GDN State Slot**，并不是已移除的无持久缓存 Warmup。此项不能单独当作 HF 对齐证明。若没有产生缓存条目，探针会失败。验证脚本已独立 Hook `restore_gdn_state()`，并检查 `restore_boundary` 与共享 KV Block，避免仅凭缓存条目推断真实命中。
+第二阶段比较的是“不开启联合前缀复用”与“恢复联合前缀快照”，**两者都使用正常 Paged KV 和持久 GDN State Slot**，并不是已移除的无持久缓存 Warmup。此项不能单独当作 HF 对齐证明。若没有产生缓存条目，探针会失败。该探针在 KV Block Size 为 16/32 时仍构造至少 64 Token 的共享前缀，以匹配固定 GDN Checkpoint 网格。验证脚本已独立 Hook `restore_gdn_state()`，并检查 `restore_boundary` 与共享 KV Block，避免仅凭缓存条目推断真实命中。
 
 将误差指标记录在独立的本地实验结果中。当前 snapshot 不再主动降精度；恢复验证仍用于发现状态边界、复制或其他执行路径问题。
 
-Prefix Cache 可同时限制条目数（`max_prefix_cache_entries`）和 CPU GDN 快照总大小（`max_prefix_cache_snapshot_bytes`，单位字节）。字节限制默认为 `None`，即不额外限制；设置为 `0` 时跳过快照发布。初始化时会估算一份 GDN 状态快照的大小；即使预算大于零，只要不足以容纳一份快照，也不执行为该缓存条目额外分片或 GPU→CPU 拷贝。发布时按固定 `snapshot_nbytes` 计账，不重新扫描快照张量；多个快照超过总预算时优先淘汰全局最长前缀叶子并释放关联 KV Block 引用。Benchmark 的 `snapshot_bytes_before_target` / `snapshot_bytes_after_target` 直接读取缓存统计。
+Prefix Cache 的 GPU KV 静态容量会预留 GDN 中间 Checkpoint 与批量捕获的保守工作区估算；真实峰值仍应以 GPU Profile 验证。Prefix Cache 可同时限制条目数（`max_prefix_cache_entries`）和 CPU GDN 快照总大小（`max_prefix_cache_snapshot_bytes`，单位字节）。字节限制默认为 `None`，即不额外限制；设置为 `0` 时跳过快照发布。初始化时会估算一份 GDN 状态快照的大小；即使预算大于零，只要不足以容纳一份快照，也不执行为该缓存条目额外分片或 GPU→CPU 拷贝。发布时按固定 `snapshot_nbytes` 计账，不重新扫描快照张量；多个快照超过总预算时优先淘汰全局最长前缀叶子并释放关联 KV Block 引用。Benchmark 的 `snapshot_bytes_before_target` / `snapshot_bytes_after_target` 直接读取缓存统计。
 
 ## 测量端到端性能
 

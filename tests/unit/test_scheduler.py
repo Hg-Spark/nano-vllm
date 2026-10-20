@@ -98,7 +98,9 @@ class SchedulerCoreTest(unittest.TestCase):
                 chunks = scheduler.schedule().prefill_chunks
                 self.assertEqual(len(chunks), 1)
                 self.assertEqual((chunks[0].start, chunks[0].end), (0, prompt_len))
-                self.assertEqual(chunks[0].checkpoint_positions, tuple(range(64, prompt_len, 64)))
+                candidates = list(range(64, prompt_len + 1, 64))
+                expected = candidates[:3] + candidates[-1:] if len(candidates) > 4 else candidates
+                self.assertEqual(chunks[0].checkpoint_positions, tuple(expected))
 
     def test_disabled_prefix_publication_does_not_split_prefill(self):
         cases = (
@@ -135,6 +137,44 @@ class SchedulerCoreTest(unittest.TestCase):
         scheduler.postprocess(first, [None], True, {seq.seq_id: (GDNStateSnapshot(64, ()),)})
         second = scheduler.schedule().prefill_chunks
         self.assertEqual((second[0].end, second[0].checkpoint_positions), (128, (128,)))
+
+    def test_decode_budget_does_not_create_one_token_prefill_chunks(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=512,
+            max_num_seqs=2,
+            num_blocks=256,
+            block_size=16,
+        )
+        running = make_running_sequence(scheduler, [1, 2])
+        seq = Sequence(list(range(2048)), SamplingParams(max_tokens=1))
+        scheduler.add(seq)
+
+        first = scheduler.schedule()
+        self.assertEqual(first.prefill_chunks[0].num_tokens, 448)
+        scheduler.postprocess(first.decode_chunks, [7], False)
+        scheduler.postprocess(first.prefill_chunks, [None], True)
+
+        second = scheduler.schedule()
+        self.assertEqual(second.prefill_chunks[0].num_tokens, 448)
+        self.assertEqual(second.prefill_chunks[0].start, 448)
+        self.assertIn(running, [chunk.seq for chunk in second.decode_chunks])
+
+    def test_natural_64_checkpoint_after_small_prefill_chunks(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=16, max_num_seqs=1, num_blocks=16, block_size=16
+        )
+        seq = Sequence(list(range(69)), SamplingParams(max_tokens=1))
+        scheduler.add(seq)
+        for end in (16, 32, 48, 64):
+            chunks = scheduler.schedule().prefill_chunks
+            self.assertEqual(chunks[0].end, end)
+            self.assertEqual(chunks[0].checkpoint_positions, (64,) if end == 64 else ())
+            snapshots = {seq.seq_id: (GDNStateSnapshot(64, ()),)} if end == 64 else None
+            scheduler.postprocess(chunks, [None], True, snapshots)
+
+        entry = scheduler.block_manager.prefix_cache.find(seq, max_tokens=64)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.num_tokens, 64)
 
     def test_chunked_prefill_allocates_only_scheduled_kv_range(self):
         scheduler = make_scheduler(

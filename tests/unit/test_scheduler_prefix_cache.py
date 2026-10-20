@@ -15,15 +15,15 @@ from tests.scheduler_helpers import (
 
 class SchedulerPrefixCacheTest(unittest.TestCase):
     def test_prefix_probe_reads_cache_metadata(self):
-        snapshot = GDNStateSnapshot(16, ())
-        entry = SimpleNamespace(num_tokens=16, block_ids=(0,), state_snapshot=snapshot)
+        snapshot = GDNStateSnapshot(64, ())
+        entry = SimpleNamespace(num_tokens=64, block_ids=(0,), state_snapshot=snapshot)
         cache = SimpleNamespace(snapshot_nbytes=32, find=lambda *_a, **_kw: entry)
 
         def fake_llm(_path, **options):
             def generate(prompts, _params, **_kwargs):
                 if options["max_prefix_cache_entries"] and prompts[0][-1] == 24:
                     cache_runtime.restore_gdn_state(
-                        None, SimpleNamespace(committed_tokens=16, block_table=[0]), snapshot
+                        None, SimpleNamespace(committed_tokens=64, block_table=[0]), snapshot
                     )
                 return [{"token_ids": [7, 7]}]
 
@@ -45,8 +45,8 @@ class SchedulerPrefixCacheTest(unittest.TestCase):
             patch("torch.cuda.empty_cache"),
         ):
             result = run_prefix_resume_probe("stub", 2, 128, 16, "float16")
-        self.assertEqual(result["prefix"], {"num_tokens": 16, "snapshot_bytes": 32})
-        self.assertEqual(result["restore_boundary"], 16)
+        self.assertEqual(result["prefix"], {"num_tokens": 64, "snapshot_bytes": 32})
+        self.assertEqual(result["restore_boundary"], 64)
 
     def test_joint_prefix_hit_restores_kv_and_gdn_boundary_together(self):
         scheduler = make_scheduler(
@@ -88,26 +88,15 @@ class SchedulerPrefixCacheTest(unittest.TestCase):
         scheduler.add(original)
 
         first = scheduler.schedule()
-        self.assertEqual(first.prefill_chunks[0].checkpoint_positions, (64,))
-        snapshot = GDNStateSnapshot(num_tokens=64, layers=())
-        scheduler.postprocess(first.prefill_chunks, [99], True, {original.seq_id: (snapshot,)})
-
-        extended = Sequence(tokens + [128], SamplingParams(max_tokens=1))
-        scheduler.add(extended)
-        second = scheduler.schedule()
-        self.assertEqual(extended.committed_tokens, 64)
-        self.assertIs(extended.pending_state_snapshot, snapshot)
-        self.assertEqual(second.prefill_chunks[0].checkpoint_positions, (128,))
-        full_snapshot = GDNStateSnapshot(num_tokens=128, layers=())
-        scheduler.postprocess(
-            second.prefill_chunks, [99], True, {extended.seq_id: (full_snapshot,)}
-        )
+        self.assertEqual(first.prefill_chunks[0].checkpoint_positions, (64, 128))
+        snapshots = (GDNStateSnapshot(64, ()), GDNStateSnapshot(128, ()))
+        scheduler.postprocess(first.prefill_chunks, [99], True, {original.seq_id: snapshots})
 
         newcomer = Sequence(tokens + [129], SamplingParams(max_tokens=1))
         scheduler.add(newcomer)
         scheduler.schedule()
         self.assertEqual(newcomer.committed_tokens, 128)
-        self.assertIs(newcomer.pending_state_snapshot, full_snapshot)
+        self.assertIs(newcomer.pending_state_snapshot, snapshots[1])
 
     def test_identical_prefills_capture_only_one_snapshot(self):
         scheduler = make_scheduler(
@@ -121,7 +110,7 @@ class SchedulerPrefixCacheTest(unittest.TestCase):
             [(65, (64,)), (65, ())],
         )
 
-    def test_unaligned_resume_cuts_once_then_uses_implicit_checkpoints(self):
+    def test_unaligned_prefill_does_not_force_tiny_checkpoint_chunk(self):
         scheduler = make_scheduler(
             max_num_batched_tokens=4096,
             max_num_seqs=1,
@@ -137,21 +126,9 @@ class SchedulerPrefixCacheTest(unittest.TestCase):
         first = scheduler.schedule().prefill_chunks
         self.assertEqual(
             (first[0].start, first[0].end, first[0].checkpoint_positions),
-            (1100, 1152, (1152,)),
+            (1100, 4097, ()),
         )
-        scheduler.postprocess(
-            first,
-            [None],
-            True,
-            {seq.seq_id: (GDNStateSnapshot(1152, ()),)},
-        )
-
-        second = scheduler.schedule().prefill_chunks
-        self.assertEqual(
-            (second[0].start, second[0].end, second[0].checkpoint_positions),
-            (1152, 4097, tuple(range(1216, 4097, 64))),
-        )
-        self.assertEqual(second[0].checkpoint_interval, 64)
+        self.assertEqual(first[0].checkpoint_interval, 0)
 
 
 if __name__ == "__main__":

@@ -6,29 +6,27 @@ from struct import pack
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
 
-PrefixCacheKey = tuple[int, ...]
-
 
 def _block_hashes(tokens: list[int] | tuple[int, ...], block_size: int):
-    """Chain full KV-block hashes so equal blocks require equal preceding context."""
+    """Yield (prefix length, chained SHA-256) at each complete KV block."""
     parent = bytes(32)
     for start in range(0, len(tokens) - block_size + 1, block_size):
         parent = sha256(
             parent + pack(f"<{block_size}I", *tokens[start : start + block_size])
         ).digest()
-        yield parent
+        yield start + block_size, parent
 
 
 @dataclass(frozen=True, slots=True)
 class PrefixEntry:
+    tokens: tuple[int, ...]
     block_ids: tuple[int, ...]
     num_tokens: int
     state_snapshot: GDNStateSnapshot
-    block_hashes: tuple[bytes, ...]
 
 
 class PrefixCache:
-    """Separate full-block hash and GDN checkpoint lookup; joint-state ownership."""
+    """Hashed joint KV/GDN checkpoints; globally evict longest cached leaves."""
 
     def __init__(
         self,
@@ -50,9 +48,7 @@ class PrefixCache:
         self._snapshot_bytes = 0
         self._retain_blocks = retain_blocks
         self._release_blocks = release_blocks
-        self._entries: dict[PrefixCacheKey, PrefixEntry] = {}
-        self._kv_hash_refs: dict[bytes, int] = {}
-        self._gdn_checkpoints: dict[bytes, PrefixEntry] = {}
+        self._entries: dict[bytes, PrefixEntry] = {}
 
     @property
     def enabled(self) -> bool:
@@ -65,9 +61,41 @@ class PrefixCache:
     def snapshot_bytes(self) -> int:
         return self._snapshot_bytes
 
-    @staticmethod
-    def _is_text_prefix(seq: Sequence, prefix_tokens: int) -> bool:
-        return seq.image_state is None or prefix_tokens <= seq.image_state.image_start
+    def _can_capture(self) -> bool:
+        return (
+            self.enabled
+            and self.max_snapshot_bytes != 0
+            and (self.max_snapshot_bytes is None or self.snapshot_nbytes <= self.max_snapshot_bytes)
+        )
+
+    def candidates(self, seq: Sequence, start: int, end: int) -> list[tuple[int, bytes]]:
+        """Find uncached 64-token checkpoints using one forward block-hash pass."""
+        if not self._can_capture():
+            return []
+        end = min(end, seq.num_prompt_tokens)
+        if seq.image_state is not None:
+            end = min(end, seq.image_state.image_start)
+        return [
+            (position, digest)
+            for position, digest in _block_hashes(seq.token_ids[:end], self.block_size)
+            if position > start and position % 64 == 0 and digest not in self._entries
+        ]
+
+    def select_checkpoints(
+        self, seq: Sequence, candidates: list[tuple[int, bytes]]
+    ) -> list[tuple[int, bytes]]:
+        """Bound capture work before GPU forward, retaining short roots and the last boundary."""
+        if not candidates:
+            return []
+        tokens = seq.token_ids
+        existing = sum(
+            entry.num_tokens <= len(tokens) and tokens[: entry.num_tokens] == entry.tokens
+            for entry in self._entries.values()
+        )
+        available = max(1, self.max_checkpoints_per_path - existing)
+        if len(candidates) <= available:
+            return candidates
+        return candidates[: available - 1] + candidates[-1:]
 
     def find(self, seq: Sequence, max_tokens: int) -> PrefixEntry | None:
         if not self.enabled or max_tokens <= 0:
@@ -75,89 +103,92 @@ class PrefixCache:
         if seq.image_state is not None:
             max_tokens = min(max_tokens, seq.image_state.image_start)
         best_entry: PrefixEntry | None = None
-        for block_hash in _block_hashes(seq.token_ids[:max_tokens], self.block_size):
-            if block_hash not in self._kv_hash_refs:
-                break
-            snapshot_entry = self._gdn_checkpoints.get(block_hash)
-            if snapshot_entry is not None:
-                best_entry = snapshot_entry
+        for _, digest in _block_hashes(seq.token_ids[:max_tokens], self.block_size):
+            entry = self._entries.get(digest)
+            if entry is not None:
+                best_entry = entry
         return best_entry
 
-    def should_publish(self, seq: Sequence, end: int) -> bool:
-        if not self.enabled or self.max_snapshot_bytes == 0 or end <= seq.committed_tokens:
-            return False
-        if self.max_snapshot_bytes is not None and self.snapshot_nbytes > self.max_snapshot_bytes:
-            return False
-        if end >= seq.num_prompt_tokens or end % self.block_size != 0:
-            return False
-        if not self._is_text_prefix(seq, end):
-            return False
-        return tuple(seq.token_ids[:end]) not in self._entries
+    def publish(self, seq: Sequence, state_snapshot: GDNStateSnapshot, prefix_tokens: int) -> None:
+        if not self._can_capture():
+            return
+        for position, digest in _block_hashes(seq.token_ids[:prefix_tokens], self.block_size):
+            if position == prefix_tokens:
+                self._publish(seq, state_snapshot, prefix_tokens, digest)
+                return
+        raise RuntimeError("GDN snapshot boundary is not a complete KV block")
 
-    def publish(
-        self,
-        seq: Sequence,
-        state_snapshot: GDNStateSnapshot,
-        prefix_tokens: int,
+    def publish_many(self, seq: Sequence, snapshots: tuple[GDNStateSnapshot, ...]) -> None:
+        if not snapshots or not self._can_capture():
+            return
+        by_position = {snapshot.num_tokens: snapshot for snapshot in snapshots}
+        for position, digest in _block_hashes(seq.token_ids[: max(by_position)], self.block_size):
+            snapshot = by_position.get(position)
+            if snapshot is not None:
+                self._publish(seq, snapshot, position, digest)
+
+    def _publish(
+        self, seq: Sequence, snapshot: GDNStateSnapshot, position: int, digest: bytes
     ) -> None:
-        if not self.enabled or self.max_snapshot_bytes == 0:
-            return
-        if state_snapshot.num_tokens != prefix_tokens:
+        if snapshot.num_tokens != position:
             raise RuntimeError("GDN snapshot boundary does not match KV prefix boundary")
-
-        key = tuple(seq.token_ids[:prefix_tokens])
-        if key in self._entries:
+        if digest in self._entries:
             return
-
-        if self.max_snapshot_bytes is not None and self.snapshot_nbytes > self.max_snapshot_bytes:
-            return
-
-        num_blocks = prefix_tokens // self.block_size
+        num_blocks = position // self.block_size
         block_ids = tuple(seq.block_table[:num_blocks])
         if len(block_ids) != num_blocks:
             raise RuntimeError("KV block table is shorter than cached prefix")
 
-        hashes = tuple(_block_hashes(key, self.block_size))
         self._retain_blocks(block_ids)
-        entry = PrefixEntry(
-            block_ids=block_ids,
-            num_tokens=prefix_tokens,
-            state_snapshot=state_snapshot,
-            block_hashes=hashes,
-        )
-        self._entries[key] = entry
-        for block_hash in hashes:
-            self._kv_hash_refs[block_hash] = self._kv_hash_refs.get(block_hash, 0) + 1
-        self._gdn_checkpoints[hashes[-1]] = entry
+        entry = PrefixEntry(tuple(seq.token_ids[:position]), block_ids, position, snapshot)
+        self._entries[digest] = entry
         self._snapshot_bytes += self.snapshot_nbytes
-        # A new entry can only increase the depth of its descendant chains.
-        for leaf in self._entries:
-            if leaf[: len(key)] != key:
+
+        # Only descendant paths gain a checkpoint. Keep their shortest common root.
+        for leaf_hash, leaf in tuple(self._entries.items()):
+            if leaf_hash not in self._entries or leaf.tokens[:position] != entry.tokens:
                 continue
-            chain = [prefix for prefix in self._entries if leaf[: len(prefix)] == prefix]
+            chain = sorted(
+                (
+                    (hash_key, candidate)
+                    for hash_key, candidate in self._entries.items()
+                    if leaf.tokens[: candidate.num_tokens] == candidate.tokens
+                ),
+                key=lambda item: item[1].num_tokens,
+            )
             if len(chain) > self.max_checkpoints_per_path:
-                self._evict_key(min(chain, key=len))
-                break
+                victim = chain[1] if self.max_checkpoints_per_path > 1 else chain[0]
+                self._evict_hash(victim[0])
+
+        # New checkpoints must not be inserted and immediately evicted.
         while len(self._entries) > self.max_entries or (
             self.max_snapshot_bytes is not None and self._snapshot_bytes > self.max_snapshot_bytes
         ):
-            self.evict()
+            victims = [(key, value) for key, value in self._entries.items() if key != digest]
+            if not victims:
+                self._evict_hash(digest)
+                break
+            self._evict_hash(max(victims, key=lambda item: item[1].num_tokens)[0])
 
-    def _evict_key(self, key: PrefixCacheKey) -> None:
-        entry = self._entries.pop(key)
-        del self._gdn_checkpoints[entry.block_hashes[-1]]
-        for block_hash in entry.block_hashes:
-            refs = self._kv_hash_refs[block_hash] - 1
-            if refs:
-                self._kv_hash_refs[block_hash] = refs
-            else:
-                del self._kv_hash_refs[block_hash]
+    def _evict_hash(self, digest: bytes) -> None:
+        entry = self._entries.pop(digest)
         self._snapshot_bytes -= self.snapshot_nbytes
         self._release_blocks(entry.block_ids)
 
-    def evict(self) -> bool:
+    def evict(self, block_refcounts: list[int] | None = None) -> bool:
         if not self._entries:
             return False
-        # The globally longest prefix is necessarily a leaf of cached paths.
-        self._evict_key(max(self._entries, key=len))
+        if block_refcounts is None:
+            victim = max(self._entries, key=lambda key: self._entries[key].num_tokens)
+        else:
+            victim = max(
+                self._entries,
+                key=lambda key: (
+                    sum(
+                        block_refcounts[block_id] == 1 for block_id in self._entries[key].block_ids
+                    ),
+                    self._entries[key].num_tokens,
+                ),
+            )
+        self._evict_hash(victim)
         return True

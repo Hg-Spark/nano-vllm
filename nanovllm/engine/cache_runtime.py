@@ -60,6 +60,16 @@ def allocate_runtime_caches(
     state_cache_bytes = sum(
         module.state_cache_nbytes(config.max_num_seqs) for module in state_modules
     )
+    # FlashInfer materializes 64-token GDN checkpoints and ModelRunner stacks
+    # selected layer states before D2H. Keep this temporary peak out of KV capacity.
+    checkpoint_workspace_bytes = 0
+    if getattr(config, "max_prefix_cache_entries", 0) > 0 and (
+        getattr(config, "max_prefix_cache_snapshot_bytes", None) != 0
+    ):
+        checkpoint_slots = config.max_num_batched_tokens // 64 + config.max_num_seqs
+        checkpoint_workspace_bytes = (
+            2 * checkpoint_slots * sum(module.state_cache_nbytes(1) for module in state_modules)
+        )
     model_param = model.model.embed_tokens.weight
     cache_dtype = _resolve_kv_cache_dtype(
         config,
@@ -82,15 +92,17 @@ def allocate_runtime_caches(
         total * config.gpu_memory_utilization
         - used
         - state_cache_bytes
+        - checkpoint_workspace_bytes
         - visual_feature_cache_bytes
     )
     num_kv_cache_blocks = cache_budget // block_bytes
     logger.info(
         "Static KV capacity: KV_budget=%d MiB, KV_blocks=%d, "
-        "GDN_reserve=%d MiB, vision_reserve=%d MiB",
+        "GDN_reserve=%d MiB, checkpoint_reserve=%d MiB, vision_reserve=%d MiB",
         cache_budget // (1024**2),
         num_kv_cache_blocks,
         state_cache_bytes // (1024**2),
+        checkpoint_workspace_bytes // (1024**2),
         visual_feature_cache_bytes // (1024**2),
     )
     if num_kv_cache_blocks <= 0:

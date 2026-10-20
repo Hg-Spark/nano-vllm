@@ -116,17 +116,17 @@ check result count
 自动快照来自 prefill 成功执行后的边界，并且必须满足：
 
 - 前缀缓存已启用，请求有状态槽且本轮安排了 token；
-- 边界位于原始 prompt 内部，且为 **64 Token 的整数倍**；
+- 边界不超过原始 prompt 长度，且为 **64 Token 的整数倍**；
 - 边界同时是完整 KV 块边界；
 - 该精确 token 前缀尚未存在。
 
-例如 KV 块容量为 16、130-token Prompt 且启用 Prefix Cache：64 和 128 是有效候选边界。默认 Eager 模式可在一次 `[0,130)` Prefill 中捕获两个 GDN Checkpoint；若从非 64 对齐的历史位置开始且跨越目标边界，则先在第一个待捕获边界截断。20-token Prompt 不产生 Checkpoint。设为 `prefix_cache_eager_snapshot=False` 后，不额外切分，只有本轮自然结束于有效 64 Token 边界时才发布。若 KV 块大于 64 Token，候选边界还需满足完整 KV 块约束。每条前缀链默认最多保留 4 个 Checkpoint（`max_gdn_checkpoints`），超过上限时优先淘汰最短前缀。
+例如 KV 块容量为 16、130-token Prompt 且启用 Prefix Cache：64 和 128 是有效候选边界。默认 Eager 模式可在一次 `[0,130)` Prefill 中捕获两个 GDN Checkpoint；遇到非 64 对齐的 Chunk 起点时，不再强制截断到最近的 64 边界，而是在划分足够大的 Chunk 时使用尾部完整边界。20-token Prompt 不产生 Checkpoint。设为 `prefix_cache_eager_snapshot=False` 后，不额外切分，只有本轮自然结束于有效 64 Token 边界时才发布。若 KV 块大于 64 Token，候选边界还需满足完整 KV 块约束。每条前缀链默认最多保留 4 个 Checkpoint（`max_gdn_checkpoints`），Scheduler 提前筛选本轮捕获位置，若历史链超限则裁剪中间 Checkpoint 以保留公共根节点。
 
 整块边界还能避免共享一个将被继续写入的半满块；新请求续写时分配后续块，不会覆盖共享前缀。
 
 ### 怎样查找和恢复
 
-缓存仍用精确 Token 元组区分前缀路径；查找时逐完整 KV Block 计算带父哈希的 SHA-256，先检查 Full KV 哈希索引，再检查同一边界的 GDN Snapshot 索引，取最深共同命中。不再线性扫描所有缓存条目。两类索引的物理所有权仍由联合 `PrefixEntry` 维护，不能仅凭 KV 命中跳过 GDN。全局容量与 CPU 预算触发最长叶子优先淘汰，单路径超过 `max_gdn_checkpoints` 时仍裁剪最短 Checkpoint，不使用 LRU。
+缓存以链式 SHA-256 Block Hash 直接定位联合 `PrefixEntry`：其中 KV Block 与 GDN Snapshot 已绑定到同一有效边界，无需维护冗余的两套索引。发布批次连续计算 Hash，查找不依赖缓存条目数。全局容量与 CPU 预算采用最长叶子优先、优先淘汰旧条目；当 GPU KV 页不足时优先淘汰确实能释放物理页的缓存条目。单路径检查点数量限制仍独立生效。
 
 ```text
 新接纳的请求
@@ -166,7 +166,7 @@ check result count
 恢复后：卷积 = 原 dtype，循环矩阵 = FP32
 ```
 
-这样不会因 snapshot 本身引入 BF16 量化误差。代价是循环状态主机占用约为 BF16 方案的两倍；条目上限约束的是缓存项数，不是精确字节数，缓存还会持有 GPU KV 引用并产生设备到主机的快照传输。单份快照大小由启动时的 GDN 状态池计算；如果配置的 CPU 快照预算连一份也容纳不了，调度器不会为发布前缀主动分片或捕获状态，发布时使用启动时估算的固定 `snapshot_nbytes` 计账并按全局最长叶子优先策略维护总预算，不重新逐条计算张量大小。
+这样不会因 snapshot 本身引入 BF16 量化误差。代价是循环状态主机占用约为 BF16 方案的两倍；条目上限约束的是缓存项数，不是精确字节数，缓存还会持有 GPU KV 引用并产生设备到主机的快照传输。启动时还会为启用缓存的 64 Token 中间状态及捕获栈估算 GPU 工作区预算，避免 KV 静态容量挤占全部临时空间；这仍不是完整的 CUDA 峰值 Profile。单份快照大小由启动时的 GDN 状态池计算；如果配置的 CPU 快照预算连一份也容纳不了，调度器不会为发布前缀主动分片或捕获状态，发布时使用启动时估算的固定 `snapshot_nbytes` 计账并按全局最长叶子优先策略维护总预算，不重新逐条计算张量大小。
 
 ## 阅读代码时应检查的约束
 

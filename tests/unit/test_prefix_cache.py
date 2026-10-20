@@ -87,6 +87,31 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         )
         self.assertIsNotNone(manager.prefix_cache.find(Sequence([300] * 64 + [302]), max_tokens=64))
 
+    def test_longer_new_prefix_survives_global_capacity_eviction(self):
+        manager = BlockManager(num_blocks=16, block_size=16, max_prefix_entries=1)
+        old, old_block = publish_prefix(manager, [1] * 64 + [9], 64)
+        publish_prefix(manager, list(range(128)) + [9], 128)
+
+        self.assertEqual(len(manager.prefix_cache), 1)
+        hit = manager.prefix_cache.find(Sequence(list(range(128)) + [10]), 128)
+        self.assertEqual(hit.num_tokens, 128)
+        self.assertEqual(manager.block_refcounts[old_block], 1)
+        manager.deallocate(old)
+
+    def test_single_checkpoint_path_replaces_older_boundary(self):
+        manager = BlockManager(
+            num_blocks=16, block_size=16, max_prefix_entries=2, max_checkpoints_per_path=1
+        )
+        seq, _ = publish_prefix(manager, list(range(128)) + [9], 64)
+        manager.ensure_capacity(seq, 128)
+        manager.prefix_cache.publish(seq, GDNStateSnapshot(128, ()), 128)
+
+        self.assertEqual(len(manager.prefix_cache), 1)
+        self.assertEqual(
+            manager.prefix_cache.find(Sequence(list(range(128)) + [10]), 128).num_tokens,
+            128,
+        )
+
     def test_zero_snapshot_budget_skips_publication(self):
         manager = BlockManager(
             num_blocks=4,
@@ -98,20 +123,22 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         self.assertEqual(len(manager.prefix_cache), 0)
         self.assertEqual(manager.prefix_cache.snapshot_bytes, 0)
         self.assertEqual(manager.block_refcounts[block_id], 1)
-        self.assertFalse(manager.prefix_cache.should_publish(seq, 4))
+        self.assertFalse(manager.prefix_cache.candidates(seq, 0, 4))
 
     def test_prefix_cache_only_caches_text_before_image_span(self):
-        manager = BlockManager(num_blocks=8, block_size=4, max_prefix_entries=4)
-        seq = Sequence(list(range(9)))
+        manager = BlockManager(num_blocks=32, block_size=4, max_prefix_entries=4)
+        seq = Sequence(list(range(81)))
         seq.state_slot = 0
-        seq.image_state = SimpleNamespace(image_start=4, image_end=8)
-        manager.ensure_capacity(seq, 8)
+        seq.image_state = SimpleNamespace(image_start=64, image_end=72)
+        manager.ensure_capacity(seq, 72)
 
-        self.assertTrue(manager.prefix_cache.should_publish(seq, 4))
-        self.assertFalse(manager.prefix_cache.should_publish(seq, 8))
+        self.assertEqual(
+            [position for position, _ in manager.prefix_cache.candidates(seq, 0, 80)],
+            [64],
+        )
         self.assertEqual(len(manager.prefix_cache), 0)
 
-    def test_shared_history_reuses_snapshots_and_evicts_shortest(self):
+    def test_shared_history_reuses_snapshots_and_preserves_shortest(self):
         manager = BlockManager(
             num_blocks=64,
             block_size=16,
@@ -138,7 +165,7 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         manager.prefix_cache.publish(longer, GDNStateSnapshot(384, ()), 384)
         self.assertEqual(len(manager.prefix_cache), 4)
         self.assertEqual(manager.prefix_cache.find(longer, max_tokens=399).num_tokens, 384)
-        self.assertEqual(manager.prefix_cache.find(original, max_tokens=80), None)
+        self.assertEqual(manager.prefix_cache.find(original, max_tokens=80).num_tokens, 64)
         self.assertEqual(manager.block_refcounts[original.block_table[0]], 4)
 
 

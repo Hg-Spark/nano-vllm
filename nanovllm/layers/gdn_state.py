@@ -74,22 +74,6 @@ class GDNStatePool(nn.Module):
             self.recurrent_state[slot_id],
         )
 
-    def snapshot_state_slot(
-        self,
-        slot_id: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        conv_state, recurrent_state = self.slot(slot_id)
-        return (
-            conv_state.detach().to(
-                device="cpu",
-                copy=True,
-            ),
-            recurrent_state.detach().to(
-                device="cpu",
-                copy=True,
-            ),
-        )
-
     def checkpoint_state_slot(
         self, slot_id: int, position: int
     ) -> tuple[torch.Tensor, torch.Tensor]:

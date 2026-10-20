@@ -2,6 +2,7 @@ from collections import deque
 
 from nanovllm.config import Config
 from nanovllm.engine.block_manager import BlockManager
+from nanovllm.engine.prefix_cache import PrefixEntry
 from nanovllm.engine.schedule import GDN_CHECKPOINT_INTERVAL, ScheduledChunk, SchedulerOutput
 from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.engine.state_manager import GDNStateSnapshot, StateSlotManager
@@ -32,10 +33,7 @@ class Scheduler:
     def add(self, seq: Sequence) -> None:
         self.waiting.append(seq)
 
-    def _try_restore_prefix(self, seq: Sequence) -> None:
-        if seq.committed_tokens != 0 or seq.block_table or seq.state_slot >= 0:
-            return
-        entry = self.block_manager.prefix_cache.find(seq, max_tokens=max(0, len(seq) - 1))
+    def _try_restore_prefix(self, seq: Sequence, entry: PrefixEntry | None) -> None:
         if entry is None:
             return
         self.block_manager.attach_shared_prefix(seq, entry.block_ids, entry.num_tokens)
@@ -51,12 +49,14 @@ class Scheduler:
         decode_count: int,
     ) -> None:
         num_batched_tokens = decode_count
-        reserved_blocks = sum(
-            self._request_blocks(seq) for queue in (self.running, self.prefilling) for seq in queue
+        active = (*self.running, *self.prefilling)
+        occupied_blocks = {block for seq in active for block in seq.block_table}
+        reserved_blocks = len(occupied_blocks) + sum(
+            self._request_blocks(seq) - len(seq.block_table) for seq in active
         )
         active_count = len(self.running) + len(self.prefilling)
         prefix_cache = self.block_manager.prefix_cache
-        planned_prefixes: set[tuple[int, ...]] = set()
+        planned_prefixes: set[bytes] = set()
 
         # Resume admitted prefills round-robin; admit waiting requests in FIFO order.
         for admitted, queue in ((True, self.prefilling), (False, self.waiting)):
@@ -69,16 +69,23 @@ class Scheduler:
 
                 seq = queue.popleft()
                 if not admitted:
-                    blocks = self._request_blocks(seq)
+                    entry = prefix_cache.find(seq, max_tokens=len(seq) - 1)
+                    shared_blocks = entry.block_ids if entry is not None else ()
+                    blocks = (
+                        self._request_blocks(seq)
+                        - len(shared_blocks)
+                        + len(set(shared_blocks) - occupied_blocks)
+                    )
                     if (
                         active_count >= self.max_num_seqs
                         or reserved_blocks + blocks > self.block_manager.num_blocks
                     ):
                         queue.appendleft(seq)
                         break
-                    self._try_restore_prefix(seq)
+                    self._try_restore_prefix(seq, entry)
                     self.state_manager.allocate(seq)
                     active_count += 1
+                    occupied_blocks.update(shared_blocks)
                     reserved_blocks += blocks
 
                 requested = min(
@@ -86,7 +93,9 @@ class Scheduler:
                     self.max_num_batched_tokens - num_batched_tokens,
                 )
                 scheduled = self.block_manager.max_schedulable_tokens(seq, requested)
-                while scheduled < requested and prefix_cache.evict():
+                while scheduled < requested and prefix_cache.evict(
+                    self.block_manager.block_refcounts
+                ):
                     scheduled = self.block_manager.max_schedulable_tokens(seq, requested)
                 if scheduled == 0:
                     raise RuntimeError("admitted prefill cannot acquire reserved KV blocks")
@@ -97,27 +106,37 @@ class Scheduler:
                 interval = 0
                 if prefix_cache.enabled:
                     interval = GDN_CHECKPOINT_INTERVAL
+                    candidates = [
+                        (p, digest)
+                        for p, digest in prefix_cache.candidates(seq, start, end)
+                        if digest not in planned_prefixes
+                    ]
                     if self.prefix_cache_eager_snapshot:
-                        first = (start // interval + 1) * interval
-                        targets = [
-                            p
-                            for p in range(first, min(end, seq.num_prompt_tokens - 1) + 1, interval)
-                            if prefix_cache.should_publish(seq, p)
-                            and tuple(seq.token_ids[:p]) not in planned_prefixes
-                        ]
-                        if targets:
-                            if start % interval:
-                                end = targets[0]
-                                targets = targets[:1]
+                        if start % interval:
+                            # Final state is available at natural chunk ends even when
+                            # intermediate states are not aligned to the 64-token grid.
+                            if end % interval == 0:
+                                candidates = [pair for pair in candidates if pair[0] == end]
+                            else:
+                                last = end - end % interval
+                                if end < len(seq) and last - start >= interval:
+                                    candidates = [pair for pair in candidates if pair[0] == last]
+                                    if candidates:
+                                        end = last
+                                        scheduled = end - start
+                                else:
+                                    candidates = []
+                        elif end < len(seq) and end % interval:
+                            last = end - end % interval
+                            if last > start and any(p == last for p, _ in candidates):
+                                end = last
                                 scheduled = end - start
-                            positions = tuple(targets)
-                    elif end % interval == 0 and prefix_cache.should_publish(seq, end):
-                        positions = (end,)
-
-                    positions = tuple(
-                        p for p in positions if tuple(seq.token_ids[:p]) not in planned_prefixes
-                    )
-                    planned_prefixes.update(tuple(seq.token_ids[:p]) for p in positions)
+                            candidates = [pair for pair in candidates if pair[0] <= end]
+                        candidates = prefix_cache.select_checkpoints(seq, candidates)
+                    else:
+                        candidates = [pair for pair in candidates if pair[0] == end]
+                    positions = tuple(p for p, _ in candidates)
+                    planned_prefixes.update(digest for _, digest in candidates)
 
                 self.block_manager.ensure_capacity(seq, end)
                 prefill_chunks.append(
@@ -163,7 +182,7 @@ class Scheduler:
             if seq.committed_tokens != len(seq) - 1:
                 raise RuntimeError(f"sequence {seq.seq_id} decode prefix mismatch")
             while self.block_manager.max_schedulable_tokens(seq, 1) == 0:
-                if not prefix_cache.evict():
+                if not prefix_cache.evict(self.block_manager.block_refcounts):
                     raise RuntimeError("admitted decode cannot acquire reserved KV blocks")
             self.block_manager.ensure_capacity(seq, len(seq))
             decode_chunks.append(ScheduledChunk(seq, seq.committed_tokens, len(seq)))
@@ -196,8 +215,7 @@ class Scheduler:
             if not partial_prefill and token_id is None:
                 raise RuntimeError("completed model step did not produce a token")
 
-            for snapshot in prefix_snapshots.get(seq.seq_id, ()):
-                self.block_manager.prefix_cache.publish(seq, snapshot, snapshot.num_tokens)
+            self.block_manager.prefix_cache.publish_many(seq, prefix_snapshots.get(seq.seq_id, ()))
 
             seq.committed_tokens = chunk.end
             if seq.image_state is not None and chunk.end >= seq.image_state.image_end:

@@ -48,6 +48,25 @@ class SchedulerAdmissionTest(unittest.TestCase):
         self.assertTrue(scheduler.is_finished())
         self.assertEqual([seq.completion_token_ids for seq in seqs], [[2] * n for _, n in specs])
 
+    def test_admission_counts_shared_kv_blocks_only_once(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=128,
+            max_num_seqs=2,
+            num_blocks=13,
+            block_size=16,
+        )
+        source = Sequence(list(range(64)) + [200])
+        scheduler.block_manager.ensure_capacity(source, 64)
+        scheduler.block_manager.prefix_cache.publish(source, GDNStateSnapshot(64, ()), 64)
+        scheduler.block_manager.deallocate(source)
+
+        for suffix in (list(range(64, 128)), list(range(64, 127)) + [200]):
+            scheduler.add(Sequence(list(range(64)) + suffix, SamplingParams(max_tokens=1)))
+        scheduled = scheduler.schedule()
+        self.assertEqual(len(scheduled.prefill_chunks), 2)
+        self.assertEqual([chunk.num_tokens for chunk in scheduled.prefill_chunks], [64, 64])
+        self.assertEqual(len(scheduler.block_manager.free_block_ids), 1)
+
     def test_partial_prefills_resume_before_new_requests(self):
         scheduler = make_scheduler(
             max_num_batched_tokens=4, max_num_seqs=2, num_blocks=8, block_size=4

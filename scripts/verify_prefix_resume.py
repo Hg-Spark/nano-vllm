@@ -22,8 +22,9 @@ def _build_prefix_probe_prompts(tokenizer, block_size: int) -> tuple[list[int], 
     seed = tokenizer.encode(
         "Hybrid inference keeps KV and recurrent state aligned. ", add_special_tokens=False
     )
-    repeats = (block_size + len(seed) - 1) // len(seed)
-    shared = (seed * repeats)[:block_size]
+    prefix_tokens = max(64, block_size)
+    repeats = (prefix_tokens + len(seed) - 1) // len(seed)
+    shared = (seed * repeats)[:prefix_tokens]
     suffix_a = tokenizer.encode(" Reference branch A.", add_special_tokens=False)
     suffix_b = tokenizer.encode(" Reference branch B.", add_special_tokens=False)
     return shared + suffix_a, shared + suffix_b
@@ -81,7 +82,7 @@ def run_prefix_resume_probe(
             if entry is None
             else {"num_tokens": entry.num_tokens, "snapshot_bytes": prefix_cache.snapshot_nbytes}
         )
-        if metadata is None or metadata["num_tokens"] != block_size:
+        if metadata is None or metadata["num_tokens"] != max(64, block_size):
             raise ValidationFailure(
                 "FAIL: prefix-resume probe did not publish expected prefix", {"prefix": metadata}
             )
@@ -102,7 +103,7 @@ def run_prefix_resume_probe(
 
         with patch.object(cache_runtime, "restore_gdn_state", side_effect=observe_restore):
             resumed_tokens = cached.generate([prompt_b], params, use_tqdm=False)[0]["token_ids"]
-        if restored != [(block_size, entry.block_ids, True)]:
+        if restored != [(max(64, block_size), entry.block_ids, True)]:
             raise ValidationFailure(
                 "FAIL: prefix-resume did not restore the cached KV/GDN boundary",
                 {"prefix": metadata, "restored": restored},
