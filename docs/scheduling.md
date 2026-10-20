@@ -104,7 +104,7 @@ check result count
 
 | 内容 | 为什么需要 |
 | --- | --- |
-| 精确 `token_ids` 元组 | 确认输入前缀一致，不能仅比较文本看起来是否相同 |
+| 精确 `token_ids` 元组 | 支持缓存路径的分叉与后代关系比较；命中使用链式 SHA-256 Block Hash |
 | `block_ids` | 共享 Full Attention 的物理 KV 块 |
 | `num_tokens` | 给出共同的历史边界 |
 | `GDNStateSnapshot` | 保存同一边界处所有 GDN 层的卷积和循环状态 |
@@ -126,7 +126,7 @@ check result count
 
 ### 怎样查找和恢复
 
-缓存以链式 SHA-256 Block Hash 直接定位联合 `PrefixEntry`：其中 KV Block 与 GDN Snapshot 已绑定到同一有效边界，无需维护冗余的两套索引。发布批次连续计算 Hash，查找不依赖缓存条目数。路径内可用旧的深层 Checkpoint 替换为新深层边界并保留公共根；其余全局条目数与 CPU 预算淘汰采用严格最长叶子优先（全局最长前缀必然是叶子，新条目也可能被淘汰）；当 GPU KV 页不足时优先淘汰确实能释放物理页的缓存条目。单路径检查点数量限制仍独立生效。
+缓存以链式 SHA-256 Block Hash 直接定位联合 `PrefixEntry`：其中 KV Block 与 GDN Snapshot 已绑定到同一有效边界，无需维护冗余的两套索引。发布批次连续计算 Hash，查找不依赖缓存条目数。路径内可用旧的深层 Checkpoint 替换为新深层边界，并优先保留已被其他请求复用的检查点及公共根；其余全局条目数与 CPU 预算淘汰采用严格最长叶子优先（全局最长前缀必然是叶子，新条目也可能被淘汰）；当 GPU KV 页不足时优先淘汰确实能释放物理页的缓存条目。单路径检查点数量限制仍独立生效。
 
 ```text
 新接纳的请求
