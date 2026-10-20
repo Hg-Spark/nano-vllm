@@ -147,7 +147,9 @@ class PinnedMetadataPool:
         if host is None or host.numel() < required:
             host = torch.empty(required, dtype=source.dtype, device="cpu", pin_memory=True)
             self.buffers[name] = host
-        result = stage_pinned(host, source).cuda(non_blocking=True)
+        staged = host[:required].view(source.shape)
+        staged.copy_(source)
+        result = staged.cuda(non_blocking=True)
         if self._transfer_done is None:
             self._transfer_done = torch.cuda.Event()
         if not self._batching:
@@ -291,7 +293,7 @@ def prepare_prefill(
             positions=upload(
                 "prefill_positions",
                 layout.rope_positions[:1]
-                if layout.rope_positions[0] == layout.rope_positions[1] == layout.rope_positions[2]
+                if all(chunk.seq.image_state is None for chunk in chunks)
                 else layout.rope_positions,
                 "int64",
             ),
@@ -323,7 +325,7 @@ def prepare_decode(
             positions=upload(
                 "decode_positions",
                 layout.rope_positions[:1]
-                if layout.rope_positions[0] == layout.rope_positions[1] == layout.rope_positions[2]
+                if all(chunk.seq.image_state is None for chunk in chunks)
                 else layout.rope_positions,
                 "int64",
             ),

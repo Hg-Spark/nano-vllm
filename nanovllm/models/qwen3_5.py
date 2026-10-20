@@ -246,5 +246,6 @@ class Qwen3_5ForCausalLM(nn.Module):
             last_indices = [end - 1 for end in context.prefill_q_offsets[1:]]
             if sequence_indices is not None:
                 last_indices = [last_indices[index] for index in sequence_indices]
-            hidden_states = hidden_states[last_indices]
+            indices = torch.tensor(last_indices, device=hidden_states.device, dtype=torch.long)
+            hidden_states = hidden_states.index_select(0, indices)
         return self.lm_head(hidden_states)

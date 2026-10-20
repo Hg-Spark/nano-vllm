@@ -55,11 +55,9 @@ class LLMEngineStepTest(unittest.TestCase):
         self.assertEqual(engine.scheduler.waiting[0].seq_id, seq_id)
 
     def test_decode_failure_disables_engine(self):
-        scheduler = make_engine_scheduler()
-        running = make_running_sequence(scheduler, [1, 2, 3, 4, 5])
-        scheduler.block_manager.prefix_cache.publish(
-            running, GDNStateSnapshot(num_tokens=4, layers=()), 4
-        )
+        scheduler = make_scheduler(max_num_seqs=2, num_blocks=32, block_size=4, eos_token_ids=(99,))
+        running = make_running_sequence(scheduler, list(range(65)))
+        scheduler.block_manager.prefix_cache.publish_many(running, (GDNStateSnapshot(64, ()),))
         image = SimpleNamespace(visual_features=object(), image_start=0)
         scheduler.add(Sequence([3, 4], SamplingParams(max_tokens=2), image_state=image))
         engine = make_engine_stub()

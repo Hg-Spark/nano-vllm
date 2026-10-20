@@ -2,8 +2,29 @@ import unittest
 from types import SimpleNamespace
 
 from nanovllm.engine.block_manager import BlockManager
+from nanovllm.engine.prefix_cache import _block_hashes
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
+
+
+def publish_snapshot(
+    manager: BlockManager,
+    seq: Sequence,
+    prefix_tokens: int,
+    snapshot: GDNStateSnapshot | None = None,
+) -> None:
+    cache = manager.prefix_cache
+    if not cache._can_capture():
+        return
+    path = []
+    for position, digest in _block_hashes(seq.token_ids[:prefix_tokens], cache.block_size):
+        if digest in cache._entries:
+            path.append(digest)
+    if position != prefix_tokens:
+        raise ValueError("test prefix must end on a KV block boundary")
+    cache._publish(
+        seq, snapshot or GDNStateSnapshot(prefix_tokens, ()), prefix_tokens, digest, path
+    )
 
 
 def publish_prefix(
@@ -17,9 +38,7 @@ def publish_prefix(
     seq.committed_tokens = 0
     seq.state_slot = 0
     block_id = seq.block_table[0]
-    manager.prefix_cache.publish(
-        seq, snapshot or GDNStateSnapshot(num_tokens=prefix_tokens, layers=()), prefix_tokens
-    )
+    publish_snapshot(manager, seq, prefix_tokens, snapshot)
     return seq, block_id
 
 
@@ -77,7 +96,7 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         shared = list(range(128))
         original, _ = publish_prefix(manager, shared + [200], 64)
         manager.ensure_capacity(original, 128)
-        manager.prefix_cache.publish(original, GDNStateSnapshot(128, ()), 128)
+        publish_snapshot(manager, original, 128)
         publish_prefix(manager, [300] * 64 + [301], 64)
 
         self.assertEqual(len(manager.prefix_cache), 2)
@@ -103,7 +122,7 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         )
         seq, _ = publish_prefix(manager, list(range(128)) + [9], 64)
         manager.ensure_capacity(seq, 128)
-        manager.prefix_cache.publish(seq, GDNStateSnapshot(128, ()), 128)
+        publish_snapshot(manager, seq, 128)
 
         self.assertEqual(len(manager.prefix_cache), 1)
         self.assertEqual(
@@ -129,8 +148,8 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         )
         seq = Sequence(list(range(128)) + [9])
         manager.ensure_capacity(seq, 128)
-        manager.prefix_cache.publish(seq, GDNStateSnapshot(128, ()), 128)
-        manager.prefix_cache.publish(seq, GDNStateSnapshot(64, ()), 64)
+        publish_snapshot(manager, seq, 128)
+        publish_snapshot(manager, seq, 64)
         self.assertEqual(len(manager.prefix_cache), 1)
         self.assertEqual(manager.prefix_cache.find(seq, 128).num_tokens, 128)
 
@@ -198,15 +217,15 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         for position in (64, 128, 192, 256):
             snapshot = GDNStateSnapshot(position, ())
             history[position] = snapshot
-            manager.prefix_cache.publish(original, snapshot, position)
+            publish_snapshot(manager, original, position, snapshot)
 
         for position in (128, 256):
-            manager.prefix_cache.publish(longer, GDNStateSnapshot(position, ()), position)
+            publish_snapshot(manager, longer, position)
         self.assertEqual(len(manager.prefix_cache), 4)
         reused = manager.prefix_cache.find(longer, max_tokens=256)
         self.assertIs(reused.state_snapshot, history[256])
 
-        manager.prefix_cache.publish(longer, GDNStateSnapshot(384, ()), 384)
+        publish_snapshot(manager, longer, 384)
         self.assertEqual(len(manager.prefix_cache), 4)
         self.assertEqual(manager.prefix_cache.find(longer, max_tokens=399).num_tokens, 384)
         self.assertEqual(manager.prefix_cache.find(original, max_tokens=80).num_tokens, 64)

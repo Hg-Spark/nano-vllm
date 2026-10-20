@@ -18,7 +18,6 @@ from scripts._common import (
     normalize_paths,
     run_hf_reference,
     validate_finite,
-    validate_model_family,
     validate_positive,
 )
 
@@ -195,16 +194,21 @@ def parse_args(argv=None):
 
 
 def run(args):
-    from transformers import AutoTokenizer
+    from transformers import AutoConfig, AutoTokenizer
 
-    is_moe = validate_model_family(args.model)
+    from nanovllm.config import is_qwen3_5_moe
+
+    config = AutoConfig.from_pretrained(args.model)
+    is_moe = is_qwen3_5_moe(config)
     hf_backend = args.hf_experts_backend if is_moe else None
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
     input_ids = tokenizer.encode(args.prompt)[: args.max_probe_tokens]
     if not input_ids:
         raise RuntimeError("layer probe prompt produced no tokens")
-    if len(input_ids) + 1 > args.max_model_len:
-        raise ValueError("probe prompt and sampled token exceed max_model_len")
+    text_config = getattr(config, "text_config", config)
+    effective_max_len = min(args.max_model_len, text_config.max_position_embeddings)
+    if len(input_ids) + 1 > effective_max_len:
+        raise ValueError("probe prompt and sampled token exceed effective max_model_len")
     hf_layers = capture_hf_layers(args.model, input_ids, args.dtype, hf_experts_backend=hf_backend)
     nano_layers = capture_nano_layers(args.model, input_ids, args.max_model_len, args.dtype)
 

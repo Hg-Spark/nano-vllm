@@ -120,7 +120,7 @@ check result count
 - 边界同时是完整 KV 块边界；
 - 该精确 token 前缀尚未存在。
 
-例如 KV 块容量为 16、130-token Prompt 且启用 Prefix Cache：64 和 128 是有效候选边界。默认 Eager 模式可在一次 `[0,130)` Prefill 中捕获两个 GDN Checkpoint；遇到非 64 对齐的 Chunk 起点时，不再强制截断到最近的 64 边界，而是在划分足够大的 Chunk 时使用尾部完整边界。20-token Prompt 不产生 Checkpoint。设为 `prefix_cache_eager_snapshot=False` 后，不额外切分，只有本轮自然结束于有效 64 Token 边界时才发布。若 KV 块大于 64 Token，候选边界还需满足完整 KV 块约束。每条前缀链默认最多保留 4 个 Checkpoint（`max_gdn_checkpoints`），Scheduler 每轮优先选择首个有用边界与最深边界（并受全局条目/字节预算约束），路径超限时裁剪旧的中间 Checkpoint；不再为填满单路径配额而捕获大量很快会被淘汰的状态。
+例如 KV 块容量为 16、130-token Prompt 且启用 Prefix Cache：64 和 128 是有效候选边界。默认 Eager 模式可在一次 `[0,130)` Prefill 中捕获两个 GDN Checkpoint；遇到非 64 对齐的 Chunk 起点时，仅在截断点前后均至少有 64 个 token 时对齐到最深的合法完整边界，否则保持原 Chunk，避免产生极小 Prefill。20-token Prompt 不产生 Checkpoint。设为 `prefix_cache_eager_snapshot=False` 后，不额外切分，只有本轮自然结束于有效 64 Token 边界时才发布。若 KV 块大于 64 Token，候选边界还需满足完整 KV 块约束。每条前缀链默认最多保留 4 个 Checkpoint（`max_gdn_checkpoints`），Scheduler 每轮优先选择首个有用边界与最深边界（并受全局条目/字节预算约束），路径超限时裁剪旧的中间 Checkpoint；不再为填满单路径配额而捕获大量很快会被淘汰的状态。
 
 整块边界还能避免共享一个将被继续写入的半满块；新请求续写时分配后续块，不会覆盖共享前缀。
 

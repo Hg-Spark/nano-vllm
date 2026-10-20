@@ -133,18 +133,6 @@ class PrefixCache:
                 best_entry = entry
         return best_entry
 
-    def publish(self, seq: Sequence, state_snapshot: GDNStateSnapshot, prefix_tokens: int) -> None:
-        if not self._can_capture():
-            return
-        path = []
-        for position, digest in _block_hashes(seq.token_ids[:prefix_tokens], self.block_size):
-            if digest in self._entries:
-                path.append(digest)
-            if position == prefix_tokens:
-                self._publish(seq, state_snapshot, prefix_tokens, digest, path)
-                return
-        raise RuntimeError("GDN snapshot boundary is not a complete KV block")
-
     def publish_many(self, seq: Sequence, snapshots: tuple[GDNStateSnapshot, ...]) -> None:
         if not snapshots or not self._can_capture():
             return

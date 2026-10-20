@@ -262,7 +262,7 @@ class ModelRunner:
                         dst_end = span.packed_dst_start + span.length
                         src_end = span.feature_src_start + span.length
                         inputs_embeds[span.packed_dst_start : dst_end].copy_(
-                            features[span.feature_src_start : src_end].to(dtype=inputs_embeds.dtype)
+                            features[span.feature_src_start : src_end]
                         )
                     hidden_states = self.model(None, batch.positions, inputs_embeds=inputs_embeds)
                 else:

@@ -120,12 +120,17 @@ class Scheduler:
                             if end % interval == 0:
                                 candidates = [pair for pair in candidates if pair[0] == end]
                             else:
-                                last = end - end % interval
-                                if end < len(seq) and last - start >= interval:
-                                    candidates = [pair for pair in candidates if pair[0] == last]
-                                    if candidates:
-                                        end = last
-                                        scheduled = end - start
+                                # Avoid tiny tail chunks while recovering a useful
+                                # checkpoint even when the prompt ends unaligned.
+                                eligible = [
+                                    pair
+                                    for pair in candidates
+                                    if pair[0] - start >= interval and end - pair[0] >= interval
+                                ]
+                                if eligible:
+                                    end = eligible[-1][0]
+                                    scheduled = end - start
+                                    candidates = eligible[-1:]
                                 else:
                                     candidates = []
                         elif end < len(seq) and end % interval:
