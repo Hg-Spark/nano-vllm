@@ -22,9 +22,19 @@ class Qwen3_5MoeTest(unittest.TestCase):
 
     def test_router_topk_weights_are_normalized(self):
         router = Qwen3_5MoeTopKRouter(self.config)
-        hidden_states = torch.randn(6, self.config.hidden_size)
+        hidden_states = torch.ones(6, self.config.hidden_size)
+        with torch.no_grad():
+            router.weight[:, 0] = torch.arange(self.config.num_experts)
 
         routing_weights, selected_experts = router(hidden_states)
+        expected = list(
+            range(
+                self.config.num_experts - 1,
+                self.config.num_experts - self.config.num_experts_per_tok - 1,
+                -1,
+            )
+        )
+        self.assertEqual(selected_experts.tolist(), [expected] * 6)
 
         self.assertEqual(
             routing_weights.shape,
