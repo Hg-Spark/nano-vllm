@@ -132,7 +132,9 @@ class Scheduler:
                                 if selected:
                                     end = selected[-1][0]
                                     scheduled = end - start
-                                candidates = selected
+                                # A non-aligned start can capture only the new end
+                                # without shifting the GDN kernel's 64-token grid.
+                                candidates = selected[-1:]
                         elif end < len(seq) and end % interval:
                             step = lcm(interval, self.block_manager.block_size)
                             last = end - end % step
