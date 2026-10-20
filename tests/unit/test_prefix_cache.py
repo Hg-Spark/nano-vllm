@@ -34,7 +34,7 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         self.assertEqual(hit.num_tokens, 8)
         self.assertIsNone(manager.prefix_cache.find(Sequence([1, 2, 3, 4]), max_tokens=3))
 
-    def test_lru_eviction_releases_cache_block_reference(self):
+    def test_eviction_releases_cache_block_reference(self):
         manager = BlockManager(num_blocks=4, block_size=4, max_prefix_entries=1)
         first_seq, first_block = publish_prefix(manager, [1, 2, 3, 4, 9], 4)
         self.assertEqual(manager.block_refcounts[first_block], 2)
@@ -48,7 +48,7 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         manager.deallocate(first_seq)
         self.assertEqual(manager.block_refcounts[first_block], 0)
 
-    def test_snapshot_byte_limit_evicts_lru_and_releases_refs(self):
+    def test_snapshot_byte_limit_evicts_longest_and_releases_refs(self):
         manager = BlockManager(
             num_blocks=8,
             block_size=4,
@@ -71,6 +71,21 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         self.assertTrue(manager.prefix_cache.evict())
         self.assertEqual(manager.prefix_cache.snapshot_bytes, 0)
         self.assertEqual(manager.block_refcounts[second_block], 0)
+
+    def test_longest_leaf_eviction_keeps_shorter_shared_prefix(self):
+        manager = BlockManager(num_blocks=32, block_size=16, max_prefix_entries=2)
+        shared = list(range(128))
+        original, _ = publish_prefix(manager, shared + [200], 64)
+        manager.ensure_capacity(original, 128)
+        manager.prefix_cache.publish(original, GDNStateSnapshot(128, ()), 128)
+        publish_prefix(manager, [300] * 64 + [301], 64)
+
+        self.assertEqual(len(manager.prefix_cache), 2)
+        self.assertEqual(
+            manager.prefix_cache.find(Sequence(shared + [202]), max_tokens=128).num_tokens,
+            64,
+        )
+        self.assertIsNotNone(manager.prefix_cache.find(Sequence([300] * 64 + [302]), max_tokens=64))
 
     def test_zero_snapshot_budget_skips_publication(self):
         manager = BlockManager(

@@ -66,7 +66,7 @@ flowchart LR
 
 ### 资源预留
 
-Scheduler 按全生命周期 KV 页额度及 GDN 槽位准入新请求。已接纳请求按当前 Chunk 按需分配 KV 页，额外的前缀缓存引用可通过 LRU 淘汰回收；额度不足的新请求继续等待。
+Scheduler 按全生命周期 KV 页额度及 GDN 槽位准入新请求。已接纳请求按当前 Chunk 按需分配 KV 页，额外的前缀缓存引用可通过最长叶子优先淘汰回收；额度不足的新请求继续等待。
 
 ### 执行成功：推进一个共同边界
 
@@ -84,7 +84,7 @@ check result count
 
 ## 为什么无需常规抢占
 
-接纳请求时预留其最大生命周期所需 KV 页额度；活动请求预留量之和不能超过物理 KV 总页数。GDN Slot 同样在接纳时占用，请求完成时与 KV 页一并释放。前缀缓存额外持有的 KV 引用在空间紧张时由 LRU 淘汰；共享页的引用计数继续保证安全。
+接纳请求时预留其最大生命周期所需 KV 页额度；活动请求预留量之和不能超过物理 KV 总页数。GDN Slot 同样在接纳时占用，请求完成时与 KV 页一并释放。前缀缓存额外持有的 KV 引用在空间紧张时按最长叶子优先淘汰；共享页的引用计数继续保证安全。
 
 这一策略避免新请求挤占正在处理的 Prefill / Decode 请求，代价是最大输出长度设置较大时并发度更保守。
 
@@ -109,7 +109,7 @@ check result count
 | `num_tokens` | 给出共同的历史边界 |
 | `GDNStateSnapshot` | 保存同一边界处所有 GDN 层的卷积和循环状态 |
 
-[BlockManager](../nanovllm/engine/block_manager.py)负责 KV block 的所有权与引用计数；[PrefixCache](../nanovllm/engine/prefix_cache.py)负责 prefix entry、最长匹配和最短前缀优先淘汰，Scheduler 直接通过 BlockManager.prefix_cache 访问前缀缓存；GDN snapshot 只是与完整 KV 前缀绑定的附加 metadata。[Scheduler](../nanovllm/engine/scheduler.py)负责 KV/GDN 资源预留、联合恢复及释放。联合前缀缓存默认关闭（`max_prefix_cache_entries=0`），用于显式验证/实验时再开启，避免默认承担 GDN 快照的 D2H 成本。
+[BlockManager](../nanovllm/engine/block_manager.py)负责 KV block 的所有权与引用计数；[PrefixCache](../nanovllm/engine/prefix_cache.py)分别用链式 Block Hash 与 GDN Checkpoint 索引查找共同恢复边界，并在全局容量受限时优先淘汰最长叶子，Scheduler 直接通过 BlockManager.prefix_cache 访问前缀缓存；GDN snapshot 只是与完整 KV 前缀绑定的附加 metadata。[Scheduler](../nanovllm/engine/scheduler.py)负责 KV/GDN 资源预留、联合恢复及释放。联合前缀缓存默认关闭（`max_prefix_cache_entries=0`），用于显式验证/实验时再开启，避免默认承担 GDN 快照的 D2H 成本。
 
 ### 什么时候能发布
 
@@ -126,7 +126,7 @@ check result count
 
 ### 怎样查找和恢复
 
-缓存用字典保存有上限的精确前缀条目。查找会扫描已有条目并选择最长匹配；淘汰优先选择最短前缀，不维护最近使用顺序。
+缓存仍用精确 Token 元组区分前缀路径；查找时逐完整 KV Block 计算带父哈希的 SHA-256，先检查 Full KV 哈希索引，再检查同一边界的 GDN Snapshot 索引，取最深共同命中。不再线性扫描所有缓存条目。两类索引的物理所有权仍由联合 `PrefixEntry` 维护，不能仅凭 KV 命中跳过 GDN。全局容量与 CPU 预算触发最长叶子优先淘汰，单路径超过 `max_gdn_checkpoints` 时仍裁剪最短 Checkpoint，不使用 LRU。
 
 ```text
 新接纳的请求
@@ -166,7 +166,7 @@ check result count
 恢复后：卷积 = 原 dtype，循环矩阵 = FP32
 ```
 
-这样不会因 snapshot 本身引入 BF16 量化误差。代价是循环状态主机占用约为 BF16 方案的两倍；条目上限约束的是缓存项数，不是精确字节数，缓存还会持有 GPU KV 引用并产生设备到主机的快照传输。单份快照大小由启动时的 GDN 状态池计算；如果配置的 CPU 快照预算连一份也容纳不了，调度器不会为发布前缀主动分片或捕获状态，发布时使用启动时估算的固定 `snapshot_nbytes` 计账并按最短前缀优先策略维护总预算，不重新逐条计算张量大小。
+这样不会因 snapshot 本身引入 BF16 量化误差。代价是循环状态主机占用约为 BF16 方案的两倍；条目上限约束的是缓存项数，不是精确字节数，缓存还会持有 GPU KV 引用并产生设备到主机的快照传输。单份快照大小由启动时的 GDN 状态池计算；如果配置的 CPU 快照预算连一份也容纳不了，调度器不会为发布前缀主动分片或捕获状态，发布时使用启动时估算的固定 `snapshot_nbytes` 计账并按全局最长叶子优先策略维护总预算，不重新逐条计算张量大小。
 
 ## 阅读代码时应检查的约束
 

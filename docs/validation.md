@@ -187,7 +187,7 @@ python -m scripts.verify_prefix_resume "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYP
 
 将误差指标记录在独立的本地实验结果中。当前 snapshot 不再主动降精度；恢复验证仍用于发现状态边界、复制或其他执行路径问题。
 
-Prefix Cache 可同时限制条目数（`max_prefix_cache_entries`）和 CPU GDN 快照总大小（`max_prefix_cache_snapshot_bytes`，单位字节）。字节限制默认为 `None`，即不额外限制；设置为 `0` 时跳过快照发布。初始化时会估算一份 GDN 状态快照的大小；即使预算大于零，只要不足以容纳一份快照，也不执行为该缓存条目额外分片或 GPU→CPU 拷贝。发布时按固定 `snapshot_nbytes` 计账，不重新扫描快照张量；多个快照超过总预算时按 LRU 驱逐并释放关联 KV Block 引用。Benchmark 的 `snapshot_bytes_before_target` / `snapshot_bytes_after_target` 直接读取缓存统计。
+Prefix Cache 可同时限制条目数（`max_prefix_cache_entries`）和 CPU GDN 快照总大小（`max_prefix_cache_snapshot_bytes`，单位字节）。字节限制默认为 `None`，即不额外限制；设置为 `0` 时跳过快照发布。初始化时会估算一份 GDN 状态快照的大小；即使预算大于零，只要不足以容纳一份快照，也不执行为该缓存条目额外分片或 GPU→CPU 拷贝。发布时按固定 `snapshot_nbytes` 计账，不重新扫描快照张量；多个快照超过总预算时优先淘汰全局最长前缀叶子并释放关联 KV Block 引用。Benchmark 的 `snapshot_bytes_before_target` / `snapshot_bytes_after_target` 直接读取缓存统计。
 
 ## 测量端到端性能
 

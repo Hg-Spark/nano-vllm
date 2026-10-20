@@ -153,7 +153,7 @@ flowchart TD
 | [schedule.py](../nanovllm/engine/schedule.py) | 保存本轮执行区间和快照需求 |
 | [block_manager.py](../nanovllm/engine/block_manager.py) | KV Block 分配与共享前缀引用 |
 | [state_manager.py](../nanovllm/engine/state_manager.py) | GDN 状态槽分配 |
-| [prefix_cache.py](../nanovllm/engine/prefix_cache.py) | 联合前缀条目与最短前缀优先淘汰 |
+| [prefix_cache.py](../nanovllm/engine/prefix_cache.py) | KV Block Hash 与 GDN Checkpoint 联合匹配、最长叶子优先淘汰 |
 | [decode_graph.py](../nanovllm/engine/decode_graph.py) | Decode CUDA Graph bucket |
 | [batch_common.py](../nanovllm/engine/batch_common.py) | 统一准备 Prefill / Decode 的元数据与输入张量 |
 | [context.py](../nanovllm/utils/context.py) | 将单次 forward 的元数据传给模型层 |
