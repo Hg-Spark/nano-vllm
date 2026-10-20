@@ -122,7 +122,7 @@ class PrefixCache:
         capacity = self.max_entries
         if self.max_snapshot_bytes is not None and self.snapshot_nbytes:
             capacity = min(capacity, self.max_snapshot_bytes // self.snapshot_nbytes)
-        if len(self._entries) >= capacity and not cached:
+        if len(self._entries) >= capacity and len(cached) < limit:
             longest = max(entry.num_tokens for entry in self._entries.values())
             candidates = [candidate for candidate in candidates if candidate[0] <= longest]
         if not candidates or (limit == 1 and cached and cached[-1] > candidates[-1][0]):
