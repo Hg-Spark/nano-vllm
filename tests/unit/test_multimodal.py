@@ -85,6 +85,10 @@ class MultimodalRequestTest(unittest.TestCase):
         )
         self.assertEqual(state.rope_delta, -2)
 
+        output["image_grid_thw"] = torch.tensor([[1, 3, 4]])
+        with self.assertRaisesRegex(ValueError, "aligned to spatial merge"):
+            image_state_from_processor_output(output, root)
+
     def test_completed_request_releases_visual_features(self):
         scheduler = make_scheduler(
             max_num_seqs=2,
