@@ -3,7 +3,7 @@ model = "~/models/Qwen3.5-2B"
 dtype = "float16"                  # float16 or bfloat16
 gpu = "0"                         # CUDA_VISIBLE_DEVICES
 stage = "check"                     # all, check, bench, tail, capacity
-repeats = 1
+repeats = 1                     # Smoke runs; use >=5 for performance comparisons.
 output_dir = "results"             # Each run creates a new run_* directory.
 
 [benchmark]

@@ -3,14 +3,16 @@ from dataclasses import dataclass
 from hashlib import sha256
 from struct import pack
 
+from nanovllm.engine.schedule import GDN_CHECKPOINT_INTERVAL
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
 
 
-def _block_hashes(tokens: list[int] | tuple[int, ...], block_size: int):
+def _block_hashes(tokens: list[int] | tuple[int, ...], block_size: int, stop: int | None = None):
     """Yield (prefix length, chained SHA-256) at each complete KV block."""
     parent = bytes(32)
-    for start in range(0, len(tokens) - block_size + 1, block_size):
+    limit = min(stop, len(tokens)) if stop is not None else len(tokens)
+    for start in range(0, limit - block_size + 1, block_size):
         parent = sha256(
             parent + pack(f"<{block_size}I", *tokens[start : start + block_size])
         ).digest()
@@ -79,8 +81,8 @@ class PrefixCache:
             end = min(end, seq.image_state.image_start)
         candidates = []
         cached = []
-        for position, digest in _block_hashes(seq.token_ids[:end], self.block_size):
-            if position % 64:
+        for position, digest in _block_hashes(seq.token_ids, self.block_size, end):
+            if position % GDN_CHECKPOINT_INTERVAL:
                 continue
             if digest in self._entries:
                 cached.append(position)
@@ -94,9 +96,10 @@ class PrefixCache:
         """Select useful checkpoints before D2H; global capacity evicts longest leaves."""
         if not candidates:
             return []
-        limit = min(self.max_entries, self.max_checkpoints_per_path)
+        capacity = self.max_entries
         if self.max_snapshot_bytes is not None and self.snapshot_nbytes:
-            limit = min(limit, self.max_snapshot_bytes // self.snapshot_nbytes)
+            capacity = min(capacity, self.max_snapshot_bytes // self.snapshot_nbytes)
+        limit = min(capacity, self.max_checkpoints_per_path)
         if limit <= 0:
             return []
         if limit == 1 and cached and cached[-1] > candidates[-1][0]:
@@ -108,9 +111,6 @@ class PrefixCache:
         )
         # When global capacity is full, a new longest prefix would be evicted
         # immediately, unless it can first replace an older path checkpoint.
-        capacity = self.max_entries
-        if self.max_snapshot_bytes is not None and self.snapshot_nbytes:
-            capacity = min(capacity, self.max_snapshot_bytes // self.snapshot_nbytes)
         if len(self._entries) >= capacity and len(cached) < self.max_checkpoints_per_path:
             longest = max(entry.num_tokens for entry in self._entries.values())
             selected = [
@@ -127,7 +127,7 @@ class PrefixCache:
         if seq.image_state is not None:
             max_tokens = min(max_tokens, seq.image_state.image_start)
         best_entry: PrefixEntry | None = None
-        for _, digest in _block_hashes(seq.token_ids[:max_tokens], self.block_size):
+        for _, digest in _block_hashes(seq.token_ids, self.block_size, max_tokens):
             entry = self._entries.get(digest)
             if entry is not None:
                 best_entry = entry
@@ -141,12 +141,12 @@ class PrefixCache:
             position <= 0
             or position > seq.num_prompt_tokens
             or position % self.block_size
-            or position % 64
+            or position % GDN_CHECKPOINT_INTERVAL
             for position in by_position
         ):
             raise RuntimeError("invalid GDN snapshot checkpoint boundary")
         path = []
-        for position, digest in _block_hashes(seq.token_ids[: max(by_position)], self.block_size):
+        for position, digest in _block_hashes(seq.token_ids, self.block_size, max(by_position)):
             if digest in self._entries:
                 path.append(digest)
             snapshot = by_position.get(position)
@@ -161,8 +161,6 @@ class PrefixCache:
         digest: bytes,
         path: list[bytes],
     ) -> None:
-        if snapshot.num_tokens != position:
-            raise RuntimeError("GDN snapshot boundary does not match KV prefix boundary")
         if digest in self._entries:
             return
         num_blocks = position // self.block_size

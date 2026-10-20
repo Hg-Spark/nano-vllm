@@ -48,12 +48,8 @@ class ModelRunner:
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(getattr(torch, config.dtype))
         try:
-            if (
-                torch.cuda.get_device_capability()[0] not in (9, 10, 12)
-                or config.text_config.linear_key_head_dim != 128
-                or config.text_config.linear_value_head_dim != 128
-            ):
-                raise RuntimeError("FlashInfer GDN requires SM90/SM100/SM120 and K/V head_dim=128")
+            if torch.cuda.get_device_capability()[0] not in (9, 10, 12):
+                raise RuntimeError("FlashInfer GDN requires SM90/SM100/SM120")
             with torch.device("cuda"):
                 self.model = Qwen3_5ForCausalLM(
                     config.root_config,

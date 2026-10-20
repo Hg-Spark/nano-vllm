@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from nanovllm.engine.block_manager import BlockManager
 from nanovllm.engine.prefix_cache import _block_hashes
+from nanovllm.engine.schedule import GDN_CHECKPOINT_INTERVAL
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
 
@@ -16,15 +17,18 @@ def publish_snapshot(
     cache = manager.prefix_cache
     if not cache._can_capture():
         return
+    snapshot = snapshot or GDNStateSnapshot(prefix_tokens, ())
+    if prefix_tokens % GDN_CHECKPOINT_INTERVAL == 0:
+        cache.publish_many(seq, (snapshot,))
+        return
+    # Small-block eviction fixtures exercise the private policy below the GDN grid.
     path = []
-    for position, digest in _block_hashes(seq.token_ids[:prefix_tokens], cache.block_size):
+    for position, digest in _block_hashes(seq.token_ids, cache.block_size, prefix_tokens):
         if digest in cache._entries:
             path.append(digest)
     if position != prefix_tokens:
         raise ValueError("test prefix must end on a KV block boundary")
-    cache._publish(
-        seq, snapshot or GDNStateSnapshot(prefix_tokens, ()), prefix_tokens, digest, path
-    )
+    cache._publish(seq, snapshot, prefix_tokens, digest, path)
 
 
 def publish_prefix(

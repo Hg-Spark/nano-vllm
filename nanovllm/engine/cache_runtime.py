@@ -4,6 +4,7 @@ import warnings
 import torch
 
 from nanovllm.config import Config
+from nanovllm.engine.schedule import GDN_CHECKPOINT_INTERVAL
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
 
@@ -72,7 +73,9 @@ def allocate_runtime_caches(
             or config.max_prefix_cache_snapshot_bytes >= snapshot_size
         )
     ):
-        checkpoint_slots = config.max_num_batched_tokens // 64 + config.max_num_seqs
+        checkpoint_slots = (
+            config.max_num_batched_tokens // GDN_CHECKPOINT_INTERVAL + config.max_num_seqs
+        )
         checkpoint_workspace_bytes = 2 * checkpoint_slots * snapshot_size
     model_param = model.model.embed_tokens.weight
     cache_dtype = _resolve_kv_cache_dtype(

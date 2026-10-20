@@ -15,7 +15,7 @@ case "$MODE" in
   smoke|full|tail) ;;
   *) echo "Unknown benchmark mode: $MODE" >&2; exit 2 ;;
 esac
-REPEATS="${REPEATS:-3}"
+REPEATS="${REPEATS:-5}"
 RESULT_DIR="${RESULT_DIR:-results/${MODE}_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$RESULT_DIR"
 

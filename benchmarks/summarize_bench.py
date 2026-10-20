@@ -66,11 +66,11 @@ def percent(base, changed, higher_better=True):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("folder", help="directory of benchmark experiment JSON files")
-    ap.add_argument("--min-repeats", type=int, default=1)
+    ap.add_argument("--min-repeats", type=int, default=5)
     ap.add_argument("--min-itl-samples", type=int, default=1000)
     args = ap.parse_args(argv)
-    if args.min_itl_samples < 1:
-        ap.error("--min-itl-samples must be positive")
+    if args.min_repeats < 1 or args.min_itl_samples < 1:
+        ap.error("--min-repeats and --min-itl-samples must be positive")
 
     samples = []
     failed = []

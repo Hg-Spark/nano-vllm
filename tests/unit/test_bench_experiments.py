@@ -143,7 +143,7 @@ class BenchmarkExperimentsTest(unittest.TestCase):
             graph_file.write_text(json.dumps(graph), encoding="utf-8")
             output = StringIO()
             with redirect_stdout(output):
-                summary.main([folder])
+                summary.main([folder, "--min-repeats", "1"])
             self.assertIn("Output throughput improvement: +50.00%", output.getvalue())
             self.assertIn("Successful paired comparisons: 1", output.getvalue())
 
@@ -153,7 +153,7 @@ class BenchmarkExperimentsTest(unittest.TestCase):
                 encoding="utf-8",
             )
             with redirect_stdout(StringIO()):
-                summary.main([folder])
+                summary.main([folder, "--min-repeats", "1"])
 
             graph["result"]["details"]["token_hash"] = "different"
             graph_file.write_text(json.dumps(graph), encoding="utf-8")
@@ -161,7 +161,7 @@ class BenchmarkExperimentsTest(unittest.TestCase):
                 redirect_stdout(StringIO()),
                 self.assertRaisesRegex(SystemExit, "Output token hashes differ"),
             ):
-                summary.main([folder])
+                summary.main([folder, "--min-repeats", "1"])
 
 
 if __name__ == "__main__":
