@@ -10,6 +10,10 @@ from nanovllm.engine.state_manager import GDNStateSnapshot
 
 logger = logging.getLogger(__name__)
 
+# Separate CUDA Graph buckets have private capture pools. Reserve their memory
+# before sizing the static KV cache rather than relying on utilization headroom.
+DECODE_GRAPH_RESERVE_BYTES_PER_BUCKET = 256 * 1024**2
+
 
 def _resolve_kv_cache_dtype(
     config: Config,
@@ -90,22 +94,28 @@ def allocate_runtime_caches(
         config,
         model_param.dtype,
     )
+    graph_reserve_bytes = (
+        len(config.decode_graph_batch_sizes) * DECODE_GRAPH_RESERVE_BYTES_PER_BUCKET
+    )
     cache_budget = int(
         total * config.gpu_memory_utilization
         - used
         - state_cache_bytes
         - checkpoint_workspace_bytes
         - visual_feature_cache_bytes
+        - graph_reserve_bytes
     )
     num_kv_cache_blocks = cache_budget // block_bytes
     logger.info(
         "Static KV capacity: KV_budget=%d MiB, KV_blocks=%d, "
-        "GDN_reserve=%d MiB, checkpoint_reserve=%d MiB, vision_reserve=%d MiB",
+        "GDN_reserve=%d MiB, checkpoint_reserve=%d MiB, "
+        "vision_reserve=%d MiB, graph_reserve=%d MiB",
         cache_budget // (1024**2),
         num_kv_cache_blocks,
         state_cache_bytes // (1024**2),
         checkpoint_workspace_bytes // (1024**2),
         visual_feature_cache_bytes // (1024**2),
+        graph_reserve_bytes // (1024**2),
     )
     if num_kv_cache_blocks <= 0:
         raise RuntimeError("insufficient GPU memory after reserving Qwen3.5 recurrent state pools")

@@ -53,6 +53,7 @@ class CacheRuntimeTest(unittest.TestCase):
         )
         config = SimpleNamespace(
             gpu_memory_utilization=0.75,
+            decode_graph_batch_sizes=(),
             kv_cache_dtype="auto",
             kv_cache_block_size=16,
             max_num_seqs=2,
@@ -98,6 +99,20 @@ class CacheRuntimeTest(unittest.TestCase):
             _, num_blocks = allocate_runtime_caches(model, config)
         self.assertEqual(num_blocks, 3)
         self.assertEqual(allocation.call_args.args[2], 3)
+
+        # Graph memory is deducted from KV capacity before graph capture.
+        config.max_prefix_cache_entries = 0
+        config.decode_graph_batch_sizes = (1,)
+        with (
+            patch("nanovllm.engine.cache_runtime.DECODE_GRAPH_RESERVE_BYTES_PER_BUCKET", 512),
+            patch(
+                "nanovllm.engine.cache_runtime.torch.cuda.mem_get_info",
+                return_value=(4096, 8192),
+            ),
+            patch("nanovllm.engine.cache_runtime.torch.empty", return_value=MagicMock()),
+        ):
+            _, num_blocks = allocate_runtime_caches(model, config)
+        self.assertEqual(num_blocks, 2)
 
 
 if __name__ == "__main__":
