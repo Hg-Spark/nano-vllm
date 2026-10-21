@@ -260,7 +260,7 @@ class SchedulerCoreTest(unittest.TestCase):
             num_blocks=64,
             block_size=16,
         )
-        running = make_running_sequence(scheduler, [1, 2])
+        make_running_sequence(scheduler, [1, 2])
         seq = Sequence(list(range(100)), SamplingParams(max_tokens=1))
         scheduler.add(seq)
         first = scheduler.schedule()
