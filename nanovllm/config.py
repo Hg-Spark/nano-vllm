@@ -117,8 +117,8 @@ class Config:
     head_dim: int = field(init=False)
 
     def __post_init__(self) -> None:
-        if self.dtype not in ("float16", "bfloat16"):
-            raise ValueError("dtype must be 'float16' or 'bfloat16'")
+        if self.dtype != "bfloat16":
+            raise ValueError("dtype must be 'bfloat16'")
         self.model = os.path.expanduser(self.model)
         if not os.path.isdir(self.model):
             raise ValueError(f"model path does not exist: {self.model}")

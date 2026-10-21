@@ -13,7 +13,7 @@
 | CUDA | 参考 `13.0`（PyTorch `cu130` 构建）；启动时不检查版本 |
 | Transformers | `>=5.19.0`，须包含所用 Qwen3.5 稠密/MoE 配置与参考模型接口 |
 | FlashInfer | `flashinfer-python==0.7.0`；Full Attention 统一使用分页 prefill/decode wrapper |
-| 权重 | 本地非量化 Qwen3.5 稠密/MoE 完整 safetensors（文本 + visual），稠密 2B 使用 FP16 验证 |
+| 权重 | 本地非量化 Qwen3.5 稠密/MoE 完整 safetensors（文本 + visual），推理统一使用 BF16 |
 | 设备 | 单 GPU，显存须容纳全部已加载权重、KV、GDN 状态和临时张量 |
 
 统一使用 Python 3.12 作为开发、CI 与基准测试参考环境，不额外添加运行时 Python 版本检查。PyTorch 和 CUDA 的参考版本仅供安装和复现参考，不表示这组环境已经完成全部真实 GPU 验证。所选环境仍需满足依赖包自身的要求；应在本地实验输出中记录实际安装的版本。
@@ -71,7 +71,7 @@ python example.py
 
 ## 用中文对话提示运行
 
-复用本地稠密 2B 的 WSL 示例（FP16、Eager）：
+单卡 WSL 示例（BF16、Eager）：
 
 ```bash
 python -m scripts.chat "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
@@ -136,7 +136,7 @@ finally:
 
 `exit()` 当前负责同步 CUDA，并让引擎的退出处理只执行一次；它不承诺立即释放所有仍被 Python 对象引用的模型张量。
 
-模型的 `dtype` 是**必填参数**，仅允许 `"float16"`、`"bfloat16"`。不从检查点推断，不支持模型 dtype 为 `"auto"`。这与 KV 存储参数 `kv_cache_dtype="auto"` 不同：后者表示 KV 采用当前模型计算精度。
+模型的 `dtype` 是**必填参数**，仅允许 `"bfloat16"`。不从检查点推断，不支持模型 dtype 为 `"auto"`。这与 KV 存储参数 `kv_cache_dtype="auto"` 不同：后者表示 KV 采用当前模型计算精度。
 
 ## 参数怎样影响执行
 

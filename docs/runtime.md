@@ -69,7 +69,7 @@ output  = S_new × q_t
 
 单层活动循环矩阵的形状是 `[num_value_heads, value_head_dim, key_head_dim]`，不随序列长度增长。卷积状态也固定大小。不过本模型仍有 Full Attention 层，因此整个请求的显存并非与上下文长度无关。
 
-GDN Prefill/Decode 固定使用 FlashInfer 0.7.0 的 Indexed 算子，要求 GPU 为 SM90/100/120、模型 dtype 为 FP16/BF16 且 K/V head_dim 均为 128；不满足时在初始化阶段报错。循环状态统一维护 FP32 `[V,K]` 布局，不保留 PyTorch GDN 计算回退。
+GDN Prefill/Decode 固定使用 FlashInfer 0.7.0 的 Indexed 算子，要求 GPU 为 SM90/100/120、模型 dtype 为 BF16 且 K/V head_dim 均为 128；不满足时在初始化阶段报错。循环状态统一维护 FP32 `[V,K]` 布局，不保留 PyTorch GDN 计算回退。
 
 调度层的“分块 prefill”仍表示分几轮执行输入，与算子内部的 chunk 64 分别处理。非零历史状态、变长请求和前缀快照沿用原接口。不同调度分块会改变 FP32 舍入顺序，不能要求任意分块方式都逐位相同。Decode 保留现有向量化递归路径；分块递推与 HF 数学等价但运算顺序不同，不保证逐位一致，也不代表完整模型已与 HF 对齐。
 

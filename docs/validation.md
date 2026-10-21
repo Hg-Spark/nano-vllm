@@ -1,6 +1,6 @@
 # 验证与性能分析
 
-本页集中维护命令、覆盖范围与结果判定。实验报告需保存环境、模型 revision、输入、配置、原始指标及验证状态。模型计算 dtype 必须显式指定为 `float16` 或 `bfloat16`，没有 `auto` 默认值。
+本页集中维护命令、覆盖范围与结果判定。实验报告需保存环境、模型 revision、输入、配置、原始指标及验证状态。模型计算 dtype 必须显式指定为 `bfloat16`，没有 `auto` 默认值。
 
 ## 顺序测试脚本
 
@@ -62,7 +62,7 @@ bash benchmarks/run_tests.sh --help
 
 ```bash
 export NANOVLLM_MODEL=/absolute/path/to/Qwen3.5
-export NANOVLLM_DTYPE=float16
+export NANOVLLM_DTYPE=bfloat16
 python -m pytest tests/unit -q
 python -m pytest tests/integration -q
 python -m scripts.verify_qwen3_5 "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE"
@@ -102,7 +102,7 @@ python -m scripts.profile_decode "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE"
 
 CI 分别运行 Ruff/静态检查与自动发现的 CPU 单元测试；FlashInfer GPU Kernel 测试归入 `tests/integration/`，需在支持的 CUDA 设备上运行。CI 通过不代表 GPU 集成测试通过。
 
-CUTLASS MoE 集成测试未在受支持 GPU 上运行时必须保留 PENDING/SKIP；FlashInfer GDN 集成测试同理。现有 GDN 集成测试包含 FP16/BF16 的独立逐 token 递推对照及原有批次/状态槽检查；这是测试参考计算，不是运行时 PyTorch GDN 后端。
+CUTLASS MoE 集成测试未在受支持 GPU 上运行时必须保留 PENDING/SKIP；FlashInfer GDN 集成测试同理。现有 GDN 集成测试包含 BF16 的独立逐 token 递推对照及原有批次/状态槽检查；这是测试参考计算，不是运行时 PyTorch GDN 后端。
 
 ## 比较真实权重的生成结果
 
@@ -333,7 +333,7 @@ python -m scripts.verify_qwen3_5_multimodal "$NANOVLLM_MODEL" /path/to/image.jpg
 
 ```bash
 export NANOVLLM_MODEL=/absolute/path/to/Qwen3.5
-export NANOVLLM_DTYPE=float16
+export NANOVLLM_DTYPE=bfloat16
 REPEATS=1 bash benchmarks/run.sh smoke
 REPEATS=5 bash benchmarks/run.sh full
 REPEATS=5 bash benchmarks/run.sh tail

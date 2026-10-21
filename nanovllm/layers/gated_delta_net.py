@@ -284,11 +284,6 @@ class GatedDeltaNet(nn.Module):
             conv_state_indices=state_slot_ids,
         )
         query, key, value = self._split_qkv(mixed_qkv)
-        # FlashInfer 0.7.0 FP32-state decode loads Q/K/V through BF16 registers.
-        if query.dtype == torch.float16:
-            query = query.to(torch.bfloat16)
-            key = key.to(torch.bfloat16)
-            value = value.to(torch.bfloat16)
         a = _align_flashinfer_tensor(a.unsqueeze(1))
         b = _align_flashinfer_tensor(b.unsqueeze(1))
         aligned_slot_ids = _align_flashinfer_tensor(state_slot_ids.to(torch.int32))
@@ -298,9 +293,9 @@ class GatedDeltaNet(nn.Module):
                 key.unsqueeze(1).contiguous(),
                 value.unsqueeze(1).contiguous(),
                 None,
-                self.A_log.float(),
+                self.A_log.detach().float(),
                 a,
-                self.dt_bias.float(),
+                self.dt_bias.detach().float(),
                 b,
                 scale=self.head_k_dim**-0.5,
                 use_qk_l2norm=True,
