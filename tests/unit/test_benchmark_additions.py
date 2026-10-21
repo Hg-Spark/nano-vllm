@@ -191,7 +191,6 @@ class BenchmarkAdditionsTest(unittest.TestCase):
             self.assertIn("p99=n/a ms", out.getvalue())
             self.assertIn("Synthetic P99 ITL comparison withheld", out.getvalue())
 
-
     def test_interference_reuses_exclusive_baseline_across_caps(self):
         def record(mode, cap, budget=512, token_hash="matching"):
             return {
@@ -199,14 +198,19 @@ class BenchmarkAdditionsTest(unittest.TestCase):
                 "execution_status": "completed",
                 "config": {
                     "scenario": "interference",
-                    "model": "model", "dtype": "bfloat16",
-                    "max_num_seqs": 4, "budget": budget,
+                    "model": "model",
+                    "dtype": "bfloat16",
+                    "max_num_seqs": 4,
+                    "budget": budget,
                     "mixed_prefill_limit": cap,
-                    "graph_sizes": [], "cache_entries": 0, "schedule_mode": mode,
+                    "graph_sizes": [],
+                    "cache_entries": 0,
+                    "schedule_mode": mode,
                     "seed": 0,
                 },
                 "result": {
-                    "gpu": "test GPU", "compute_capability": [9, 0],
+                    "gpu": "test GPU",
+                    "compute_capability": [9, 0],
                     "metrics": {
                         "output_throughput_tok_s": 100 if mode == "exclusive_decode_first" else 120,
                         "tpot_seconds": {"mean": 0.01},
@@ -276,21 +280,21 @@ class BenchmarkAdditionsTest(unittest.TestCase):
             path = Path(folder, "tests.toml")
             for mode in ("tail", "long"):
                 path.write_text(
-                    chr(10).join((
-                        'model = "model"',
-                        'output_dir = "results"',
-                        'stage = "all"',
-                        '[benchmark]',
-                        f'mode = "{mode}"',
-                        '',
-                    )),
+                    chr(10).join(
+                        (
+                            'model = "model"',
+                            'output_dir = "results"',
+                            'stage = "all"',
+                            "[benchmark]",
+                            f'mode = "{mode}"',
+                            "",
+                        )
+                    ),
                     encoding="utf-8",
                 )
                 with self.assertRaisesRegex(ValueError, "benchmark.mode must be smoke/full"):
                     load_config(path, root=Path(folder))
-                self.assertEqual(
-                    load_config(path, root=Path(folder), stage=mode)["stage"], mode
-                )
+                self.assertEqual(load_config(path, root=Path(folder), stage=mode)["stage"], mode)
 
 
 if __name__ == "__main__":
