@@ -181,6 +181,26 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
                 self.assertEqual(cache.snapshot_bytes, 0)
                 self.assertEqual(manager.block_refcounts[second_block], 0)
 
+    def test_checkpoint_publish_eviction_and_peak_snapshot_counters(self):
+        manager = BlockManager(
+            num_blocks=12,
+            block_size=16,
+            max_prefix_entries=1,
+            snapshot_nbytes=256,
+        )
+        cache = manager.prefix_cache
+        self.assertEqual((cache.published_count, cache.evicted_count, cache.peak_snapshot_bytes), (0, 0, 0))
+
+        publish_prefix(manager, [1] * 64 + [9], 64)
+        self.assertEqual((cache.published_count, cache.evicted_count), (1, 0))
+        publish_prefix(manager, [2] * 64 + [9], 64)
+        self.assertEqual((cache.published_count, cache.evicted_count), (2, 1))
+        self.assertEqual(cache.peak_snapshot_bytes, 512)
+        self.assertEqual(cache.snapshot_bytes, 256)
+        self.assertEqual(len(cache), 1)
+        self.assertTrue(cache.evict())
+        self.assertEqual((cache.evicted_count, cache.snapshot_bytes, len(cache)), (2, 0, 0))
+
     def test_global_eviction_admits_new_branch(self):
         manager = BlockManager(num_blocks=32, block_size=16, max_prefix_entries=2)
         shared = list(range(128))
