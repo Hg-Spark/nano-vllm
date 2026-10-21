@@ -72,7 +72,11 @@ def execute(config, output):
     try:
         run("nvidia-smi", ["nvidia-smi"])
         # Keep long-context stress opt-in to avoid exhausting smaller GPUs in 'all'.
-        stages = ("check", "bench", "tail", "capacity") if config["stage"] == "all" else (config["stage"],)
+        stages = (
+            ("check", "bench", "tail", "capacity")
+            if config["stage"] == "all"
+            else (config["stage"],)
+        )
         for stage in stages:
             if stage == "check":
                 check = config["correctness"]
