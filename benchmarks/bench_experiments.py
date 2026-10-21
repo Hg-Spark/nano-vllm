@@ -76,7 +76,9 @@ def arguments():
         "--graph-sizes", default="", help="comma separated Graph buckets, e.g. 1,2,4; empty=Eager"
     )
     p.add_argument(
-        "--min-graph-coverage", type=float, default=0.0,
+        "--min-graph-coverage",
+        type=float,
+        default=0.0,
         help="fail a Graph throughput run if fewer than this fraction of decode forwards replay",
     )
     p.add_argument("--cache-entries", type=int, default=0, help="0 disables prefix cache")
@@ -420,7 +422,10 @@ def run(a):
                 reason: count - fallback_before[reason]
                 for reason, count in graph_fallbacks().items()
             }
-            if measured_replays > decode_calls or sum(measured_fallbacks.values()) != decode_calls - measured_replays:
+            if (
+                measured_replays > decode_calls
+                or sum(measured_fallbacks.values()) != decode_calls - measured_replays
+            ):
                 raise RuntimeError("Decode Graph replay/fallback accounting is inconsistent")
             coverage = measured_replays / decode_calls if decode_calls else 0.0
             metrics.update(
@@ -429,8 +434,10 @@ def run(a):
                 eager_decode_forward_calls=decode_calls - measured_replays,
                 graph_fallback_reasons=measured_fallbacks,
             )
-            if a.graph_sizes and a.scenario == "throughput" and (
-                not measured_replays or coverage < a.min_graph_coverage
+            if (
+                a.graph_sizes
+                and a.scenario == "throughput"
+                and (not measured_replays or coverage < a.min_graph_coverage)
             ):
                 raise RuntimeError(
                     f"Graph coverage {coverage:.1%} below required {a.min_graph_coverage:.1%}"
