@@ -81,8 +81,10 @@ def main(argv=None):
     ap.add_argument("--min-repeats", type=int, default=5)
     ap.add_argument("--min-itl-samples", type=int, default=1000)
     args = ap.parse_args(argv)
-    if args.min_repeats < 1 or args.min_itl_samples < 1:
-        ap.error("--min-repeats and --min-itl-samples must be positive")
+    if args.min_repeats < 1:
+        ap.error("--min-repeats must be positive")
+    if args.min_itl_samples < 1000:
+        ap.error("--min-itl-samples must be at least 1000 for P99 reporting")
 
     samples = []
     failed = []
@@ -174,6 +176,18 @@ def main(argv=None):
                 f"\n{label}: {scenario}, batch={p['max_num_seqs']}, budget={p['budget']}, variant={v}"
             )
             print(f"  Output throughput improvement: {format_percent(throughput)}")
+            if scenario in ("throughput", "decode") and all(
+                "graph_coverage" in r["metrics"] for r in treatment
+            ):
+                graph_coverage = median(r["metrics"]["graph_coverage"] for r in treatment)
+                eager_calls = median(r["metrics"]["eager_decode_forward_calls"] for r in treatment)
+                print(f"  Graph coverage: {graph_coverage:.1%}; eager fallback calls: {eager_calls:.0f}")
+                reasons = ("missing_bucket", "layout_exceeded")
+                for reason in reasons:
+                    count = median(
+                        r["metrics"]["graph_fallback_reasons"][reason] for r in treatment
+                    )
+                    print(f"    {reason}: {count:.0f}")
             if all(
                 "peak_cuda_memory_gib" in run["metrics"]
                 for run in [*baseline, *treatment]
@@ -206,6 +220,19 @@ def main(argv=None):
                         f"  Target scheduled checkpoints (not confirmed retained): "
                         f"{b_cps:.0f} -> {t_cps:.0f}"
                     )
+                if all(
+                    "published_checkpoints_during_target" in r["details"]
+                    for r in treatment
+                ):
+                    fields = (
+                        "published_checkpoints_during_target",
+                        "evicted_checkpoints_during_target",
+                        "retained_checkpoints_after_target",
+                        "peak_snapshot_bytes_including_setup",
+                    )
+                    for field in fields:
+                        value = median(r["details"][field] for r in treatment)
+                        print(f"  {field}: {value:.0f}")
             if latency_key:
                 improvement = percent(
                     milliseconds(baseline, latency_key),
@@ -236,26 +263,28 @@ def main(argv=None):
                         * 1000
                         for r in runs
                     )
-                    p99 = median(
-                        r["metrics"]["long_prompt_interference"]["short_token_gap_after_seconds"][
-                            "p99"
-                        ]
-                        * 1000
-                        for r in runs
-                    )
                     samples = min(
                         r["metrics"]["long_prompt_interference"].get(
                             "short_token_gap_after_samples", 0
                         )
                         for r in runs
                     )
+                    p99_values = [
+                        r["metrics"]["long_prompt_interference"]["short_token_gap_after_seconds"].get("p99")
+                        for r in runs
+                    ]
+                    p99 = (
+                        median(value * 1000 for value in p99_values)
+                        if samples >= args.min_itl_samples and all(value is not None for value in p99_values)
+                        else None
+                    )
                     tail_stats.append((p99, samples))
                     print(
                         f"  Post-arrival observed token gap ({label2}): "
-                        f"mean={gap:.2f} ms, p99={p99:.2f} ms, "
+                        f"mean={gap:.2f} ms, p99={format_ms(p99).strip()} ms, "
                         f"min samples/run={samples} (synthetic workload)"
                     )
-                if min(samples for _, samples in tail_stats) >= args.min_itl_samples:
+                if all(p99 is not None for p99, _ in tail_stats):
                     reduction = percent(tail_stats[0][0], tail_stats[1][0], higher_better=False)
                     print(f"  Synthetic P99 ITL reduction: {format_percent(reduction)}")
                 else:
