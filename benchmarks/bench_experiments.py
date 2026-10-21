@@ -238,12 +238,8 @@ def run(a):
         max_num_seqs=a.max_num_seqs,
         max_model_len=a.max_model_len,
         gpu_memory_utilization=a.gpu_memory_utilization,
-        activation_reserve_bytes=getattr(a, "activation_reserve_mib", 256) * 1024**2,
-        max_mixed_prefill_tokens=(
-            None
-            if getattr(a, "mixed_prefill_limit", 128) == -1
-            else getattr(a, "mixed_prefill_limit", 128)
-        ),
+        activation_reserve_bytes=a.activation_reserve_mib * 1024**2,
+        max_mixed_prefill_tokens=(None if a.mixed_prefill_limit == -1 else a.mixed_prefill_limit),
         kv_cache_dtype=a.kv_cache_dtype,
         max_prefix_cache_entries=a.cache_entries,
         decode_graph_batch_sizes=a.graph_sizes,
