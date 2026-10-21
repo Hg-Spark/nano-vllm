@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-STAGES = ("all", "check", "bench", "tail", "capacity")
+STAGES = ("all", "check", "bench", "tail", "long", "capacity")
 
 
 def load_config(path, root=ROOT, stage=None):
@@ -71,7 +71,8 @@ def execute(config, output):
 
     try:
         run("nvidia-smi", ["nvidia-smi"])
-        stages = STAGES[1:] if config["stage"] == "all" else (config["stage"],)
+        # Keep long-context stress opt-in to avoid exhausting smaller GPUs in 'all'.
+        stages = ("check", "bench", "tail", "capacity") if config["stage"] == "all" else (config["stage"],)
         for stage in stages:
             if stage == "check":
                 check = config["correctness"]
@@ -117,8 +118,8 @@ def execute(config, output):
                         str(output / "prefix-parity.json"),
                     ],
                 )
-            elif stage in ("bench", "tail"):
-                mode = config["benchmark"]["mode"] if stage == "bench" else "tail"
+            elif stage in ("bench", "tail", "long"):
+                mode = config["benchmark"]["mode"] if stage == "bench" else stage
                 run(stage, ["bash", "benchmarks/run.sh", mode])
             elif stage == "capacity":
                 args = [*model, "--out-dir", str(output / "capacity")]
