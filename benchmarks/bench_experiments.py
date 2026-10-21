@@ -57,6 +57,18 @@ def arguments():
     p.add_argument("--output-len", type=int, default=256)
     p.add_argument("--max-num-seqs", type=int, default=4)
     p.add_argument("--budget", type=int, default=512, help="max_num_batched_tokens")
+    p.add_argument(
+        "--mixed-prefill-limit",
+        type=int,
+        default=128,
+        help="prefill tokens per mixed step; -1 removes the mixed-load cap",
+    )
+    p.add_argument(
+        "--activation-reserve-mib",
+        type=int,
+        default=256,
+        help="transient activation headroom reserved before sizing static KV (MiB)",
+    )
     p.add_argument("--max-model-len", type=int, default=4096)
     p.add_argument("--gpu-memory-utilization", type=float, default=0.8)
     p.add_argument("--kv-cache-dtype", choices=("auto", "fp8_e4m3"), default="auto")
@@ -86,6 +98,10 @@ def arguments():
         p.error("model path or NANOVLLM_MODEL must be provided")
     a.graph_sizes = parse_graph_sizes(a.graph_sizes)
     validate_positive(p, a, "input_len", "num_requests")
+    if a.mixed_prefill_limit < -1:
+        p.error("--mixed-prefill-limit must be -1 or non-negative")
+    if a.activation_reserve_mib < 0:
+        p.error("--activation-reserve-mib must be non-negative")
     if a.output_len < 2:
         p.error("output-len must be at least 2")
     if a.scenario == "throughput" and a.input_len + a.output_len > a.max_model_len:
@@ -222,6 +238,12 @@ def run(a):
         max_num_seqs=a.max_num_seqs,
         max_model_len=a.max_model_len,
         gpu_memory_utilization=a.gpu_memory_utilization,
+        activation_reserve_bytes=getattr(a, "activation_reserve_mib", 256) * 1024**2,
+        max_mixed_prefill_tokens=(
+            None
+            if getattr(a, "mixed_prefill_limit", 128) == -1
+            else getattr(a, "mixed_prefill_limit", 128)
+        ),
         kv_cache_dtype=a.kv_cache_dtype,
         max_prefix_cache_entries=a.cache_entries,
         decode_graph_batch_sizes=a.graph_sizes,
