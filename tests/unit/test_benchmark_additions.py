@@ -192,5 +192,100 @@ class BenchmarkAdditionsTest(unittest.TestCase):
             self.assertIn("Synthetic P99 ITL comparison withheld", out.getvalue())
 
 
+    def test_interference_reuses_exclusive_baseline_across_caps(self):
+        def record(mode, cap, budget=512, token_hash="matching"):
+            return {
+                "experiment": "benchmark_interference",
+                "execution_status": "completed",
+                "config": {
+                    "scenario": "interference",
+                    "model": "model", "dtype": "bfloat16",
+                    "max_num_seqs": 4, "budget": budget,
+                    "mixed_prefill_limit": cap,
+                    "graph_sizes": [], "cache_entries": 0, "schedule_mode": mode,
+                    "seed": 0,
+                },
+                "result": {
+                    "gpu": "test GPU", "compute_capability": [9, 0],
+                    "metrics": {
+                        "output_throughput_tok_s": 100 if mode == "exclusive_decode_first" else 120,
+                        "tpot_seconds": {"mean": 0.01},
+                        "long_prompt_interference": {
+                            "long_ttft_seconds": 0.2,
+                            "short_token_gap_after_seconds": {"mean": 0.02, "p99": None},
+                            "short_token_gap_after_samples": 20,
+                        },
+                    },
+                    "details": {"token_hash": token_hash},
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "exclusive.json").write_text(
+                json.dumps(record("exclusive_decode_first", -1)), encoding="utf-8"
+            )
+            # Budget sweep treatment and three independent mixed-prefill limits.
+            for cap in (-1, 64, 128, 256):
+                (root / f"mixed_{cap}.json").write_text(
+                    json.dumps(record("mixed", cap)), encoding="utf-8"
+                )
+            out = StringIO()
+            with redirect_stdout(out):
+                summarize_bench.main([folder, "--min-repeats", "1"])
+            self.assertIn("Successful paired comparisons: 4", out.getvalue())
+            self.assertIn("cap=64", out.getvalue())
+            self.assertIn("cap=256", out.getvalue())
+
+            # A reused baseline must not silently cross incompatible prompt/output tokens.
+            (root / "mixed_64.json").write_text(
+                json.dumps(record("mixed", 64, token_hash="wrong")), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(SystemExit, "PARITY FAILURE"):
+                with redirect_stdout(StringIO()):
+                    summarize_bench.main([folder, "--min-repeats", "1"])
+
+            # An unrelated budget cannot use the shared exclusive baseline.
+            (root / "mixed_64.json").write_text(
+                json.dumps(record("mixed", 64, budget=256)), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(SystemExit, "Some runs could not be compared"):
+                with redirect_stdout(StringIO()):
+                    summarize_bench.main([folder, "--min-repeats", "1"])
+
+    def test_graph_usage_consistency(self):
+        from benchmarks.bench_experiments import graph_counters, measured_graph_usage
+
+        runner = SimpleNamespace(
+            decode_graph_buckets={1: SimpleNamespace(replay_count=2)},
+            decode_graph_fallbacks={"missing_bucket": 4, "layout_exceeded": 0},
+        )
+        before = graph_counters(runner)
+        runner.decode_graph_buckets[1].replay_count += 3
+        runner.decode_graph_fallbacks["missing_bucket"] += 2
+        metrics = measured_graph_usage(runner, before, 5)
+        self.assertEqual(metrics["graph_coverage"], 0.6)
+        self.assertEqual(metrics["eager_decode_forward_calls"], 2)
+        with self.assertRaisesRegex(RuntimeError, "accounting is inconsistent"):
+            measured_graph_usage(runner, before, 4)
+
+    def test_bench_mode_rejects_duplicate_tail_or_long_stages(self):
+        from benchmarks.run_tests import load_config
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder, "tests.toml")
+            for mode in ("tail", "long"):
+                path.write_text(
+                    f'model = "model"\\noutput_dir = "results"\\nstage = "all"\\n'
+                    f'[benchmark]\\nmode = "{mode}"\\n'.replace("\\\\n", "\\n"),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, "benchmark.mode must be smoke/full"):
+                    load_config(path, root=Path(folder))
+                self.assertEqual(
+                    load_config(path, root=Path(folder), stage=mode)["stage"], mode
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
