@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 try:
     import torch
@@ -139,18 +140,51 @@ class FlashInferRuntimeOpsTest(unittest.TestCase):
 
         pool = PinnedMetadataPool()
         try:
-            with torch.device("cuda"):
-                for dtype in ("int32", "int64", "float32"):
-                    for values in ([1, 2], [3], [4, 5, 6]):
-                        with self.subTest(dtype=dtype, values=values):
-                            result = pool.to_cuda(dtype, values, dtype)
-                            expected = torch.tensor(
-                                values, dtype=getattr(torch, dtype), device="cpu"
-                            )
-                            torch.testing.assert_close(result.cpu(), expected)
-                            self.assertTrue(result.is_cuda)
-                            self.assertEqual(pool.buffers[dtype].device.type, "cpu")
-                            self.assertTrue(pool.buffers[dtype].is_pinned())
+            for dtype in ("int32", "int64", "float32"):
+                with self.subTest(dtype=dtype):
+                    first = pool.to_cuda(dtype, [1, 2], dtype)
+                    host = pool.buffers[dtype]
+                    ptr = host.data_ptr()
+                    self.assertTrue(host.is_pinned())
+
+                    # Observe the host data before the next transfer may overwrite it.
+                    # The spy forwards synchronize/record to the real CUDA event.
+                    event = pool._transfer_done
+                    observed = Mock(wraps=event)
+                    expected_before_wait = [1, 2]
+
+                    def wait_for_previous_upload():
+                        self.assertEqual(
+                            pool.buffers[dtype][:len(expected_before_wait)].tolist(),
+                            expected_before_wait,
+                        )
+                        event.synchronize()
+
+                    observed.synchronize.side_effect = wait_for_previous_upload
+                    pool._transfer_done = observed
+
+                    second = pool.to_cuda(dtype, [3], dtype)
+                    self.assertEqual(pool.buffers[dtype].data_ptr(), ptr)
+                    self.assertEqual(observed.synchronize.call_count, 1)
+
+                    expected_before_wait = [3]
+                    third = pool.to_cuda(dtype, [4, 5, 6], dtype)
+                    self.assertNotEqual(pool.buffers[dtype].data_ptr(), ptr)
+                    self.assertEqual(observed.synchronize.call_count, 2)
+                    self.assertEqual(observed.record.call_count, 2)
+
+                    # Check the original outputs only after exercising pending
+                    # transfers, so result.cpu() cannot conceal premature reuse.
+                    for result, values in (
+                        (first, [1, 2]), (second, [3]), (third, [4, 5, 6])
+                    ):
+                        self.assertTrue(result.is_cuda)
+                        torch.testing.assert_close(
+                            result.cpu(),
+                            torch.tensor(values, dtype=getattr(torch, dtype)),
+                        )
+                    self.assertTrue(pool.buffers[dtype].is_pinned())
+                    pool._transfer_done = event
         finally:
             pool.clear()
 
