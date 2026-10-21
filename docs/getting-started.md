@@ -146,7 +146,7 @@ finally:
 | --- | --- | --- |
 | `max_num_batched_tokens` | `512` | 一轮调度共享的 token 预算；先满足 decode，余量给 prefill |
 | `max_num_seqs` | `4` | 一轮请求数上限，也是活动 GDN 状态槽数量；分块 prefill 也占槽 |
-| `max_model_len` | `4096` | 单请求输入与最大输出的总 token 上限，还会被模型位置上限截断 |
+| `max_model_len` | `4096` | 单请求实际前向处理的 Token 上限（输入 + 最多生成 Token 数 - 1），还会被模型位置上限截断 |
 | `gpu_memory_utilization` | `0.8` | KV 容量估算使用的显存预算比例，范围 `(0,1]`；不是权重加载的硬上限 |
 | `kv_cache_block_size` | `16` | FlashInfer page size；当前允许 `16/32/64/128`，基线使用 16 |
 | `max_prefix_cache_entries` | `0` | 联合前缀缓存默认关闭；设为正数后限制缓存条目数，不影响请求自身的 KV/GDN 状态 |
@@ -199,7 +199,7 @@ MoE Prefill 与 Decode 均使用 FlashInfer CUTLASS Fused MoE，并共享按
 | 权重加载时 OOM | 首先核对完整权重显存；降低 KV 预算不能缩小权重 |
 | 首次 Prefill / Decode 时 OOM | 静态定容不会测量最坏激活峰值；降低 `gpu_memory_utilization`、Token Budget 或并发量，并按边界负载重新测量 |
 | `insufficient GPU memory ... recurrent state pools` | 权重与状态预留后没有足够 KV 容量；检查并发、显存占用及模型规模 |
-| `requested prompt (...) + max_tokens (...) exceeds max_model_len (...)` | 按 token 数检查 `输入长度 + max_tokens`，调整长度或有效上下文上限 |
+| `requested prompt (...) + max_tokens (...) - 1 exceeds max_model_len (...)` | 按实际处理 Token 数检查 `输入长度 + max_tokens - 1`，调整长度或有效上下文上限 |
 | `scheduler could not make progress` | 当前轮次无法安排工作；检查 KV 容量、状态槽及请求长度，不能假设分块就能无限扩展上下文 |
 | 未出现前缀命中 | 检查精确 token 前缀、完整块边界、条目是否被淘汰，以及缓存边界后是否仍有至少一个 token 待计算，见[第 2 章](scheduling.md) |
 | FP8 未校准告警 | 两个 scale 都为 `1.0` 时会提示；需要针对检查点验证精度，见[第 3 章](validation.md) |
