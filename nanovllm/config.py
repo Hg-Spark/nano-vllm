@@ -126,9 +126,11 @@ class Config:
             raise ValueError(
                 "max_num_batched_tokens, max_num_seqs, and max_model_len must be positive"
             )
-        if isinstance(self.activation_reserve_bytes, bool) or not isinstance(
-            self.activation_reserve_bytes, int
-        ) or self.activation_reserve_bytes < 0:
+        if (
+            isinstance(self.activation_reserve_bytes, bool)
+            or not isinstance(self.activation_reserve_bytes, int)
+            or self.activation_reserve_bytes < 0
+        ):
             raise ValueError("activation_reserve_bytes must be a non-negative integer")
         if self.max_mixed_prefill_tokens is not None and (
             isinstance(self.max_mixed_prefill_tokens, bool)
