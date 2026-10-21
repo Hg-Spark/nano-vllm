@@ -276,8 +276,14 @@ class BenchmarkAdditionsTest(unittest.TestCase):
             path = Path(folder, "tests.toml")
             for mode in ("tail", "long"):
                 path.write_text(
-                    f'model = "model"\\noutput_dir = "results"\\nstage = "all"\\n'
-                    f'[benchmark]\\nmode = "{mode}"\\n'.replace("\\\\n", "\\n"),
+                    chr(10).join((
+                        'model = "model"',
+                        'output_dir = "results"',
+                        'stage = "all"',
+                        '[benchmark]',
+                        f'mode = "{mode}"',
+                        '',
+                    )),
                     encoding="utf-8",
                 )
                 with self.assertRaisesRegex(ValueError, "benchmark.mode must be smoke/full"):
