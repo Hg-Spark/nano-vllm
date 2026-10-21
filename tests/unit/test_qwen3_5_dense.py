@@ -55,22 +55,44 @@ class Qwen3_5DenseTest(unittest.TestCase):
         # These offsets must not come from packed_checkpoint_shards(), the
         # production mapping being tested.
         shards = (
-            ("model.layers.0.linear_attn.in_proj_qkv.weight",
-             "model.layers.0.linear_attn.in_proj.weight", 0, 16),
-            ("model.layers.0.linear_attn.in_proj_z.weight",
-             "model.layers.0.linear_attn.in_proj.weight", 16, 24),
-            ("model.layers.0.linear_attn.in_proj_b.weight",
-             "model.layers.0.linear_attn.in_proj.weight", 24, 26),
-            ("model.layers.0.linear_attn.in_proj_a.weight",
-             "model.layers.0.linear_attn.in_proj.weight", 26, 28),
-            ("model.layers.0.mlp.gate_proj.weight",
-             "model.layers.0.mlp.gate_up_proj.weight", 0, 12),
-            ("model.layers.0.mlp.up_proj.weight",
-             "model.layers.0.mlp.gate_up_proj.weight", 12, 24),
-            ("model.layers.1.mlp.gate_proj.weight",
-             "model.layers.1.mlp.gate_up_proj.weight", 0, 12),
-            ("model.layers.1.mlp.up_proj.weight",
-             "model.layers.1.mlp.gate_up_proj.weight", 12, 24),
+            (
+                "model.layers.0.linear_attn.in_proj_qkv.weight",
+                "model.layers.0.linear_attn.in_proj.weight",
+                0,
+                16,
+            ),
+            (
+                "model.layers.0.linear_attn.in_proj_z.weight",
+                "model.layers.0.linear_attn.in_proj.weight",
+                16,
+                24,
+            ),
+            (
+                "model.layers.0.linear_attn.in_proj_b.weight",
+                "model.layers.0.linear_attn.in_proj.weight",
+                24,
+                26,
+            ),
+            (
+                "model.layers.0.linear_attn.in_proj_a.weight",
+                "model.layers.0.linear_attn.in_proj.weight",
+                26,
+                28,
+            ),
+            (
+                "model.layers.0.mlp.gate_proj.weight",
+                "model.layers.0.mlp.gate_up_proj.weight",
+                0,
+                12,
+            ),
+            ("model.layers.0.mlp.up_proj.weight", "model.layers.0.mlp.gate_up_proj.weight", 12, 24),
+            (
+                "model.layers.1.mlp.gate_proj.weight",
+                "model.layers.1.mlp.gate_up_proj.weight",
+                0,
+                12,
+            ),
+            ("model.layers.1.mlp.up_proj.weight", "model.layers.1.mlp.gate_up_proj.weight", 12, 24),
         )
         weights = {
             name: torch.full_like(param, 0.1 + i * 0.01)

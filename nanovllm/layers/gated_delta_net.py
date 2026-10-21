@@ -100,11 +100,15 @@ class GatedDeltaNet(nn.Module):
         for index, state in enumerate(conv_states):
             segments.extend((state.T, mixed_qkv[q_offsets[index] : q_offsets[index + 1]]))
         packed = torch.cat(segments, dim=0)
-        output = causal_conv1d_fn(
-            packed.T.unsqueeze(0),
-            self.conv1d.weight.squeeze(1),
-            activation="silu",
-        ).squeeze(0).T
+        output = (
+            causal_conv1d_fn(
+                packed.T.unsqueeze(0),
+                self.conv1d.weight.squeeze(1),
+                activation="silu",
+            )
+            .squeeze(0)
+            .T
+        )
 
         parts = []
         cursor = 0

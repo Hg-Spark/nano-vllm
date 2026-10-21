@@ -65,12 +65,9 @@ def allocate_runtime_caches(
     # selected layer states before D2H. Keep this temporary peak out of KV capacity.
     checkpoint_workspace_bytes = 0
     snapshot_size = sum(module.state_cache_nbytes(1) for module in state_modules)
-    if (
-        config.max_prefix_cache_entries > 0
-        and (
-            config.max_prefix_cache_snapshot_bytes is None
-            or config.max_prefix_cache_snapshot_bytes >= snapshot_size
-        )
+    if config.max_prefix_cache_entries > 0 and (
+        config.max_prefix_cache_snapshot_bytes is None
+        or config.max_prefix_cache_snapshot_bytes >= snapshot_size
     ):
         checkpoint_slots = config.max_num_seqs
         checkpoint_slots += config.max_num_batched_tokens // GDN_CHECKPOINT_INTERVAL

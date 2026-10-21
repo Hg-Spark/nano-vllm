@@ -148,8 +148,12 @@ class BenchmarkExperimentsTest(unittest.TestCase):
             },
         }
         # Runtime versions are part of benchmark comparability, not A/B toggles.
-        env = {**base["result"], "config": base["config"],
-               "torch_version": "2.14.0", "torch_cuda_version": "13.0"}
+        env = {
+            **base["result"],
+            "config": base["config"],
+            "torch_version": "2.14.0",
+            "torch_cuda_version": "13.0",
+        }
         self.assertNotEqual(
             summary.workload_key(env),
             summary.workload_key({**env, "torch_version": "2.15.0"}),

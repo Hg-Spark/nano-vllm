@@ -63,12 +63,8 @@ class RotaryEmbeddingTest(unittest.TestCase):
 
         # Text-only Decode uses a single RoPE axis; repeated axes must be equivalent.
         text_positions = torch.tensor([[1, 2, 3]] * 3, device="cuda")
-        one_q, one_k = rope.apply_cached(
-            q, k, rope.head_size, rope.prepare(text_positions[:1])
-        )
-        three_q, three_k = rope.apply_cached(
-            q, k, rope.head_size, rope.prepare(text_positions)
-        )
+        one_q, one_k = rope.apply_cached(q, k, rope.head_size, rope.prepare(text_positions[:1]))
+        three_q, three_k = rope.apply_cached(q, k, rope.head_size, rope.prepare(text_positions))
         torch.testing.assert_close(one_q, three_q, atol=2e-2, rtol=2e-2)
         torch.testing.assert_close(one_k, three_k, atol=2e-2, rtol=2e-2)
 

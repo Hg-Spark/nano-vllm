@@ -57,9 +57,7 @@ class ModelRunnerTest(unittest.TestCase):
                     self.assertEqual(args[index].device.type, "cpu")
                     self.assertEqual(args[index].tolist(), list(expected))
                 self.assertIs(args[2 if prefill else 1], indices)
-                self.assertEqual(
-                    args[4 if prefill else 3 : 8 if prefill else 7], (8, 2, 128, 16)
-                )
+                self.assertEqual(args[4 if prefill else 3 : 8 if prefill else 7], (8, 2, 128, 16))
                 self.assertIs(result.attention_wrapper, wrapper)
                 self.assertIs(result.paged_kv_indices, indices)
 
@@ -81,9 +79,7 @@ class ModelRunnerTest(unittest.TestCase):
         }
         for name, (shape, dtype) in specs.items():
             setattr(bucket, name, torch.zeros(shape, dtype=dtype))
-        bucket._host_buffers = {
-            name: torch.empty_like(getattr(bucket, name)) for name in specs
-        }
+        bucket._host_buffers = {name: torch.empty_like(getattr(bucket, name)) for name in specs}
         bucket._host_transfer_done = Mock()
         bucket._has_pending_host_transfer = False
         bucket.wrapper = Mock()
@@ -99,15 +95,21 @@ class ModelRunnerTest(unittest.TestCase):
         bucket._host_transfer_done.record.side_effect = lambda _: steps.append("record")
         graph_layouts = (
             SimpleNamespace(
-                input_ids=(1, 2), rope_positions=((0, 0),),
-                kv_positions=(4, 1), state_slots=(0, 1),
-                paged_kv_indptr=(0, 2, 3), paged_kv_indices=(7, 2, 9),
+                input_ids=(1, 2),
+                rope_positions=((0, 0),),
+                kv_positions=(4, 1),
+                state_slots=(0, 1),
+                paged_kv_indptr=(0, 2, 3),
+                paged_kv_indices=(7, 2, 9),
                 paged_kv_last_page_len=(1, 2),
             ),
             SimpleNamespace(
-                input_ids=(3, 4), rope_positions=((0, 0),),
-                kv_positions=(8, 2), state_slots=(1, 0),
-                paged_kv_indptr=(0, 1, 4), paged_kv_indices=(4, 6, 8, 5),
+                input_ids=(3, 4),
+                rope_positions=((0, 0),),
+                kv_positions=(8, 2),
+                state_slots=(1, 0),
+                paged_kv_indptr=(0, 1, 4),
+                paged_kv_indices=(4, 6, 8, 5),
                 paged_kv_last_page_len=(8, 3),
             ),
         )
@@ -115,12 +117,12 @@ class ModelRunnerTest(unittest.TestCase):
             for index, layout in enumerate(graph_layouts):
                 bucket.prepare(layout)
                 self.assertEqual(
-                    steps, ["plan", "record"] if index == 0 else
-                    ["plan", "record", "wait", "plan", "record"]
+                    steps,
+                    ["plan", "record"]
+                    if index == 0
+                    else ["plan", "record", "wait", "plan", "record"],
                 )
-                self.assertEqual(
-                    bucket.paged_kv_indptr.tolist(), list(layout.paged_kv_indptr)
-                )
+                self.assertEqual(bucket.paged_kv_indptr.tolist(), list(layout.paged_kv_indptr))
                 self.assertEqual(
                     bucket.paged_kv_last_page_len.tolist(),
                     list(layout.paged_kv_last_page_len),

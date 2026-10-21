@@ -239,9 +239,7 @@ class FlashInferGDNTest(unittest.TestCase):
         self.assertEqual(actual.dtype, torch.float16)
         torch.testing.assert_close(actual, expected, atol=2e-2, rtol=5e-2)
         torch.testing.assert_close(pool.conv_state, expected_conv)
-        torch.testing.assert_close(
-            pool.recurrent_state, expected_recurrent, atol=5e-3, rtol=5e-2
-        )
+        torch.testing.assert_close(pool.recurrent_state, expected_recurrent, atol=5e-3, rtol=5e-2)
 
     @torch.no_grad()
     def test_decode_tracks_slot_permutations_across_steps(self):

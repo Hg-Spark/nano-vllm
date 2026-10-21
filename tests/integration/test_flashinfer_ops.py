@@ -155,7 +155,7 @@ class FlashInferRuntimeOpsTest(unittest.TestCase):
 
                     def wait_for_previous_upload():
                         self.assertEqual(
-                            pool.buffers[dtype][:len(expected_before_wait)].tolist(),
+                            pool.buffers[dtype][: len(expected_before_wait)].tolist(),
                             expected_before_wait,
                         )
                         event.synchronize()
@@ -181,8 +181,10 @@ class FlashInferRuntimeOpsTest(unittest.TestCase):
                     # Check the original outputs only after exercising pending
                     # transfers, so result.cpu() cannot conceal premature reuse.
                     for result, values in (
-                        (first, [1, 2]), (second, [3, 4]),
-                        (third, [5]), (grown, [6, 7, 8]),
+                        (first, [1, 2]),
+                        (second, [3, 4]),
+                        (third, [5]),
+                        (grown, [6, 7, 8]),
                     ):
                         self.assertTrue(result.is_cuda)
                         torch.testing.assert_close(

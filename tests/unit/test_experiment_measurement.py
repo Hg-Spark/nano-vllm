@@ -120,28 +120,20 @@ class MeasurementTest(unittest.TestCase):
         from nanovllm.engine import cache_runtime
         from scripts.verify_prefix_resume import run_prefix_resume_probe
 
-        entry = SimpleNamespace(
-            num_tokens=64, block_ids=(0, 1, 2, 3), state_snapshot=object()
-        )
-        cache = SimpleNamespace(
-            snapshot_nbytes=16, find=lambda *args, **kwargs: entry
-        )
+        entry = SimpleNamespace(num_tokens=64, block_ids=(0, 1, 2, 3), state_snapshot=object())
+        cache = SimpleNamespace(snapshot_nbytes=16, find=lambda *args, **kwargs: entry)
         tokenizer = SimpleNamespace(encode=lambda *args, **kwargs: [1, 2, 3])
 
         class StubEngine:
             def __init__(self, *args, max_prefix_cache_entries=0, **kwargs):
                 self.cached = max_prefix_cache_entries > 0
                 self.calls = 0
-                self.scheduler = SimpleNamespace(
-                    block_manager=SimpleNamespace(prefix_cache=cache)
-                )
+                self.scheduler = SimpleNamespace(block_manager=SimpleNamespace(prefix_cache=cache))
 
             def generate(self, *args, **kwargs):
                 self.calls += 1
                 if self.cached and self.calls == 2:
-                    seq = SimpleNamespace(
-                        committed_tokens=64, block_table=list(entry.block_ids)
-                    )
+                    seq = SimpleNamespace(committed_tokens=64, block_table=list(entry.block_ids))
                     cache_runtime.restore_gdn_state(None, seq, entry.state_snapshot)
                 return [{"token_ids": []}]
 

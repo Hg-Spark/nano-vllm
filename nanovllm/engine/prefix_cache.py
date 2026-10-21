@@ -229,8 +229,7 @@ class PrefixCache:
 
         # Replace intermediate checkpoints before evicting globally.
         while len(self._entries) > self.max_entries or (
-            self.max_snapshot_bytes is not None
-            and self._snapshot_bytes > self.max_snapshot_bytes
+            self.max_snapshot_bytes is not None and self._snapshot_bytes > self.max_snapshot_bytes
         ):
             if len(path) >= 3:
                 interior = path[1:-1]
