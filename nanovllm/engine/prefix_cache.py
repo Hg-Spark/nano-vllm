@@ -108,16 +108,22 @@ class PrefixCache:
         if seq.image_state is not None:
             end = min(end, seq.image_state.image_start)
         candidates = []
-        cached = []
         hashes, _ = _sequence_block_hashes(seq, self.block_size, end)
         # A joint GDN/KV checkpoint must align to both the 64-token state grid
-        # and the KV page boundary; do not inspect non-checkpoint blocks.
+        # and the KV page boundary. Revisit resident entries (bounded by
+        # max_entries) instead of rescanning every old checkpoint each chunk.
         step = lcm(GDN_CHECKPOINT_INTERVAL, self.block_size)
-        for position in range(step, end + 1, step):
+        cached = sorted(
+            entry.num_tokens
+            for digest, entry in self._entries.items()
+            if 0 < entry.num_tokens <= end
+            and entry.num_tokens % step == 0
+            and hashes[entry.num_tokens // self.block_size - 1] == digest
+        )
+        first_new = (start // step + 1) * step
+        for position in range(first_new, end + 1, step):
             digest = hashes[position // self.block_size - 1]
-            if digest in self._entries:
-                cached.append(position)
-            elif position > start:
+            if digest not in self._entries:
                 candidates.append((position, digest))
         return candidates, cached
 
