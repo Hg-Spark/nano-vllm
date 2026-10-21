@@ -53,6 +53,7 @@ class CacheRuntimeTest(unittest.TestCase):
         )
         config = SimpleNamespace(
             gpu_memory_utilization=0.75,
+            activation_reserve_bytes=0,
             decode_graph_batch_sizes=(),
             kv_cache_dtype="auto",
             kv_cache_block_size=16,
@@ -113,6 +114,19 @@ class CacheRuntimeTest(unittest.TestCase):
         ):
             _, num_blocks = allocate_runtime_caches(model, config)
         self.assertEqual(num_blocks, 2)
+
+        # A reserved peak-activation budget reduces KV capacity before allocation.
+        config.decode_graph_batch_sizes = ()
+        config.activation_reserve_bytes = 1024
+        with (
+            patch(
+                "nanovllm.engine.cache_runtime.torch.cuda.mem_get_info",
+                return_value=(4096, 8192),
+            ),
+            patch("nanovllm.engine.cache_runtime.torch.empty", return_value=MagicMock()),
+        ):
+            _, num_blocks = allocate_runtime_caches(model, config)
+        self.assertEqual(num_blocks, 1)
 
 
 if __name__ == "__main__":
