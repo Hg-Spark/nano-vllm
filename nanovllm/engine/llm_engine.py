@@ -142,12 +142,14 @@ class LLMEngine:
             ):
                 raise ValueError(f"prompt token IDs must be integers in [0, {vocab_size})")
         prompt_len = len(prompt)
-        if prompt_len + sampling_params.max_tokens > self.max_model_len:
+        # The final sampled token is returned without another forward pass.
+        # Only prompt tokens and all preceding generated tokens need context/KV space.
+        required_kv_tokens = prompt_len + sampling_params.max_tokens - 1
+        if required_kv_tokens > self.max_model_len:
             raise ValueError(
                 f"requested prompt ({prompt_len}) + max_tokens ({sampling_params.max_tokens}) "
-                f"exceeds max_model_len ({self.max_model_len})"
+                f"- 1 exceeds max_model_len ({self.max_model_len})"
             )
-        required_kv_tokens = prompt_len + max(0, sampling_params.max_tokens - 1)
         if required_kv_tokens > self.max_kv_tokens:
             raise ValueError(
                 f"request exceeds physical KV cache capacity: "
