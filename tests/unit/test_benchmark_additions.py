@@ -32,9 +32,7 @@ class BenchmarkAdditionsTest(unittest.TestCase):
         scheduler.add(pending)
 
         first = scheduler.schedule()
-        self.assertEqual(
-            (first.prefill_chunks[0].start, first.prefill_chunks[0].end), (0, 63)
-        )
+        self.assertEqual((first.prefill_chunks[0].start, first.prefill_chunks[0].end), (0, 63))
         self.assertEqual(
             checkpoint_schedule_stats(first.prefill_chunks, block_size=16),
             {
@@ -49,9 +47,7 @@ class BenchmarkAdditionsTest(unittest.TestCase):
         scheduler.postprocess(first.prefill_chunks, [None], True)
 
         second = scheduler.schedule()
-        self.assertEqual(
-            (second.prefill_chunks[0].start, second.prefill_chunks[0].end), (63, 64)
-        )
+        self.assertEqual((second.prefill_chunks[0].start, second.prefill_chunks[0].end), (63, 64))
         self.assertEqual(second.prefill_chunks[0].checkpoint_positions, (64,))
         self.assertEqual(
             checkpoint_schedule_stats(second.prefill_chunks, block_size=16),
@@ -155,16 +151,20 @@ class BenchmarkAdditionsTest(unittest.TestCase):
             self.assertIn("published_checkpoints_during_target: 2", rendered)
             self.assertIn("retained_checkpoints_after_target: 1", rendered)
 
-
     def test_small_interference_p99_is_not_reported(self):
         def result(mode):
             return {
                 "experiment": "benchmark_interference",
                 "execution_status": "completed",
                 "config": {
-                    "scenario": "interference", "model": "model", "dtype": "bfloat16",
-                    "max_num_seqs": 4, "budget": 512, "graph_sizes": [],
-                    "cache_entries": 0, "schedule_mode": mode,
+                    "scenario": "interference",
+                    "model": "model",
+                    "dtype": "bfloat16",
+                    "max_num_seqs": 4,
+                    "budget": 512,
+                    "graph_sizes": [],
+                    "cache_entries": 0,
+                    "schedule_mode": mode,
                 },
                 "result": {
                     "gpu": "test GPU",
@@ -184,9 +184,7 @@ class BenchmarkAdditionsTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as folder:
             for mode in ("mixed", "exclusive_decode_first"):
-                Path(folder, mode + ".json").write_text(
-                    json.dumps(result(mode)), encoding="utf-8"
-                )
+                Path(folder, mode + ".json").write_text(json.dumps(result(mode)), encoding="utf-8")
             out = StringIO()
             with redirect_stdout(out):
                 summarize_bench.main([folder, "--min-repeats", "1"])
