@@ -18,6 +18,11 @@ def load_config(path, root=ROOT, stage=None):
         config[key] = str((root / Path(os.path.expandvars(config[key])).expanduser()).resolve())
     if stage:
         config["stage"] = stage
+    if config["stage"] in ("all", "bench") and config["benchmark"]["mode"] not in (
+        "smoke",
+        "full",
+    ):
+        raise ValueError("benchmark.mode must be smoke/full for bench or all; use the tail/long stage directly")
     return config
 
 
