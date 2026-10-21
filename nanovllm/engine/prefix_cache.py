@@ -75,6 +75,9 @@ class PrefixCache:
         self.snapshot_nbytes = snapshot_nbytes
         self.max_checkpoints_per_path = max_checkpoints_per_path
         self._snapshot_bytes = 0
+        self.published_count = 0
+        self.evicted_count = 0
+        self.peak_snapshot_bytes = 0
         self._retain_blocks = retain_blocks
         self._release_blocks = release_blocks
         self._entries: dict[bytes, PrefixEntry] = {}
@@ -227,6 +230,8 @@ class PrefixCache:
         entry = PrefixEntry(block_hashes, block_ids, position, snapshot)
         self._entries[digest] = entry
         self._snapshot_bytes += self.snapshot_nbytes
+        self.published_count += 1
+        self.peak_snapshot_bytes = max(self.peak_snapshot_bytes, self._snapshot_bytes)
 
         path.append(digest)
         limit = self._path_limit()
@@ -281,6 +286,7 @@ class PrefixCache:
 
     def _evict_hash(self, digest: bytes) -> None:
         entry = self._entries.pop(digest)
+        self.evicted_count += 1
         self._snapshot_bytes -= self.snapshot_nbytes
         # A request may still be using this prefix after its cache entry is evicted.
         # Its reuse reference is released by BlockManager.deallocate(), not here.
