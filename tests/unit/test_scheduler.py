@@ -12,34 +12,27 @@ from tests.scheduler_helpers import (
 
 
 class SchedulerCoreTest(unittest.TestCase):
-    def test_decode_uses_budget_before_chunked_prefill(self):
-        scheduler = make_scheduler(
-            max_num_batched_tokens=4,
-            max_num_seqs=4,
-        )
-        decode_seq = make_running_sequence(
-            scheduler,
-            [1, 2],
-        )
-        prefill_seq = Sequence(list(range(10)))
-        scheduler.add(prefill_seq)
+    def test_decode_budget_and_sequence_limit(self):
+        cases = ((4, 4, 3), (8, 1, 0))
+        for budget, max_seqs, expected_prefill in cases:
+            with self.subTest(budget=budget, max_seqs=max_seqs):
+                scheduler = make_scheduler(
+                    max_num_batched_tokens=budget, max_num_seqs=max_seqs
+                )
+                decode_seq = make_running_sequence(scheduler, [1, 2])
+                prefill_seq = Sequence(list(range(10)))
+                scheduler.add(prefill_seq)
 
-        scheduled = scheduler.schedule()
-
-        self.assertEqual(
-            scheduled_sequences(scheduled.decode_chunks),
-            [decode_seq],
-        )
-        self.assertEqual(
-            scheduled_sequences(scheduled.prefill_chunks),
-            [prefill_seq],
-        )
-        self.assertEqual(scheduled.decode_tokens, 1)
-        self.assertEqual(scheduled.prefill_tokens, 3)
-        self.assertEqual(
-            scheduled.prefill_chunks[0].num_tokens,
-            3,
-        )
+                scheduled = scheduler.schedule()
+                self.assertEqual(scheduled_sequences(scheduled.decode_chunks), [decode_seq])
+                self.assertEqual(scheduled.decode_tokens, 1)
+                self.assertEqual(scheduled.prefill_tokens, expected_prefill)
+                self.assertEqual(
+                    scheduled_sequences(scheduled.prefill_chunks),
+                    [prefill_seq] if expected_prefill else [],
+                )
+                if expected_prefill:
+                    self.assertEqual(scheduled.prefill_chunks[0].num_tokens, 3)
 
     def test_chunked_prefill_keeps_new_request_fifo(self):
         scheduler = make_scheduler(
@@ -61,28 +54,6 @@ class SchedulerCoreTest(unittest.TestCase):
         scheduler.postprocess(final, [99], True)
         following = scheduler.schedule().prefill_chunks
         self.assertIs(following[0].seq, first)
-
-    def test_sequence_limit_is_shared(self):
-        scheduler = make_scheduler(
-            max_num_batched_tokens=8,
-            max_num_seqs=1,
-        )
-        decode_seq = make_running_sequence(
-            scheduler,
-            [1, 2],
-        )
-        scheduler.add(Sequence([3, 4, 5]))
-
-        scheduled = scheduler.schedule()
-
-        self.assertEqual(
-            scheduled_sequences(scheduled.decode_chunks),
-            [decode_seq],
-        )
-        self.assertEqual(
-            scheduled_sequences(scheduled.prefill_chunks),
-            [],
-        )
 
     def test_fixed_64_token_checkpoint_grid(self):
         for prompt_len in (20, 100, 320, 321, 400, 1024, 2049):
