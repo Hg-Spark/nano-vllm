@@ -54,8 +54,7 @@ class GDNConvBatchTest(unittest.TestCase):
             offsets.append(offsets[-1] + length)
         x = torch.randn(offsets[-1], self.layer.conv_dim)
         states = [
-            torch.randn(self.layer.conv_dim, self.layer.conv_kernel_size - 1)
-            for _ in lengths
+            torch.randn(self.layer.conv_dim, self.layer.conv_kernel_size - 1) for _ in lengths
         ]
         reference_states = [state.clone() for state in states]
 
