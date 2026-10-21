@@ -151,7 +151,6 @@ finally:
 | `kv_cache_block_size` | `16` | FlashInfer page size；当前允许 `16/32/64/128`，基线使用 16 |
 | `max_prefix_cache_entries` | `0` | 联合前缀缓存默认关闭；设为正数后限制缓存条目数，不影响请求自身的 KV/GDN 状态 |
 | `max_prefix_cache_snapshot_bytes` | `None` | CPU GDN 快照字节上限；`0` 禁止发布快照 |
-| `prefix_cache_eager_snapshot` | `True` | 在可发布的完整 KV 块边界主动截断 Prefill，以保存联合状态 |
 | `max_visual_tokens_per_request` | `0` | 显式限制单请求图像视觉 Token 数；准入时检查，并按上限预留特征缓存。`None` 使用 `max_model_len`，`0` 禁用图像请求 |
 | `kv_cache_dtype` | `"auto"` | `auto` 跟随模型 dtype；`fp8_e4m3` 使用 FP8 KV 存储 |
 | `kv_cache_k_scale` | `1.0` | FP8 K 的全局标量缩放系数，必须有限且大于零 |

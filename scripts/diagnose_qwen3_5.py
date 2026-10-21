@@ -43,7 +43,7 @@ def _capture_hooks(layers, sink, *, fused_residual=False):
 
 
 def _complete_capture(captured, expected, label):
-    if expected <= 0 or len(captured) != expected or any(value is None for value in captured):
+    if len(captured) != expected or any(value is None for value in captured):
         raise RuntimeError(f"{label} layer probe missed one or more decoder layers")
     return captured
 

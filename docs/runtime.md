@@ -205,7 +205,7 @@ KV 的逻辑位置与 mRoPE 三轴位置分别维护：图片展开可能改变 
 
 ## 启动时怎样分配缓存
 
-[ModelRunner](../nanovllm/engine/model_runner.py)先加载模型并调用 `eval()`，由 [allocate_runtime_caches()](../nanovllm/engine/cache_runtime.py)根据 `gpu_memory_utilization` 和当下已使用显存计算静态 KV 预算，同时扣除 `max_num_seqs` 个 GDN 槽位、符合 Eager Snapshot 捕获条件时的 GDN Checkpoint 工作区，以及启用视觉模式时的视觉特征预留。不再运行模型来测量历史激活峰值，剩余显存作为 Prefill、MoE、Vision 临时激活和 Graph Capture 的余量；这不是 OOM 安全证明。
+[ModelRunner](../nanovllm/engine/model_runner.py)先加载模型并调用 `eval()`，由 [allocate_runtime_caches()](../nanovllm/engine/cache_runtime.py)根据 `gpu_memory_utilization` 和当下已使用显存计算静态 KV 预算，同时扣除 `max_num_seqs` 个 GDN 槽位、启用前缀缓存且快照预算充足时的 GDN Checkpoint 工作区，以及启用视觉模式时的视觉特征预留。不再运行模型来测量历史激活峰值，剩余显存作为 Prefill、MoE、Vision 临时激活和 Graph Capture 的余量；这不是 OOM 安全证明。
 
 ```text
 GPU_used = total_GPU_memory - CUDA_free_at_allocation

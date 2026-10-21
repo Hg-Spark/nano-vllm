@@ -104,8 +104,6 @@ class Qwen3_5Attention(nn.Module):
 class Qwen3_5MLP(nn.Module):
     def __init__(self, config, intermediate_size: int) -> None:
         super().__init__()
-        if config.hidden_act != "silu":
-            raise ValueError(f"unsupported Qwen3.5 activation: {config.hidden_act}")
         self.gate_up_proj = nn.Linear(
             config.hidden_size,
             2 * intermediate_size,

@@ -13,7 +13,6 @@ def make_scheduler(
     max_prefix_cache_entries=16,
     max_prefix_cache_snapshot_bytes=None,
     snapshot_nbytes=0,
-    prefix_cache_eager_snapshot=True,
     max_gdn_checkpoints=4,
     eos_token_ids=(99, 100),
 ):
@@ -24,7 +23,6 @@ def make_scheduler(
         kv_cache_block_size=block_size,
         max_prefix_cache_entries=max_prefix_cache_entries,
         max_prefix_cache_snapshot_bytes=max_prefix_cache_snapshot_bytes,
-        prefix_cache_eager_snapshot=prefix_cache_eager_snapshot,
         max_gdn_checkpoints=max_gdn_checkpoints,
     )
     return Scheduler(config, num_blocks, snapshot_nbytes=snapshot_nbytes)

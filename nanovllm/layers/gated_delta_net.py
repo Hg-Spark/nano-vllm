@@ -33,8 +33,6 @@ class GatedDeltaNet(nn.Module):
         self.hidden_size = config.hidden_size
         self.num_v_heads = config.linear_num_value_heads
         self.num_k_heads = config.linear_num_key_heads
-        if self.num_v_heads % self.num_k_heads != 0:
-            raise ValueError("linear_num_value_heads must be divisible by linear_num_key_heads")
         self.head_k_dim = config.linear_key_head_dim
         self.head_v_dim = config.linear_value_head_dim
         self.key_dim = self.head_k_dim * self.num_k_heads

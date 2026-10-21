@@ -227,25 +227,18 @@ class PrefixCache:
                     return
                 self._evict_hash(victim)
 
-        # Refresh the deepest checkpoint of an already cached path when the
-        # global budget is full. Keep its common root and the new endpoint.
-        while len(path) >= 3 and (
-            len(self._entries) > self.max_entries
-            or (
-                self.max_snapshot_bytes is not None
-                and self._snapshot_bytes > self.max_snapshot_bytes
-            )
-        ):
-            interior = path[1:-1]
-            victim = next((key for key in interior if key not in self._reused), interior[-1])
-            self._evict_hash(victim)
-            path.remove(victim)
-
-        # A globally longest cached prefix is necessarily a leaf.
+        # Replace intermediate checkpoints before evicting globally.
         while len(self._entries) > self.max_entries or (
-            self.max_snapshot_bytes is not None and self._snapshot_bytes > self.max_snapshot_bytes
+            self.max_snapshot_bytes is not None
+            and self._snapshot_bytes > self.max_snapshot_bytes
         ):
-            self.evict()
+            if len(path) >= 3:
+                interior = path[1:-1]
+                victim = next((key for key in interior if key not in self._reused), interior[-1])
+                self._evict_hash(victim)
+                path.remove(victim)
+            else:
+                self.evict()
         path[:] = [key for key in path if key in self._entries]
 
     def _evict_hash(self, digest: bytes) -> None:

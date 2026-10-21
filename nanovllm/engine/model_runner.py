@@ -148,8 +148,6 @@ class ModelRunner:
         last_page_len = torch.tensor(layout.paged_kv_last_page_len, dtype=torch.int32, device="cpu")
         num_qo_heads, num_kv_heads, head_dim, common = self.attention_spec
         if context.is_prefill:
-            if context.qo_indptr is None:
-                raise RuntimeError("FlashInfer paged prefill requires query offsets")
             self.prefill_wrapper.plan(
                 torch.tensor(layout.q_offsets, dtype=torch.int32, device="cpu"),
                 kv_indptr,

@@ -73,7 +73,6 @@ class SchedulerCoreTest(unittest.TestCase):
 
     def test_disabled_prefix_publication_does_not_split_prefill(self):
         cases = (
-            ("non_eager", {"max_prefix_cache_entries": 16, "prefix_cache_eager_snapshot": False}),
             ("disabled", {"max_prefix_cache_entries": 0}),
             ("zero_snapshot_budget", {"max_prefix_cache_snapshot_bytes": 0}),
             (
@@ -90,22 +89,6 @@ class SchedulerCoreTest(unittest.TestCase):
                     [(c.start, c.end, bool(c.checkpoint_positions)) for c in chunks],
                     [(0, 20, False)],
                 )
-
-    def test_non_eager_captures_natural_checkpoint_boundaries(self):
-        scheduler = make_scheduler(
-            max_num_batched_tokens=64,
-            max_num_seqs=1,
-            num_blocks=16,
-            block_size=16,
-            prefix_cache_eager_snapshot=False,
-        )
-        seq = Sequence(list(range(130)), SamplingParams(max_tokens=1))
-        scheduler.add(seq)
-        first = scheduler.schedule().prefill_chunks
-        self.assertEqual((first[0].end, first[0].checkpoint_positions), (64, (64,)))
-        scheduler.postprocess(first, [None], True, {seq.seq_id: (GDNStateSnapshot(64, ()),)})
-        second = scheduler.schedule().prefill_chunks
-        self.assertEqual((second[0].end, second[0].checkpoint_positions), (128, (128,)))
 
     def test_decode_budget_does_not_create_one_token_prefill_chunks(self):
         scheduler = make_scheduler(

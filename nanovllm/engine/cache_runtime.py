@@ -73,8 +73,7 @@ def allocate_runtime_caches(
         )
     ):
         checkpoint_slots = config.max_num_seqs
-        if config.prefix_cache_eager_snapshot:
-            checkpoint_slots += config.max_num_batched_tokens // GDN_CHECKPOINT_INTERVAL
+        checkpoint_slots += config.max_num_batched_tokens // GDN_CHECKPOINT_INTERVAL
         checkpoint_workspace_bytes = 2 * checkpoint_slots * snapshot_size
     model_param = model.model.embed_tokens.weight
     cache_dtype = _resolve_kv_cache_dtype(

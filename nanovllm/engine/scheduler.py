@@ -13,7 +13,6 @@ class Scheduler:
     def __init__(self, config: Config, num_kv_cache_blocks: int, snapshot_nbytes: int = 0) -> None:
         self.max_num_seqs = config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
-        self.prefix_cache_eager_snapshot = config.prefix_cache_eager_snapshot
         self.eos_token_ids = set(config.eos_token_ids)
         self.block_manager = BlockManager(
             num_kv_cache_blocks,
@@ -114,39 +113,36 @@ class Scheduler:
                     candidates, cached = prefix_cache.candidates(seq, start, end)
                     alignment_candidates = candidates
                     candidates = [pair for pair in candidates if pair[1] not in planned_prefixes]
-                    if self.prefix_cache_eager_snapshot:
-                        if start % interval:
-                            # Final state is available at natural chunk ends even when
-                            # intermediate states are not aligned to the 64-token grid.
-                            if end % interval == 0:
-                                candidates = [pair for pair in candidates if pair[0] == end]
-                            else:
-                                # Avoid tiny tail chunks while recovering a useful
-                                # checkpoint even when the prompt ends unaligned.
-                                eligible = [
-                                    pair
-                                    for pair in candidates
-                                    if pair[0] - start >= interval and end - pair[0] >= interval
-                                ]
-                                selected = prefix_cache.select_checkpoints(eligible, cached)
-                                if selected:
-                                    end = selected[-1][0]
-                                    scheduled = end - start
-                                # A non-aligned start can capture only the new end
-                                # without shifting the GDN kernel's 64-token grid.
-                                candidates = selected[-1:]
-                        elif end < len(seq) and end % interval:
-                            step = lcm(interval, self.block_manager.block_size)
-                            last = end - end % step
-                            if last > start and (
-                                last in cached or any(p == last for p, _ in alignment_candidates)
-                            ):
-                                end = last
+                    if start % interval:
+                        # Final state is available at natural chunk ends even when
+                        # intermediate states are not aligned to the 64-token grid.
+                        if end % interval == 0:
+                            candidates = [pair for pair in candidates if pair[0] == end]
+                        else:
+                            # Avoid tiny tail chunks while recovering a useful
+                            # checkpoint even when the prompt ends unaligned.
+                            eligible = [
+                                pair
+                                for pair in candidates
+                                if pair[0] - start >= interval and end - pair[0] >= interval
+                            ]
+                            selected = prefix_cache.select_checkpoints(eligible, cached)
+                            if selected:
+                                end = selected[-1][0]
                                 scheduled = end - start
-                            candidates = [pair for pair in candidates if pair[0] <= end]
-                        candidates = prefix_cache.select_checkpoints(candidates, cached)
-                    else:
-                        candidates = [pair for pair in candidates if pair[0] == end]
+                            # A non-aligned start can capture only the new end
+                            # without shifting the GDN kernel's 64-token grid.
+                            candidates = selected[-1:]
+                    elif end < len(seq) and end % interval:
+                        step = lcm(interval, self.block_manager.block_size)
+                        last = end - end % step
+                        if last > start and (
+                            last in cached or any(p == last for p, _ in alignment_candidates)
+                        ):
+                            end = last
+                            scheduled = end - start
+                        candidates = [pair for pair in candidates if pair[0] <= end]
+                    candidates = prefix_cache.select_checkpoints(candidates, cached)
                     positions = tuple(p for p, _ in candidates)
                     planned_prefixes.update(digest for _, digest in candidates)
 

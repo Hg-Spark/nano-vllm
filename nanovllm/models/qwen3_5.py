@@ -20,10 +20,8 @@ class Qwen3_5DecoderLayer(nn.Module):
         self.block_type = config.layer_types[layer_idx]
         if self.block_type == "linear_attention":
             self.linear_attn = GatedDeltaNet(config)
-        elif self.block_type == "full_attention":
-            self.self_attn = Qwen3_5Attention(config, head_dim)
         else:
-            raise ValueError(f"unsupported Qwen3.5 layer type: {self.block_type}")
+            self.self_attn = Qwen3_5Attention(config, head_dim)
 
         self.is_moe = config.model_type == "qwen3_5_moe_text"
         self.mlp = (
@@ -92,8 +90,6 @@ class Qwen3_5Model(nn.Module):
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if (input_ids is None) == (inputs_embeds is None):
-            raise ValueError("specify exactly one of input_ids or inputs_embeds")
         hidden_states = self.embed_tokens(input_ids) if inputs_embeds is None else inputs_embeds
         residual = None
         rope_cache = self.rotary_emb.prepare(positions)

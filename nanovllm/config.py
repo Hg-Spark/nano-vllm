@@ -95,7 +95,6 @@ class Config:
     max_prefix_cache_entries: int = 0
     max_gdn_checkpoints: int = 4
     max_prefix_cache_snapshot_bytes: int | None = None
-    prefix_cache_eager_snapshot: bool = True
     max_visual_tokens_per_request: int | None = 0
     kv_cache_dtype: str = "auto"
     kv_cache_k_scale: float = 1.0
