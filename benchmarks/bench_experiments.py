@@ -152,6 +152,10 @@ def tokens_hash(seqs):
     return hashlib.sha256(data.encode()).hexdigest()
 
 
+def random_prompts(rng, vocab, count, length):
+    return [[rng.randrange(vocab) for _ in range(length)] for _ in range(count)]
+
+
 def make_requests(engine, prompts, max_tokens):
     from nanovllm import SamplingParams
 
@@ -177,7 +181,31 @@ def checkpoint_schedule_stats(chunks, block_size: int) -> dict[str, int]:
     }
 
 
-def run_fixed_decode(engine, a, graph_replays):
+def graph_counters(runner):
+    return (
+        sum(bucket.replay_count for bucket in runner.decode_graph_buckets.values()),
+        runner.decode_graph_fallbacks.copy(),
+    )
+
+
+def measured_graph_usage(runner, before, decode_calls):
+    replay_count, fallback_counts = graph_counters(runner)
+    replays = replay_count - before[0]
+    fallbacks = {
+        name: count - before[1][name] for name, count in fallback_counts.items()
+    }
+    if replays < 0 or replays > decode_calls or sum(fallbacks.values()) != decode_calls - replays:
+        raise RuntimeError("Decode Graph replay/fallback accounting is inconsistent")
+    return {
+        "graph_replays": replays,
+        "decode_forward_calls": decode_calls,
+        "graph_coverage": replays / decode_calls if decode_calls else 0.0,
+        "eager_decode_forward_calls": decode_calls - replays,
+        "graph_fallback_reasons": fallbacks,
+    }
+
+
+def run_fixed_decode(engine, a):
     """Measure real Scheduler + ModelRunner at a fixed active decode batch."""
     import torch
 
@@ -198,8 +226,7 @@ def run_fixed_decode(engine, a, graph_replays):
 
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
-    replay_before = graph_replays()
-    fallback_before = engine.model_runner.decode_graph_fallbacks.copy()
+    graph_before = graph_counters(engine.model_runner)
     step_durations = []
     gpu_step_durations = []
     start_ev = torch.cuda.Event(enable_timing=True)
@@ -215,36 +242,29 @@ def run_fixed_decode(engine, a, graph_replays):
         step_durations.append(t1 - t0)
         gpu_step_durations.append(start_ev.elapsed_time(end_ev) / 1000.0)
     duration = perf_counter() - t_begin
-    replays = graph_replays() - replay_before
-    fallbacks = {
-        reason: count - fallback_before[reason]
-        for reason, count in engine.model_runner.decode_graph_fallbacks.items()
-    }
-    if sum(fallbacks.values()) != a.measure_steps - replays:
-        raise RuntimeError("fixed decode fallback accounting is inconsistent")
-    if a.graph_sizes and replays != a.measure_steps:
-        raise RuntimeError(f"expected {a.measure_steps} measured graph replays, got {replays}")
-    if not a.graph_sizes and replays:
+    graph_metrics = measured_graph_usage(engine.model_runner, graph_before, a.measure_steps)
+    if a.graph_sizes and graph_metrics["graph_replays"] != a.measure_steps:
+        raise RuntimeError(
+            f"expected {a.measure_steps} measured graph replays, got {graph_metrics['graph_replays']}"
+        )
+    if not a.graph_sizes and graph_metrics["graph_replays"]:
         raise RuntimeError("Eager unexpectedly used a graph")
     # CUDA event elapsed time includes host submission gaps, not pure kernel time.
     seqs = list(engine.scheduler.running)
     if len(seqs) != a.max_num_seqs:
         raise RuntimeError("fixed decode batch lost running requests")
+    step_latency = summarize(step_durations)
     metrics = {
         "requests": a.max_num_seqs,
         "measured_decode_steps": a.measure_steps,
         "output_tokens": a.max_num_seqs * a.measure_steps,
         "elapsed_seconds": duration,
         "output_throughput_tok_s": a.max_num_seqs * a.measure_steps / duration,
-        "step_latency_seconds": summarize(step_durations),
+        "step_latency_seconds": step_latency,
         "cuda_event_step_window_seconds": summarize(gpu_step_durations),
-        "tpot_seconds": summarize(step_durations),
+        "tpot_seconds": step_latency,
         **cuda_memory_stats(),
-        "graph_replays": replays,
-        "decode_forward_calls": a.measure_steps,
-        "graph_coverage": replays / a.measure_steps,
-        "eager_decode_forward_calls": a.measure_steps - replays,
-        "graph_fallback_reasons": fallbacks,
+        **graph_metrics,
     }
     return metrics, {
         "token_hash": tokens_hash(seqs),
