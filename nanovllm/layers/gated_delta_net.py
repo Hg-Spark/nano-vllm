@@ -258,6 +258,11 @@ class GatedDeltaNet(nn.Module):
             conv_state_indices=state_slot_ids,
         )
         query, key, value = self._split_qkv(mixed_qkv)
+        # FlashInfer 0.7.0 FP32-state decode loads Q/K/V through BF16 registers.
+        if query.dtype == torch.float16:
+            query = query.to(torch.bfloat16)
+            key = key.to(torch.bfloat16)
+            value = value.to(torch.bfloat16)
         with record_function("nanovllm::gdn_decode_flashinfer"):
             core, _ = gated_delta_rule_decode_pretranspose(
                 query.unsqueeze(1).contiguous(),
@@ -274,7 +279,7 @@ class GatedDeltaNet(nn.Module):
                 initial_state_indices=state_slot_ids,
                 backend="flashinfer",
             )
-        return self._finalize_output(core.squeeze(1), z)
+        return self._finalize_output(core.squeeze(1).to(hidden_states.dtype), z)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         context = get_context()
