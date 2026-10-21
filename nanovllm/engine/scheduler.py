@@ -131,9 +131,14 @@ class Scheduler:
                         selected = prefix_cache.select_checkpoints(candidates, cached)
                         max_trim = min(step - 1, scheduled // 4, max(16, scheduled // 8))
                         target = None
-                        if start % step and selected and (
-                            not cached
-                            or start - cached[-1] >= step * prefix_cache.max_checkpoints_per_path
+                        if (
+                            start % step
+                            and selected
+                            and (
+                                not cached
+                                or start - cached[-1]
+                                >= step * prefix_cache.max_checkpoints_per_path
+                            )
                         ):
                             # Recover at the deepest useful joint boundary;
                             # limit forced short chunks to useful cache intervals.
