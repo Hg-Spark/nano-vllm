@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Engine-level benchmark experiments; run from any working directory.
+# 'long' is opt-in because 8K/16K context tests require extra KV capacity.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -8,11 +9,11 @@ PYTHON="${PYTHON:-python3}"
 : "${NANOVLLM_DTYPE:?export NANOVLLM_DTYPE=bfloat16}"
 MODE="${1:-smoke}"
 if (( $# > 1 )); then
-  echo "Usage: bash benchmarks/run.sh [smoke|full|tail]" >&2
+  echo "Usage: bash benchmarks/run.sh [smoke|full|tail|long]" >&2
   exit 2
 fi
 case "$MODE" in
-  smoke|full|tail) ;;
+  smoke|full|tail|long) ;;
   *) echo "Unknown benchmark mode: $MODE" >&2; exit 2 ;;
 esac
 REPEATS="${REPEATS:-5}"
@@ -27,13 +28,14 @@ if [[ "$MODE" == "full" ]]; then
   BATCHES=(1 2 4 8)
   PREFIXES=(512 1024 2048)
   BUDGETS=(256 512 1024)
-elif [[ "$MODE" == "tail" ]]; then
+elif [[ "$MODE" == "tail" || "$MODE" == "long" ]]; then
   BATCHES=()
   PREFIXES=()
   BUDGETS=(512)
   SHORT_REQUESTS=7
   SHORT_OUTPUT=512
   SHORT_MAX_SEQS=8
+  if [[ "$MODE" == "long" ]]; then BUDGETS=(); fi
 else
   BATCHES=(1 4)
   PREFIXES=(1024)
@@ -62,25 +64,56 @@ for ((r=1; r<=REPEATS; r++)); do
         --out "$RESULT_DIR/prefix_p${prefix}_cache${cache}_r${r}.json"
     done
   done
-  # Compare mixed-step vs step-exclusive Decode-first with SAME real scheduler.
+  # Budget axis: remove the separate mixed-prefill cap in full mode so
+  # 256/512/1024 genuinely change the tokens available during Decode.
+  BUDGET_LIMIT=()
+  if [[ "$MODE" == "full" ]]; then BUDGET_LIMIT=(--mixed-prefill-limit -1); fi
   for budget in "${BUDGETS[@]}"; do
     for mode in mixed exclusive_decode_first; do
       "$PYTHON" -m benchmarks.bench_experiments "${COMMON[@]}" --scenario interference \
         --num-requests "$SHORT_REQUESTS" --input-len 128 --output-len "$SHORT_OUTPUT" \
-        --max-num-seqs "$SHORT_MAX_SEQS" --budget "$budget" --cache-entries 0 \
+        --max-num-seqs "$SHORT_MAX_SEQS" --budget "$budget" --cache-entries 0 "${BUDGET_LIMIT[@]}" \
         --late-input-len 2048 --late-after-decode-steps 8 \
         --schedule-mode "$mode" \
         --out "$RESULT_DIR/interference_budget${budget}_${mode}_r${r}.json"
     done
   done
-  # Tail mode measures interference only; it does not repeat throughput/Graph experiments.
-  if [[ "$MODE" == "tail" ]]; then
+  # Orthogonal mixed-step cap axis: hold total Budget at 512.
+  if [[ "$MODE" == "full" ]]; then
+    for limit in 64 128 256; do
+      for mode in mixed exclusive_decode_first; do
+        "$PYTHON" -m benchmarks.bench_experiments "${COMMON[@]}" --scenario interference \
+          --num-requests "$SHORT_REQUESTS" --input-len 128 --output-len "$SHORT_OUTPUT" \
+          --max-num-seqs "$SHORT_MAX_SEQS" --budget 512 --cache-entries 0 \
+          --mixed-prefill-limit "$limit" --late-input-len 2048 \
+          --late-after-decode-steps 8 --schedule-mode "$mode" \
+          --out "$RESULT_DIR/interference_budget512_cap${limit}_${mode}_r${r}.json"
+      done
+    done
+  fi
+  # Optional longer-context and higher-concurrency interference experiments.
+  if [[ "$MODE" == "long" ]]; then
+    for length in 8192 16384; do
+      max_context=$((length + SHORT_OUTPUT + 256))
+      for mode in mixed exclusive_decode_first; do
+        "$PYTHON" -m benchmarks.bench_experiments "${COMMON[@]}" --scenario interference \
+          --num-requests "$SHORT_REQUESTS" --input-len 128 --output-len "$SHORT_OUTPUT" \
+          --max-num-seqs "$SHORT_MAX_SEQS" --budget 512 --cache-entries 0 \
+          --mixed-prefill-limit 128 --late-input-len "$length" \
+          --max-model-len "$max_context" --late-after-decode-steps 8 \
+          --schedule-mode "$mode" \
+          --out "$RESULT_DIR/interference_long${length}_${mode}_r${r}.json"
+      done
+    done
+  fi
+  # Tail and long modes focus exclusively on interference.
+  if [[ "$MODE" == "tail" || "$MODE" == "long" ]]; then
     continue
   fi
   # General throughput A/B (batch may vary dynamically, different from fixed Decode).
   for mode in eager graph; do
     EXTRA=()
-    if [[ "$mode" == graph ]]; then EXTRA=(--graph-sizes 1,2,3,4); fi
+    if [[ "$mode" == graph ]]; then EXTRA=(--graph-sizes 1,2,3,4 --min-graph-coverage 0.95); fi
     "$PYTHON" -m benchmarks.bench_experiments "${COMMON[@]}" --scenario throughput \
       --num-requests 16 --input-len 1024 --output-len 256 \
       --max-num-seqs 4 --budget 512 --cache-entries 0 "${EXTRA[@]}" \
