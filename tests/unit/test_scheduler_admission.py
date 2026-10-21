@@ -3,7 +3,7 @@ import unittest
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
 from nanovllm.sampling_params import SamplingParams
-from tests.scheduler_helpers import make_scheduler, scheduled_sequences
+from tests.scheduler_helpers import make_running_sequence, make_scheduler, scheduled_sequences
 
 
 class SchedulerAdmissionTest(unittest.TestCase):
@@ -47,6 +47,24 @@ class SchedulerAdmissionTest(unittest.TestCase):
 
         self.assertTrue(scheduler.is_finished())
         self.assertEqual([seq.completion_token_ids for seq in seqs], [[2] * n for _, n in specs])
+
+    def test_admission_without_prefix_cache_uses_request_reservations(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=8,
+            max_num_seqs=2,
+            num_blocks=4,
+            block_size=4,
+            max_prefix_cache_entries=0,
+        )
+        running = make_running_sequence(scheduler, [10, 11, 12, 13, 14])
+        waiting = Sequence([21, 22, 23], SamplingParams(max_tokens=1))
+        scheduler.add(waiting)
+
+        output = scheduler.schedule()
+        self.assertEqual(scheduled_sequences(output.decode_chunks), [running])
+        self.assertEqual(scheduled_sequences(output.prefill_chunks), [waiting])
+        self.assertEqual(output.prefill_tokens, 3)
+        self.assertEqual(len(scheduler.block_manager.free_block_ids), 1)
 
     def test_admission_counts_shared_kv_blocks_only_once(self):
         scheduler = make_scheduler(
