@@ -10,7 +10,6 @@ No production model/kernel code is changed.
 """
 
 import argparse
-from contextlib import contextmanager
 
 from scripts._common import (
     ValidationFailure,
@@ -244,17 +243,19 @@ def compare_traces(hf_tokens, hf_traces, nano_traces, threshold, top_k):
         if keys_hf != keys_nano:
             raise RuntimeError(f"layer trace sites differ: HF={keys_hf}, Nano={keys_nano}")
         layer_metrics = {key: _metric(hf["layers"][key], nano["layers"][key]) for key in keys_hf}
+        if hf["states"].keys() != nano["states"].keys():
+            raise RuntimeError("GDN state trace sites differ between HF and Nano")
         state_metrics = {
             key: _metric(hf["states"][key], nano["states"][key])
             for key in hf["states"]
         }
-        if hf["states"].keys() != nano["states"].keys():
-            raise RuntimeError("GDN state trace sites differ between HF and Nano")
 
+        # Report the earliest layer before the final logits. GDN cache errors
+        # are reported separately and may explain divergence at later steps.
         for site, metric in [
+            *layer_metrics.items(),
+            *state_metrics.items(),
             ("logits", logit_metric),
-            *[(name, item) for name, item in layer_metrics.items()],
-            *[(name, item) for name, item in state_metrics.items()],
         ]:
             if (
                 metric.get("relative_rmse", float("inf")) > threshold
