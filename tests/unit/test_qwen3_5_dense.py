@@ -4,6 +4,7 @@ try:
     import torch
 except ImportError as exc:
     raise unittest.SkipTest(f"requires torch: {exc}")
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -101,21 +102,31 @@ class Qwen3_5DenseTest(unittest.TestCase):
         for i, (_, target, start, end) in enumerate(shards):
             weights[target][start:end].fill_(i + 1)
         embed = "model.embed_tokens.weight"
-        for mode in ("embedding_only", "head_only", "both", "conflict", "missing_ffn"):
+        for mode in ("embedding_only", "head_only", "nested_head", "both", "conflict", "missing_ffn", "indexed"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as folder:
                 checkpoint = {name: value.clone() for name, value in weights.items()}
                 for source_name, target, start, end in shards:
                     checkpoint[source_name] = weights[target][start:end].clone()
                     checkpoint.pop(target, None)
-                if mode in ("head_only", "both", "conflict"):
-                    checkpoint["lm_head.weight"] = checkpoint[embed].clone()
-                if mode == "head_only":
+                if mode in ("head_only", "nested_head", "both", "conflict"):
+                    name = (
+                        "model.language_model.lm_head.weight"
+                        if mode == "nested_head"
+                        else "lm_head.weight"
+                    )
+                    checkpoint[name] = checkpoint[embed].clone()
+                if mode in ("head_only", "nested_head"):
                     del checkpoint[embed]
                 if mode == "conflict":
                     checkpoint["lm_head.weight"].add_(1)
                 if mode == "missing_ffn":
                     del checkpoint["model.layers.0.mlp.gate_proj.weight"]
                 save_file(checkpoint, str(Path(folder) / "model.safetensors"))
+                if mode == "indexed":
+                    (Path(folder) / "model.safetensors.index.json").write_text(
+                        json.dumps({"weight_map": {name: "model.safetensors" for name in checkpoint}})
+                    )
+                    save_file({"unrelated": torch.ones(1)}, str(Path(folder) / "backup.safetensors"))
                 model = Qwen3_5ForCausalLM(dense_config())
                 if mode in ("conflict", "missing_ffn"):
                     error = ValueError if mode == "conflict" else KeyError

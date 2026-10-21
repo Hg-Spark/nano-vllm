@@ -110,6 +110,7 @@ class Config:
     def __post_init__(self) -> None:
         if self.dtype not in ("float16", "bfloat16"):
             raise ValueError("dtype must be 'float16' or 'bfloat16'")
+        self.model = os.path.expanduser(self.model)
         if not os.path.isdir(self.model):
             raise ValueError(f"model path does not exist: {self.model}")
         if self.max_num_batched_tokens <= 0 or self.max_num_seqs <= 0 or self.max_model_len <= 0:

@@ -29,12 +29,12 @@ class Qwen3_5RMSNorm(nn.Module):
 
 
 class Qwen3_5Attention(nn.Module):
-    def __init__(self, config, head_dim: int) -> None:
+    def __init__(self, config) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
-        self.head_dim = head_dim
+        self.head_dim = config.head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
 

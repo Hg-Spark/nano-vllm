@@ -1,5 +1,6 @@
 """CPU-only benchmark parity and comparable A/B result checks."""
 
+import importlib.util
 import json
 import tempfile
 import unittest
@@ -37,6 +38,7 @@ class BenchmarkExperimentsTest(unittest.TestCase):
         scheduler.add(Sequence([3, 4], SamplingParams(max_tokens=1)))
         self.assertEqual(scheduler.schedule().prefill_tokens, 2)
 
+    @unittest.skipUnless(importlib.util.find_spec("torch"), "requires torch")
     def test_throughput_graph_replays_exclude_warmup(self):
         bucket = SimpleNamespace(replay_count=0)
         engine = SimpleNamespace(

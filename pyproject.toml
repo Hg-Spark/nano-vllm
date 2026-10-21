@@ -34,11 +34,6 @@ name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
-[[tool.uv.index]]
-name = "tuna"
-url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
-default = true
-
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["nanovllm*"]

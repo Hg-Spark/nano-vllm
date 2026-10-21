@@ -1,3 +1,4 @@
+import json
 import os
 from glob import glob
 
@@ -35,7 +36,13 @@ def load_model(model: nn.Module, path: str) -> None:
     for name, (target, _, _) in packed_shards.items():
         required_shards.setdefault(target, set()).add(name)
     seen_shards: set[str] = set()
-    checkpoint_files = sorted(glob(os.path.join(path, "*.safetensors")))
+    index_path = os.path.join(path, "model.safetensors.index.json")
+    if os.path.isfile(index_path):
+        with open(index_path, encoding="utf-8") as index_file:
+            names = json.load(index_file)["weight_map"].values()
+        checkpoint_files = [os.path.join(path, name) for name in sorted(set(names))]
+    else:
+        checkpoint_files = sorted(glob(os.path.join(path, "*.safetensors")))
     if not checkpoint_files:
         raise FileNotFoundError(f"no safetensors checkpoint files found under {path}")
 

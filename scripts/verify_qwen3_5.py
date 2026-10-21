@@ -13,7 +13,6 @@ from scripts._common import (
     run_hf_reference,
     run_nano_greedy,
     validate_finite,
-    validate_model_family,
     validate_positive,
 )
 
@@ -131,10 +130,12 @@ def parse_args(argv=None):
 
 
 def run(args):
-    is_moe = validate_model_family(args.model)
     from transformers import AutoConfig, AutoTokenizer
 
+    from nanovllm.config import is_qwen3_5_moe
+
     cfg = AutoConfig.from_pretrained(args.model)
+    is_moe = is_qwen3_5_moe(cfg)
     text_cfg = getattr(cfg, "text_config", cfg)
     effective_len = min(args.max_model_len, text_cfg.max_position_embeddings)
     prompt_len = len(AutoTokenizer.from_pretrained(args.model, use_fast=True).encode(args.prompt))

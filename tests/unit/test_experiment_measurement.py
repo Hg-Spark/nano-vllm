@@ -117,6 +117,11 @@ class MeasurementTest(unittest.TestCase):
         self.assertEqual(compare_tokens([1], [1, 2])["first_mismatch"], 1)
 
     def test_prefix_resume_rejects_matched_empty_outputs(self):
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            self.skipTest("requires torch")
+
         from nanovllm.engine import cache_runtime
         from scripts.verify_prefix_resume import run_prefix_resume_probe
 

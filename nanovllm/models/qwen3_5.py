@@ -15,13 +15,13 @@ from nanovllm.models.qwen3_5_moe import Qwen3_5SparseMoeBlock
 
 
 class Qwen3_5DecoderLayer(nn.Module):
-    def __init__(self, config, layer_idx: int, head_dim: int) -> None:
+    def __init__(self, config, layer_idx: int) -> None:
         super().__init__()
         self.block_type = config.layer_types[layer_idx]
         if self.block_type == "linear_attention":
             self.linear_attn = GatedDeltaNet(config)
         else:
-            self.self_attn = Qwen3_5Attention(config, head_dim)
+            self.self_attn = Qwen3_5Attention(config)
 
         self.is_moe = config.model_type == "qwen3_5_moe_text"
         self.mlp = (
@@ -75,7 +75,7 @@ class Qwen3_5Model(nn.Module):
         )
         self.layers = nn.ModuleList(
             [
-                Qwen3_5DecoderLayer(config, layer_idx, head_dim)
+                Qwen3_5DecoderLayer(config, layer_idx)
                 for layer_idx in range(config.num_hidden_layers)
             ]
         )
@@ -102,6 +102,7 @@ class Qwen3_5ForCausalLM(nn.Module):
     # Checkpoint naming belongs to the model adapter. The generic loader only
     # applies these declarative rules and validates names/shapes strictly.
     checkpoint_prefix_map = (
+        ("model.language_model.lm_head.", "lm_head."),
         ("model.language_model.", "model."),
         ("model.visual.", "visual."),
     )
