@@ -102,6 +102,46 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         self.assertEqual(cached, [])
         self.assertEqual(len(seq.prefix_block_hashes), 3)
 
+    def test_candidate_scan_only_probes_new_boundaries(self):
+        manager = BlockManager(num_blocks=8, block_size=16, max_prefix_entries=4)
+        seq = Sequence(list(range(8193)))
+        cache = manager.prefix_cache
+        cache.find(seq, max_tokens=8192)  # Warm the block hashes.
+
+        class CountingEntries(dict):
+            def __init__(self, entries):
+                super().__init__(entries)
+                self.probes = 0
+
+            def __contains__(self, digest):
+                self.probes += 1
+                return super().__contains__(digest)
+
+        cache._entries = CountingEntries(cache._entries)
+        candidates, cached = cache.candidates(seq, 8128, 8192)
+        self.assertEqual([position for position, _ in candidates], [8192])
+        self.assertEqual(cached, [])
+        self.assertEqual(cache._entries.probes, 1)
+
+    def test_cached_checkpoints_include_ancestors_and_exclude_other_branches(self):
+        manager = BlockManager(num_blocks=16, block_size=16, max_prefix_entries=4)
+        seq = Sequence(list(range(257)))
+        manager.ensure_capacity(seq, 192)
+        cache = manager.prefix_cache
+        cache.publish_many(
+            seq,
+            (GDNStateSnapshot(64, ()), GDNStateSnapshot(192, ())),
+        )
+
+        candidates, cached = cache.candidates(seq, 128, 256)
+        self.assertEqual(cached, [64, 192])
+        self.assertEqual([position for position, _ in candidates], [256])
+
+        diverged = Sequence(seq.token_ids[:80] + [999] + seq.token_ids[81:])
+        candidates, cached = cache.candidates(diverged, 128, 256)
+        self.assertEqual(cached, [64])
+        self.assertEqual([position for position, _ in candidates], [192, 256])
+
     def test_longest_exact_prefix_and_max_tokens_cap(self):
         manager = BlockManager(num_blocks=8, block_size=4, max_prefix_entries=4)
         publish_prefix(manager, [1, 2, 3, 4, 9], 4)
