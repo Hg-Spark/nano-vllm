@@ -306,12 +306,45 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         cache = manager.prefix_cache
         newcomer = Sequence([1] * 64 + [2])
         hit = cache.find(newcomer, max_tokens=64)
-        self.assertEqual(cache._reused, set())
+        self.assertEqual(cache._active_reuses, {})
         manager.attach_shared_prefix(newcomer, hit.block_ids, hit.num_tokens)
         cache.mark_reused(newcomer, hit)
-        self.assertEqual(len(cache._reused), 1)
+        self.assertEqual(sum(cache._active_reuses.values()), 1)
         manager.deallocate(original)
         manager.deallocate(newcomer)
+        self.assertEqual(cache._active_reuses, {})
+        self.assertEqual(cache._seq_reuses, {})
+
+    def test_reuse_reference_counts_and_eviction_survives_live_requests(self):
+        manager = BlockManager(num_blocks=16, block_size=16, max_prefix_entries=4)
+        original, _ = publish_prefix(manager, [1] * 65, 64)
+        cache = manager.prefix_cache
+        entry = cache.find(original, max_tokens=64)
+        consumers = [Sequence([1] * 64 + [token]) for token in (2, 3)]
+        for seq in consumers:
+            manager.attach_shared_prefix(seq, entry.block_ids, entry.num_tokens)
+            cache.mark_reused(seq, entry)
+        digest = entry.block_hashes[-1]
+        self.assertEqual(cache._active_reuses[digest], 2)
+
+        manager.deallocate(consumers[0])
+        self.assertEqual(cache._active_reuses[digest], 1)
+        # Eviction releases only the cache owner; live request KV refs remain valid.
+        self.assertTrue(cache.evict())
+        self.assertNotIn(digest, cache._entries)
+        self.assertEqual(cache._active_reuses[digest], 1)
+        manager.deallocate(consumers[1])
+        self.assertEqual(cache._active_reuses, {})
+        self.assertEqual(cache._seq_reuses, {})
+        manager.deallocate(original)
+        self.assertEqual(len(manager.free_block_ids), manager.num_blocks)
+
+    def test_unmark_reused_is_idempotent(self):
+        manager = BlockManager(num_blocks=8, block_size=16, max_prefix_entries=2)
+        seq = Sequence([1] * 65)
+        manager.deallocate(seq)
+        manager.deallocate(seq)
+        self.assertEqual(manager.prefix_cache._active_reuses, {})
 
     def test_zero_snapshot_budget_skips_publication(self):
         manager = BlockManager(
