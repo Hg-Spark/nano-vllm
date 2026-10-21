@@ -20,6 +20,8 @@ def workload_key(result):
         "scenario",
         "seed",
         "budget",
+        "mixed_prefill_limit",
+        "activation_reserve_mib",
         "max_num_seqs",
         "num_requests",
         "input_len",
@@ -172,6 +174,38 @@ def main(argv=None):
                 f"\n{label}: {scenario}, batch={p['max_num_seqs']}, budget={p['budget']}, variant={v}"
             )
             print(f"  Output throughput improvement: {format_percent(throughput)}")
+            if all(
+                "peak_cuda_memory_gib" in run["metrics"]
+                for run in [*baseline, *treatment]
+            ):
+                b_mem = number(baseline, "peak_cuda_memory_gib")
+                t_mem = number(treatment, "peak_cuda_memory_gib")
+                print(
+                    f"  Peak CUDA allocated: {b_mem:.3f} -> {t_mem:.3f} GiB "
+                    f"(reduction {format_percent(percent(b_mem, t_mem, higher_better=False))})"
+                )
+            if scenario == "prefix":
+                restored = median(
+                    run["details"]["total_restored_prefix_tokens"] for run in treatment
+                )
+                hits = median(run["details"]["prefix_hit_rate"] for run in treatment)
+                print(f"  Prefix restored tokens: {restored:.0f}, hit rate: {hits:.2f}")
+                if all(
+                    "target_scheduled_checkpoint_stats" in run["details"]
+                    for run in [*baseline, *treatment]
+                ):
+                    b_cps = median(
+                        run["details"]["target_scheduled_checkpoint_stats"]["checkpoint_positions"]
+                        for run in baseline
+                    )
+                    t_cps = median(
+                        run["details"]["target_scheduled_checkpoint_stats"]["checkpoint_positions"]
+                        for run in treatment
+                    )
+                    print(
+                        f"  Target scheduled checkpoints (not confirmed retained): "
+                        f"{b_cps:.0f} -> {t_cps:.0f}"
+                    )
             if latency_key:
                 improvement = percent(
                     milliseconds(baseline, latency_key),
