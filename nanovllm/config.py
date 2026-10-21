@@ -96,6 +96,10 @@ class Config:
     max_num_seqs: int = 4
     max_model_len: int = 4096
     gpu_memory_utilization: float = 0.8
+    # Non-KV transient activations are not included in static state accounting.
+    activation_reserve_bytes: int = 256 * 1024**2
+    # Bound same-step prefill latency while decode is in flight; None disables.
+    max_mixed_prefill_tokens: int | None = 128
     kv_cache_block_size: int = 16
     max_prefix_cache_entries: int = 0
     max_gdn_checkpoints: int = 4
@@ -122,6 +126,16 @@ class Config:
             raise ValueError(
                 "max_num_batched_tokens, max_num_seqs, and max_model_len must be positive"
             )
+        if isinstance(self.activation_reserve_bytes, bool) or not isinstance(
+            self.activation_reserve_bytes, int
+        ) or self.activation_reserve_bytes < 0:
+            raise ValueError("activation_reserve_bytes must be a non-negative integer")
+        if self.max_mixed_prefill_tokens is not None and (
+            isinstance(self.max_mixed_prefill_tokens, bool)
+            or not isinstance(self.max_mixed_prefill_tokens, int)
+            or self.max_mixed_prefill_tokens < 0
+        ):
+            raise ValueError("max_mixed_prefill_tokens must be None or a non-negative integer")
         graph_sizes = tuple(int(size) for size in self.decode_graph_batch_sizes)
         if len(graph_sizes) != len(set(graph_sizes)):
             raise ValueError("decode_graph_batch_sizes must not contain duplicates")
