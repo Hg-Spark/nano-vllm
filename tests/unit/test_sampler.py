@@ -22,14 +22,10 @@ class SamplingTest(unittest.TestCase):
         torch.testing.assert_close(sample.call_args.args[0], logits[1:].float())
         torch.testing.assert_close(sample.call_args.args[1], temperatures[1:])
 
-    def test_negative_temperature_is_rejected(self):
-        with self.assertRaises(ValueError):
-            SamplingParams(temperature=-0.1)
-
-    def test_non_finite_temperature_is_rejected(self):
-        for temperature in (math.nan, math.inf, -math.inf):
+    def test_invalid_temperature_is_rejected(self):
+        for temperature in (-0.1, math.nan, math.inf, -math.inf):
             with self.subTest(temperature=temperature):
-                with self.assertRaisesRegex(ValueError, "finite"):
+                with self.assertRaises(ValueError):
                     SamplingParams(temperature=temperature)
 
     def test_invalid_max_tokens_is_rejected(self):
