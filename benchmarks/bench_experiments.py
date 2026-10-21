@@ -149,6 +149,24 @@ def make_requests(engine, prompts, max_tokens):
     return [engine._prepare_request(prompt, params) for prompt in prompts]
 
 
+def checkpoint_schedule_stats(chunks, block_size: int) -> dict[str, int]:
+    """Count scheduled (not necessarily retained) joint GDN/KV checkpoints."""
+    from math import lcm
+
+    joint_step = lcm(GDN_CHECKPOINT_INTERVAL, block_size)
+    offgrid = [chunk for chunk in chunks if chunk.start % joint_step]
+    return {
+        "prefill_chunks": len(chunks),
+        "checkpoint_chunks": sum(bool(chunk.checkpoint_positions) for chunk in chunks),
+        "checkpoint_positions": sum(len(chunk.checkpoint_positions) for chunk in chunks),
+        "offgrid_prefill_chunks": len(offgrid),
+        "offgrid_realignments": sum(
+            chunk.end % joint_step == 0 and chunk.end in chunk.checkpoint_positions
+            for chunk in offgrid
+        ),
+    }
+
+
 def run_fixed_decode(engine, a, graph_replays):
     """Measure real Scheduler + ModelRunner at a fixed active decode batch."""
     import torch
@@ -259,6 +277,13 @@ def run(a):
 
         first_prefill_start = {}
         sched_prefill_tokens = 0
+        checkpoint_stats = {
+            "prefill_chunks": 0,
+            "checkpoint_chunks": 0,
+            "checkpoint_positions": 0,
+            "offgrid_prefill_chunks": 0,
+            "offgrid_realignments": 0,
+        }
         original_schedule = engine.scheduler.schedule
 
         def graph_replays():
@@ -273,6 +298,12 @@ def run(a):
             nonlocal sched_prefill_tokens
             outcome = original_schedule()
             sched_prefill_tokens += outcome.prefill_tokens
+            if outcome.prefill_chunks:
+                observed = checkpoint_schedule_stats(
+                    outcome.prefill_chunks, engine.scheduler.block_manager.block_size
+                )
+                for name, count in observed.items():
+                    checkpoint_stats[name] += count
             for chunk in outcome.prefill_chunks:
                 first_prefill_start.setdefault(chunk.seq.seq_id, chunk.start)
             return outcome
@@ -326,6 +357,7 @@ def run(a):
             entries_before = len(cache)
             bytes_before = cache.snapshot_bytes
             target = make_requests(engine, [shared + tail for tail in target_tails], a.output_len)
+            checkpoint_before_target = checkpoint_stats.copy()
             metrics = run_benchmark(engine, target)
             restored = [first_prefill_start.get(seq.seq_id, -1) for seq in target]
             if any(start < 0 for start in restored):
@@ -344,6 +376,10 @@ def run(a):
                 "restored_tokens_per_target": restored,
                 "prefix_hit_rate": sum(start > 0 for start in restored) / len(restored),
                 "total_restored_prefix_tokens": sum(max(start, 0) for start in restored),
+                "target_scheduled_checkpoint_stats": {
+                    name: count - checkpoint_before_target[name]
+                    for name, count in checkpoint_stats.items()
+                },
                 "token_hash": tokens_hash(target),
             }
 
@@ -355,6 +391,7 @@ def run(a):
                 )
             metrics["graph_replays"] = measured_replays
         details["scheduled_prefill_tokens_including_setup"] = sched_prefill_tokens
+        details["scheduled_checkpoint_stats_including_setup"] = checkpoint_stats
         result = {
             "source": "nano-vllm qwen3.5 engine, no HTTP",
             "gpu": gpu,
