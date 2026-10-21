@@ -8,7 +8,7 @@
 
 1. 从运行队列中选择 decode 请求，每个请求计入 1 个 token。
 2. 选中的请求放到运行队列尾部，下一轮继续轮转。
-3. 用剩余预算优先继续已经接纳的 Partial Prefill，再按 FIFO 接纳新请求。
+3. 用剩余预算优先继续已经接纳的 Partial Prefill，再按 FIFO 接纳新请求。混合 Decode 轮次额外受 `max_mixed_prefill_tokens` 限制（默认 128，`None` 可关闭）。
 4. 新请求在 Prefill 前按 `ceil((prompt_len + max_tokens - 1) / block_size)` 预留完整生命周期的逻辑 KV 页，同时遵守 GDN Slot 数量上限。
 
 [LLMEngine.step()](../nanovllm/engine/llm_engine.py)随后先执行 decode forward，再执行 prefill forward。**一个调度轮次可以包含两类工作，但当前没有把它们合成一次混合 forward。**
@@ -125,6 +125,8 @@ check result count
 **自适应 Chunk 对齐：** Scheduler 先过滤同批次已经计划的重复前缀，再通过 `select_checkpoints()` 筛出真正值得保存的候选位置。仅当 Chunk 尚未覆盖完整 Prompt、截断后至少推进 16 Token，并且弃用的本轮预算不超过 `min(step - 1, scheduled // 4, max(16, scheduled // 8))` Token 时，才将 Chunk 终点向后退到最深的合格候选边界。否则保持原计划 Token 数。这个限制避免为了 1～2 Token 的对齐短块浪费剩余预算，也防止低价值或已经缓存的边界反复迫使截断。
 
 如果 Chunk **起点已对齐**，可通过 FlashInfer 在 Chunk 内部捕获筛选出的 Checkpoint；如果**起点失准**，则只允许在终点恰好落在合法联合边界时发布 live GDN 状态，不能将内部相对间隔当作绝对 Checkpoint。允许在成本足够低时主动截断，使失准请求重新回到合法网格。**已经可以一次完成的 Prompt 不为捕获缓存而额外拆分**。例如本轮有 1 个 Decode Token、总预算为 64 时，长 Prefill 开始可运行 `[0,63)`，后续不强制运行 `[63,64)` 的 1-token Chunk，而是在合适的后续边界恢复对齐。
+
+缓存节点被真实请求复用时会按请求计入活跃复用引用；请求结束时由 `BlockManager.deallocate()` 解除标记，避免曾命中过的中间节点永久享有裁剪优先权。缓存条目即使在请求运行期间被淘汰，KV Block 仍由独立的物理引用计数保障安全。
 
 每条前缀链默认最多保留 4 个 Checkpoint（`max_gdn_checkpoints`），Scheduler 每轮优先选择首个有用边界与最深边界（并受全局条目/字节预算约束），路径超限时裁剪旧的中间 Checkpoint。Decode-first、FIFO 请求准入以及全生命周期 KV 页预留策略均不改变。
 
