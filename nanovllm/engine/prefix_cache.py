@@ -36,10 +36,13 @@ def _sequence_block_hashes(seq: Sequence, block_size: int, stop: int) -> tuple[l
     num_blocks = min(stop, len(seq.token_ids)) // block_size
     hashes = seq.prefix_block_hashes
     if len(hashes) < num_blocks:
-        for _ in _block_hashes(
-            seq.token_ids, block_size, num_blocks * block_size, cached_hashes=hashes
-        ):
-            pass
+        parent = hashes[-1] if hashes else bytes(32)
+        for index in range(len(hashes), num_blocks):
+            start = index * block_size
+            parent = sha256(
+                parent + pack(f"<{block_size}I", *seq.token_ids[start : start + block_size])
+            ).digest()
+            hashes.append(parent)
     return hashes, num_blocks
 
 
