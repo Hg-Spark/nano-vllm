@@ -391,8 +391,8 @@ class FlashInferPagedAttentionIntegrationTest(unittest.TestCase):
         )
 
     @unittest.skipUnless(
-        _has_cuda_gpu() and torch.cuda.get_device_capability() >= (12, 0),
-        "FP8 FlashInfer coverage targets Blackwell SM120+",
+        _has_cuda_gpu() and torch.cuda.get_device_capability() >= (9, 0),
+        "FP8 FlashInfer coverage requires SM90+",
     )
     def test_fp8_prefill_applies_explicit_kv_scales(self):
         attention = self._new_attention(torch.float8_e4m3fn)
