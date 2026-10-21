@@ -133,9 +133,17 @@ def image_state_from_processor_output(
         grid_signature,
         spatial_merge_size,
     )
+    # Pin the processor's CPU tensors once; ModelRunner uploads both asynchronously.
+    import torch
+
+    pixels = pixel_values.detach().cpu()
+    grid = image_grid_thw.detach().cpu()
+    if torch.cuda.is_available():
+        pixels = pixels.pin_memory()
+        grid = grid.pin_memory()
     state = ImageState(
-        pixel_values=pixel_values.detach().cpu(),
-        image_grid_thw=image_grid_thw.detach().cpu(),
+        pixel_values=pixels,
+        image_grid_thw=grid,
         rope_positions=rope_positions,
         rope_delta=rope_delta,
         image_start=image_start,

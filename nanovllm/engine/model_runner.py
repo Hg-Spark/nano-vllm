@@ -49,8 +49,8 @@ class ModelRunner:
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(getattr(torch, config.dtype))
         try:
-            if torch.cuda.get_device_capability()[0] not in (9, 10, 11, 12):
-                raise RuntimeError("FlashInfer GDN requires SM90 or later (up to SM120)")
+            if torch.cuda.get_device_capability()[0] not in (9, 10, 12):
+                raise RuntimeError("FlashInfer GDN requires SM90/SM100/SM120")
             with torch.device("cuda"):
                 self.model = Qwen3_5ForCausalLM(
                     config.root_config,
@@ -144,12 +144,15 @@ class ModelRunner:
     def _plan_attention(self, batch: PreparedBatch) -> Context:
         context = batch.context
         layout = batch.layout
-        kv_indptr = torch.tensor(layout.paged_kv_indptr, dtype=torch.int32, device="cpu")
-        last_page_len = torch.tensor(layout.paged_kv_last_page_len, dtype=torch.int32, device="cpu")
+        suffix = "prefill" if context.is_prefill else "decode"
+        kv_indptr = self.metadata_pool.host_view(f"{suffix}_kv_indptr", len(layout.paged_kv_indptr))
+        last_page_len = self.metadata_pool.host_view(
+            f"{suffix}_page_len", len(layout.paged_kv_last_page_len)
+        )
         num_qo_heads, num_kv_heads, head_dim, common = self.attention_spec
         if context.is_prefill:
             self.prefill_wrapper.plan(
-                torch.tensor(layout.q_offsets, dtype=torch.int32, device="cpu"),
+                self.metadata_pool.host_view("prefill_q_offsets", len(layout.q_offsets)),
                 kv_indptr,
                 context.paged_kv_indices,
                 last_page_len,
@@ -173,6 +176,7 @@ class ModelRunner:
                 **common,
             )
             wrapper = self.decode_wrapper
+        self.metadata_pool.record_plan_transfer()
         return replace(context, attention_wrapper=wrapper)
 
     def _ensure_visual_features(self, seq: Sequence) -> torch.Tensor:

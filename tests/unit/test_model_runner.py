@@ -36,6 +36,19 @@ class ModelRunnerTest(unittest.TestCase):
                 paged_kv_indptr=indptr,
                 paged_kv_last_page_len=last_page_len,
             )
+            pinned = {
+                "prefill_q_offsets": q_offsets,
+                "prefill_kv_indptr": indptr,
+                "decode_kv_indptr": indptr,
+                "prefill_page_len": last_page_len,
+                "decode_page_len": last_page_len,
+            }
+            runner.metadata_pool = SimpleNamespace(
+                host_view=lambda name, length: torch.tensor(
+                    pinned[name][:length], dtype=torch.int32
+                ),
+                record_plan_transfer=Mock(),
+            )
             for prefill, wrapper in (
                 (True, runner.prefill_wrapper),
                 (False, runner.decode_wrapper),

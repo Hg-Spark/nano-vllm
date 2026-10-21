@@ -157,6 +157,16 @@ class PinnedMetadataPool:
             self._pending = True
         return result
 
+    def host_view(self, name: str, length: int) -> torch.Tensor:
+        return self.buffers[name][:length]
+
+    def record_plan_transfer(self) -> None:
+        # FlashInfer's plan may enqueue additional copies from pinned host metadata.
+        import torch
+
+        self._transfer_done.record(torch.cuda.current_stream())
+        self._pending = True
+
     def clear(self) -> None:
         self._wait_for_transfers()
         self._transfer_done = None

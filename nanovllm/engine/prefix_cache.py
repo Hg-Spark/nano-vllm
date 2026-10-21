@@ -183,7 +183,8 @@ class PrefixCache:
 
         self._retain_blocks(block_ids)
         block_hashes = tuple(
-            digest for _, digest in _block_hashes(
+            digest
+            for _, digest in _block_hashes(
                 seq.token_ids, self.block_size, position, cached_hashes=seq.prefix_block_hashes
             )
         )
