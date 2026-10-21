@@ -180,6 +180,59 @@ class FlashInferGDNTest(unittest.TestCase):
         torch.testing.assert_close(full_output, torch.cat(outputs), atol=5e-2, rtol=5e-2)
 
     @torch.no_grad()
+    def test_fp16_decode_matches_bf16_operand_reference_and_state(self):
+        from causal_conv1d import causal_conv1d_update
+        from flashinfer.gdn_decode import gated_delta_rule_decode_pretranspose
+
+        self.layer.to(torch.float16)
+        self.layer.state_pool.allocate_state_cache(2)
+        pool = self.layer.state_pool
+        pool.conv_state.copy_(torch.randn_like(pool.conv_state) * 0.01)
+        pool.recurrent_state.copy_(torch.randn_like(pool.recurrent_state) * 0.01)
+        initial_conv = pool.conv_state.clone()
+        initial_recurrent = pool.recurrent_state.clone()
+        inputs = torch.randn(2, 256, device="cuda", dtype=torch.float16) * 0.1
+        slots = torch.tensor([1, 0], device="cuda", dtype=torch.int32)
+
+        mixed, z, b, a = self.layer._project_inputs(inputs)
+        mixed = causal_conv1d_update(
+            mixed,
+            pool.conv_state,
+            self.layer.conv1d.weight.squeeze(1),
+            None,
+            activation="silu",
+            conv_state_indices=slots,
+        )
+        q, k, v = self.layer._split_qkv(mixed)
+        core, _ = gated_delta_rule_decode_pretranspose(
+            q.unsqueeze(1).to(torch.bfloat16).contiguous(),
+            k.unsqueeze(1).to(torch.bfloat16).contiguous(),
+            v.unsqueeze(1).to(torch.bfloat16).contiguous(),
+            None,
+            self.layer.A_log.float(),
+            a.unsqueeze(1).contiguous(),
+            self.layer.dt_bias.float(),
+            b.unsqueeze(1).contiguous(),
+            scale=self.layer.head_k_dim**-0.5,
+            use_qk_l2norm=True,
+            initial_state=pool.recurrent_state,
+            initial_state_indices=slots,
+            backend="flashinfer",
+        )
+        expected = self.layer._finalize_output(core.squeeze(1).to(inputs.dtype), z)
+        expected_conv = pool.conv_state.clone()
+        expected_recurrent = pool.recurrent_state.clone()
+
+        pool.conv_state.copy_(initial_conv)
+        pool.recurrent_state.copy_(initial_recurrent)
+        actual = self.layer._forward_decode_batch(inputs, slots)
+
+        self.assertEqual(actual.dtype, torch.float16)
+        torch.testing.assert_close(actual, expected, atol=1e-3, rtol=1e-3)
+        torch.testing.assert_close(pool.conv_state, expected_conv)
+        torch.testing.assert_close(pool.recurrent_state, expected_recurrent, atol=1e-5, rtol=1e-4)
+
+    @torch.no_grad()
     def test_decode_tracks_slot_permutations_across_steps(self):
         conv_state = torch.randn_like(self.layer.state_pool.conv_state) * 0.01
         recurrent_state = torch.randn_like(self.layer.state_pool.recurrent_state) * 0.01
