@@ -234,7 +234,9 @@ class PrefixCache:
         # branch; prefer removing intermediate, unshared positions.
         if len(path) > limit:
             interior = path[1:-1]
-            victim = next((key for key in interior if self._active_reuses.get(key, 0) == 0), None)
+            victim = next(
+                (key for key in interior if self._active_reuses.get(key, 0) == 0), None
+            )
             if victim is None:
                 victim = interior[0] if interior else path[0]
             self._evict_hash(victim)
@@ -253,7 +255,9 @@ class PrefixCache:
                     if digest in path:
                         path.remove(digest)
                     return
-                victim = next((key for key in interior if self._active_reuses.get(key, 0) == 0), None)
+                victim = next(
+                    (key for key in interior if self._active_reuses.get(key, 0) == 0), None
+                )
                 if victim is None:
                     self._evict_hash(digest)
                     if digest in path:
@@ -267,7 +271,10 @@ class PrefixCache:
         ):
             if len(path) >= 3:
                 interior = path[1:-1]
-                victim = next((key for key in interior if self._active_reuses.get(key, 0) == 0), interior[-1])
+                victim = next(
+                    (key for key in interior if self._active_reuses.get(key, 0) == 0),
+                    interior[-1],
+                )
                 self._evict_hash(victim)
                 path.remove(victim)
             else:
