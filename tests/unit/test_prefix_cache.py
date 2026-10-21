@@ -1,5 +1,7 @@
 import unittest
+from hashlib import sha256
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from nanovllm.engine.block_manager import BlockManager
 from nanovllm.engine.prefix_cache import _block_hashes
@@ -68,6 +70,37 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
             seq.prefix_block_hashes,
             [digest for _, digest in _block_hashes(seq.token_ids, 16, 144)],
         )
+
+    def test_incremental_hashing_only_processes_new_complete_pages(self):
+        manager = BlockManager(num_blocks=16, block_size=16, max_prefix_entries=4)
+        seq = Sequence(list(range(162)))
+        cache = manager.prefix_cache
+
+        with patch("nanovllm.engine.prefix_cache.sha256", wraps=sha256) as hash_fn:
+            self.assertIsNone(cache.find(seq, max_tokens=128))
+            self.assertEqual(hash_fn.call_count, 8)
+
+            candidates, cached = cache.candidates(seq, 64, 160)
+            self.assertEqual([position for position, _ in candidates], [128])
+            self.assertEqual(cached, [])
+            self.assertEqual(hash_fn.call_count, 10)
+
+            # Previously calculated blocks are never hashed again.
+            self.assertIsNone(cache.find(seq, max_tokens=64))
+            self.assertIsNone(cache.find(seq, max_tokens=159))
+            self.assertEqual(hash_fn.call_count, 10)
+
+            # The incomplete final block is never hashed.
+            self.assertIsNone(cache.find(seq, max_tokens=162))
+            self.assertEqual(hash_fn.call_count, 10)
+
+    def test_checkpoint_candidates_align_to_kv_page_and_gdn_grid(self):
+        manager = BlockManager(num_blocks=8, block_size=128, max_prefix_entries=4)
+        seq = Sequence(list(range(401)))
+        candidates, cached = manager.prefix_cache.candidates(seq, 0, 400)
+        self.assertEqual([position for position, _ in candidates], [128, 256, 384])
+        self.assertEqual(cached, [])
+        self.assertEqual(len(seq.prefix_block_hashes), 3)
 
     def test_longest_exact_prefix_and_max_tokens_cap(self):
         manager = BlockManager(num_blocks=8, block_size=4, max_prefix_entries=4)
