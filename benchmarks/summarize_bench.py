@@ -37,6 +37,8 @@ def workload_key(result):
     return (
         result["gpu"],
         tuple(result["compute_capability"]),
+        result.get("torch_version"),
+        result.get("torch_cuda_version"),
         *[p.get(n) for n in names],
     )
 
