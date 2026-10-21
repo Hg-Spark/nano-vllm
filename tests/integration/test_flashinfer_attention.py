@@ -476,13 +476,25 @@ class FlashInferKVAppendGraphTest(unittest.TestCase):
                 paged_kv_last_page_len=last_page_len,
             )
 
+        # This test isolates KV append. DecodeGraphBucket.load() only stages
+        # indptr/last-page metadata on CPU; FlashInfer.plan() uploads them in
+        # production. Populate the fixed GPU buffers here without planning attention.
+        def load_for_append(batch):
+            bucket.load(batch)
+            bucket.paged_kv_indptr.copy_(
+                torch.tensor(batch.paged_kv_indptr, dtype=torch.int32, device="cuda")
+            )
+            bucket.paged_kv_last_page_len.copy_(
+                torch.tensor(batch.paged_kv_last_page_len, dtype=torch.int32, device="cuda")
+            )
+
         initial = layout((0, 5), (2, 1), (0, 1, 2), (1, 6))
         graph = None
         try:
             bucket._seed_capture_inputs()
             self.assertEqual(bucket.kv_batch_indices.tolist(), [0, 1])
             self.assertEqual(bucket.kv_positions.tolist(), [0, 0])
-            bucket.load(initial)
+            load_for_append(initial)
             store_kv_cache(key, value, k_cache, v_cache, bucket.context)
             torch.cuda.synchronize()
             graph = torch.cuda.CUDAGraph()
@@ -501,7 +513,7 @@ class FlashInferKVAppendGraphTest(unittest.TestCase):
             ):
                 key.add_(1)
                 value.sub_(1)
-                bucket.load(batch)
+                load_for_append(batch)
                 graph.replay()
                 for request, position in enumerate(batch.kv_positions):
                     page = batch.paged_kv_indices[batch.paged_kv_indptr[request] + position // 16]
