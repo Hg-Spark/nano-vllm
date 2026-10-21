@@ -189,7 +189,9 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
             snapshot_nbytes=256,
         )
         cache = manager.prefix_cache
-        self.assertEqual((cache.published_count, cache.evicted_count, cache.peak_snapshot_bytes), (0, 0, 0))
+        self.assertEqual(
+            (cache.published_count, cache.evicted_count, cache.peak_snapshot_bytes), (0, 0, 0)
+        )
 
         publish_prefix(manager, [1] * 64 + [9], 64)
         self.assertEqual((cache.published_count, cache.evicted_count), (1, 0))
