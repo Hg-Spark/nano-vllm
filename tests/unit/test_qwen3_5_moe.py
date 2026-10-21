@@ -9,7 +9,6 @@ from nanovllm.models.qwen3_5 import Qwen3_5ForCausalLM
 from nanovllm.models.qwen3_5_moe import (
     Qwen3_5MoeExperts,
     Qwen3_5MoeTopKRouter,
-    Qwen3_5SparseMoeBlock,
 )
 from nanovllm.utils.loader import _map_weight_name
 from tests.qwen35_helpers import make_text_config
@@ -94,6 +93,16 @@ class Qwen3_5MoeTest(unittest.TestCase):
 
     def test_shared_expert_initializes_packed_weights(self):
         model = Qwen3_5ForCausalLM(self.config)
+        names = dict(model.model.layers[0].mlp.named_parameters())
+        for name in (
+            "gate.weight",
+            "experts.gate_up_proj",
+            "experts.down_proj",
+            "shared_expert.gate_up_proj.weight",
+            "shared_expert.down_proj.weight",
+            "shared_expert_gate.weight",
+        ):
+            self.assertIn(name, names)
         for layer in model.model.layers:
             shared = layer.mlp.shared_expert
             self.assertFalse(hasattr(shared, "gate_proj"))
@@ -113,17 +122,6 @@ class Qwen3_5MoeTest(unittest.TestCase):
         for layer in model.model.layers:
             self.assertIs(layer.mlp.experts._moe_workspace, workspace)
             self.assertIs(layer.mlp.experts._moe_output, output)
-
-    def test_sparse_block_parameter_names_match_checkpoint_layout(self):
-        block = Qwen3_5SparseMoeBlock(self.config)
-        names = dict(block.named_parameters())
-
-        self.assertIn("gate.weight", names)
-        self.assertIn("experts.gate_up_proj", names)
-        self.assertIn("experts.down_proj", names)
-        self.assertIn("shared_expert.gate_up_proj.weight", names)
-        self.assertIn("shared_expert.down_proj.weight", names)
-        self.assertIn("shared_expert_gate.weight", names)
 
     def test_model_exposes_explicit_hybrid_cache_topology(self):
         model = Qwen3_5ForCausalLM(self.config)
