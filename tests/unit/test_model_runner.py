@@ -26,40 +26,115 @@ class ModelRunnerTest(unittest.TestCase):
         runner.prefill_wrapper = Mock()
         runner.decode_wrapper = Mock()
         indices = object()
-        layout = SimpleNamespace(
-            q_offsets=(0, 3),
-            paged_kv_indptr=(0, 1),
-            paged_kv_last_page_len=(3,),
+        layouts = (
+            SimpleNamespace(
+                q_offsets=(0, 3, 5),
+                paged_kv_indptr=(0, 2, 3),
+                paged_kv_last_page_len=(1, 2),
+            ),
+            SimpleNamespace(
+                q_offsets=(0, 1, 4),
+                paged_kv_indptr=(0, 1, 4),
+                paged_kv_last_page_len=(4, 3),
+            ),
         )
-        for prefill, wrapper in (
-            (True, runner.prefill_wrapper),
-            (False, runner.decode_wrapper),
-        ):
-            context = Context(
-                is_prefill=prefill,
-                qo_indptr=object() if prefill else None,
-                paged_kv_indices=indices,
-            )
-            runner._plan_attention(SimpleNamespace(context=context, layout=layout))
-            args = wrapper.plan.call_args.args
-            cpu_args = (0, 1, 3) if prefill else (0, 2)
-            for index in cpu_args:
-                self.assertEqual(args[index].device.type, "cpu")
-            self.assertIs(args[2 if prefill else 1], indices)
+        for layout in layouts:
+            for prefill, wrapper in (
+                (True, runner.prefill_wrapper),
+                (False, runner.decode_wrapper),
+            ):
+                context = Context(
+                    is_prefill=prefill,
+                    qo_indptr=object() if prefill else None,
+                    paged_kv_indices=indices,
+                )
+                result = runner._plan_attention(SimpleNamespace(context=context, layout=layout))
+                args = wrapper.plan.call_args.args
+                offsets = (
+                    ((0, layout.q_offsets), (1, layout.paged_kv_indptr),
+                     (3, layout.paged_kv_last_page_len))
+                    if prefill
+                    else ((0, layout.paged_kv_indptr),
+                          (2, layout.paged_kv_last_page_len))
+                )
+                for index, expected in offsets:
+                    self.assertEqual(args[index].dtype, torch.int32)
+                    self.assertEqual(args[index].device.type, "cpu")
+                    self.assertEqual(args[index].tolist(), list(expected))
+                self.assertIs(args[2 if prefill else 1], indices)
+                self.assertEqual(args[4 if prefill else 3 : 8 if prefill else 7],
+                                 (8, 2, 128, 16))
+                self.assertIs(result.attention_wrapper, wrapper)
+                self.assertIs(result.paged_kv_indices, indices)
 
+        # Exercise load -> plan -> event in a CPU-backed graph bucket, without
+        # requiring CUDA or duplicating the FlashInfer GPU integration test.
         bucket = object.__new__(DecodeGraphBucket)
+        bucket.batch_size = 2
+        bucket.max_page_indices = 4
         bucket.block_size = 16
         bucket.attention_spec = (8, 2, 128, {})
-        bucket.wrapper = Mock()
-        bucket.paged_kv_indices = torch.tensor([1], dtype=torch.int32)
-        bucket._host_buffers = {
-            "paged_kv_indptr": torch.tensor([0, 1], dtype=torch.int32),
-            "paged_kv_last_page_len": torch.tensor([3], dtype=torch.int32),
+        specs = {
+            "input_ids": ((2,), torch.int64),
+            "rope_positions": ((1, 2), torch.int64),
+            "kv_positions": ((2,), torch.int32),
+            "state_slot_ids": ((2,), torch.int32),
+            "paged_kv_indptr": ((3,), torch.int32),
+            "paged_kv_indices": ((4,), torch.int32),
+            "paged_kv_last_page_len": ((2,), torch.int32),
         }
-        bucket._plan(1)
-        args = bucket.wrapper.plan.call_args.args
-        self.assertIs(args[0], bucket._host_buffers["paged_kv_indptr"])
-        self.assertIs(args[2], bucket._host_buffers["paged_kv_last_page_len"])
+        for name, (shape, dtype) in specs.items():
+            setattr(bucket, name, torch.zeros(shape, dtype=dtype))
+        bucket._host_buffers = {
+            name: torch.empty_like(getattr(bucket, name)) for name in specs
+        }
+        bucket._host_transfer_done = Mock()
+        bucket._has_pending_host_transfer = False
+        bucket.wrapper = Mock()
+        steps = []
+
+        def simulate_plan(*args, **kwargs):
+            steps.append("plan")
+            bucket.paged_kv_indptr.copy_(args[0])
+            bucket.paged_kv_last_page_len.copy_(args[2])
+
+        bucket.wrapper.plan.side_effect = simulate_plan
+        bucket._host_transfer_done.synchronize.side_effect = lambda: steps.append("wait")
+        bucket._host_transfer_done.record.side_effect = lambda _: steps.append("record")
+        graph_layouts = (
+            SimpleNamespace(
+                input_ids=(1, 2), rope_positions=((0, 0),),
+                kv_positions=(4, 1), state_slots=(0, 1),
+                paged_kv_indptr=(0, 2, 3), paged_kv_indices=(7, 2, 9),
+                paged_kv_last_page_len=(1, 2),
+            ),
+            SimpleNamespace(
+                input_ids=(3, 4), rope_positions=((0, 0),),
+                kv_positions=(8, 2), state_slots=(1, 0),
+                paged_kv_indptr=(0, 1, 4), paged_kv_indices=(4, 6, 8, 5),
+                paged_kv_last_page_len=(8, 3),
+            ),
+        )
+        with patch("nanovllm.engine.decode_graph.torch.cuda.current_stream", return_value="stream"):
+            for index, layout in enumerate(graph_layouts):
+                bucket.prepare(layout)
+                self.assertEqual(
+                    steps, ["plan", "record"] if index == 0 else
+                    ["plan", "record", "wait", "plan", "record"]
+                )
+                self.assertEqual(
+                    bucket.paged_kv_indptr.tolist(), list(layout.paged_kv_indptr)
+                )
+                self.assertEqual(
+                    bucket.paged_kv_last_page_len.tolist(),
+                    list(layout.paged_kv_last_page_len),
+                )
+                self.assertEqual(
+                    bucket.wrapper.plan.call_args.args[1].tolist(),
+                    list(layout.paged_kv_indices),
+                )
+        self.assertEqual(bucket._host_transfer_done.synchronize.call_count, 1)
+        self.assertEqual(bucket._host_transfer_done.record.call_count, 2)
 
     def test_all_greedy_batch_avoids_temperature_upload(self):
         runner = object.__new__(ModelRunner)
