@@ -108,7 +108,7 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
                 self.assertEqual(cache.snapshot_bytes, 0)
                 self.assertEqual(manager.block_refcounts[second_block], 0)
 
-    def test_longest_leaf_eviction_keeps_shorter_shared_prefix(self):
+    def test_global_eviction_admits_new_branch(self):
         manager = BlockManager(num_blocks=32, block_size=16, max_prefix_entries=2)
         shared = list(range(128))
         original, _ = publish_prefix(manager, shared + [200], 64)
@@ -119,18 +119,21 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         self.assertEqual(len(manager.prefix_cache), 2)
         self.assertEqual(
             manager.prefix_cache.find(Sequence(shared + [202]), max_tokens=128).num_tokens,
-            64,
+            128,
         )
         self.assertIsNotNone(manager.prefix_cache.find(Sequence([300] * 64 + [302]), max_tokens=64))
 
-    def test_global_capacity_evicts_longest_leaf_including_new_entry(self):
+    def test_global_capacity_replaces_oldest_entry(self):
         manager = BlockManager(num_blocks=16, block_size=16, max_prefix_entries=1)
         old, old_block = publish_prefix(manager, [1] * 64 + [9], 64)
         publish_prefix(manager, list(range(128)) + [9], 128)
 
         self.assertEqual(len(manager.prefix_cache), 1)
-        self.assertIsNone(manager.prefix_cache.find(Sequence(list(range(128)) + [10]), 128))
-        self.assertEqual(manager.block_refcounts[old_block], 2)
+        self.assertEqual(
+            manager.prefix_cache.find(Sequence(list(range(128)) + [10]), 128).num_tokens,
+            128,
+        )
+        self.assertEqual(manager.block_refcounts[old_block], 1)
         manager.deallocate(old)
 
     def test_global_one_entry_captures_only_deepest_checkpoint(self):
@@ -166,7 +169,7 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         candidates, cached = shorter.prefix_cache.candidates(other, 0, 192)
         self.assertEqual(
             [p for p, _ in shorter.prefix_cache.select_checkpoints(candidates, cached)],
-            [128],
+            [192],
         )
 
     def test_backfilled_shorter_checkpoint_does_not_delete_longer(self):
@@ -211,6 +214,31 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         self.assertEqual(len(cache), 2)
         self.assertEqual(cache.find(seq, 192).num_tokens, 192)
         self.assertEqual(cache.find(seq, 64).num_tokens, 64)
+
+    def test_cache_maintenance_does_not_evict_active_shared_blocks(self):
+        manager = BlockManager(num_blocks=16, block_size=16, max_prefix_entries=2)
+        first, _ = publish_prefix(manager, [1] * 65, 64)
+        second, _ = publish_prefix(manager, [2] * 65, 64)
+        cache = manager.prefix_cache
+        self.assertFalse(cache.evict(manager.block_refcounts))
+        self.assertEqual(len(cache), 2)
+        manager.deallocate(first)
+        self.assertTrue(cache.evict(manager.block_refcounts))
+        self.assertEqual(len(cache), 1)
+        manager.deallocate(second)
+
+    def test_find_is_read_only_until_prefix_is_attached(self):
+        manager = BlockManager(num_blocks=16, block_size=16, max_prefix_entries=2)
+        original, _ = publish_prefix(manager, [1] * 65, 64)
+        cache = manager.prefix_cache
+        newcomer = Sequence([1] * 64 + [2])
+        hit = cache.find(newcomer, max_tokens=64)
+        self.assertEqual(cache._reused, set())
+        manager.attach_shared_prefix(newcomer, hit.block_ids, hit.num_tokens)
+        cache.mark_reused(newcomer, hit)
+        self.assertEqual(len(cache._reused), 1)
+        manager.deallocate(original)
+        manager.deallocate(newcomer)
 
     def test_zero_snapshot_budget_skips_publication(self):
         manager = BlockManager(
@@ -262,6 +290,8 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         self.assertEqual(len(manager.prefix_cache), 4)
         reused = manager.prefix_cache.find(longer, max_tokens=256)
         self.assertIs(reused.state_snapshot, history[256])
+        # An admitted prefix hit protects the reused checkpoint on this path.
+        manager.prefix_cache.mark_reused(longer, reused)
 
         for position in (384, 448, 512):
             publish_snapshot(manager, longer, position)

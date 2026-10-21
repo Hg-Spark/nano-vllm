@@ -39,7 +39,7 @@ class PrefixEntry:
 
 
 class PrefixCache:
-    """Hashed joint KV/GDN checkpoints; globally evict longest cached leaves."""
+    """Hashed joint KV/GDN checkpoints with FIFO global replacement."""
 
     def __init__(
         self,
@@ -119,13 +119,7 @@ class PrefixCache:
         limit = self._path_limit()
         if limit <= 0:
             return []
-        capacity = self.max_entries
-        if self.max_snapshot_bytes is not None and self.snapshot_nbytes:
-            capacity = min(capacity, self.max_snapshot_bytes // self.snapshot_nbytes)
-        if len(self._entries) >= capacity and len(cached) < limit:
-            longest = max(entry.num_tokens for entry in self._entries.values())
-            candidates = [candidate for candidate in candidates if candidate[0] <= longest]
-        if not candidates or (limit == 1 and cached and cached[-1] > candidates[-1][0]):
+        if limit == 1 and cached and cached[-1] > candidates[-1][0]:
             return []
         if limit == 1 or cached:
             return candidates[-1:]
@@ -137,16 +131,18 @@ class PrefixCache:
         if seq.image_state is not None:
             max_tokens = min(max_tokens, seq.image_state.image_start)
         best_entry: PrefixEntry | None = None
-        best_digest = None
         for _, digest in _block_hashes(
             seq.token_ids, self.block_size, max_tokens, cached_hashes=seq.prefix_block_hashes
         ):
             entry = self._entries.get(digest)
             if entry is not None:
-                best_entry, best_digest = entry, digest
-        if best_digest is not None:
-            self._reused.add(best_digest)
+                best_entry = entry
         return best_entry
+
+    def mark_reused(self, seq: Sequence, entry: PrefixEntry) -> None:
+        """Protect only prefixes actually attached to an admitted request."""
+        digest_index = entry.num_tokens // self.block_size - 1
+        self._reused.add(seq.prefix_block_hashes[digest_index])
 
     def publish_many(self, seq: Sequence, snapshots: tuple[GDNStateSnapshot, ...]) -> None:
         if not snapshots or not self._can_capture():
@@ -250,16 +246,17 @@ class PrefixCache:
         if not self._entries:
             return False
         if block_refcounts is None:
-            victim = max(self._entries, key=lambda key: self._entries[key].num_tokens)
+            victim = next(iter(self._entries))
         else:
             victim = max(
                 self._entries,
-                key=lambda key: (
-                    sum(
-                        block_refcounts[block_id] == 1 for block_id in self._entries[key].block_ids
-                    ),
-                    self._entries[key].num_tokens,
+                key=lambda key: sum(
+                    block_refcounts[block_id] == 1 for block_id in self._entries[key].block_ids
                 ),
             )
+            if not any(
+                block_refcounts[block_id] == 1 for block_id in self._entries[victim].block_ids
+            ):
+                return False
         self._evict_hash(victim)
         return True

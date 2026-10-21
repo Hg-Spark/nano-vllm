@@ -37,6 +37,7 @@ class Scheduler:
         if entry is None:
             return
         self.block_manager.attach_shared_prefix(seq, entry.block_ids, entry.num_tokens)
+        self.block_manager.prefix_cache.mark_reused(seq, entry)
         seq.committed_tokens = entry.num_tokens
         seq.pending_state_snapshot = entry.state_snapshot
 
@@ -114,25 +115,14 @@ class Scheduler:
                     alignment_candidates = candidates
                     candidates = [pair for pair in candidates if pair[1] not in planned_prefixes]
                     if start % interval:
-                        # Final state is available at natural chunk ends even when
-                        # intermediate states are not aligned to the 64-token grid.
-                        if end % interval == 0:
-                            candidates = [pair for pair in candidates if pair[0] == end]
-                        else:
-                            # Avoid tiny tail chunks while recovering a useful
-                            # checkpoint even when the prompt ends unaligned.
-                            eligible = [
-                                pair
-                                for pair in candidates
-                                if pair[0] - start >= interval and end - pair[0] >= interval
-                            ]
-                            selected = prefix_cache.select_checkpoints(eligible, cached)
-                            if selected:
-                                end = selected[-1][0]
-                                scheduled = end - start
-                            # A non-aligned start can capture only the new end
-                            # without shifting the GDN kernel's 64-token grid.
-                            candidates = selected[-1:]
+                        # An unaligned chunk start cannot capture intermediate
+                        # absolute-grid checkpoints. Never split a completed
+                        # prefill solely to capture a cache snapshot.
+                        candidates = (
+                            [pair for pair in candidates if pair[0] == end]
+                            if end % interval == 0
+                            else []
+                        )
                     elif end < len(seq) and end % interval:
                         step = lcm(interval, self.block_manager.block_size)
                         last = end - end % step

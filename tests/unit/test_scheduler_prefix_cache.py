@@ -88,7 +88,7 @@ class SchedulerPrefixCacheTest(unittest.TestCase):
         first = scheduler.schedule().prefill_chunks
         self.assertEqual(
             (first[0].start, first[0].end, first[0].checkpoint_positions),
-            (1100, 4032, (4032,)),
+            (1100, 4097, ()),
         )
         self.assertEqual(first[0].checkpoint_interval, 0)
 
