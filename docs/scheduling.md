@@ -66,7 +66,7 @@ flowchart LR
 
 ### 资源预留
 
-Scheduler 按全生命周期 KV 页额度及 GDN 槽位准入新请求。已接纳请求按当前 Chunk 按需分配 KV 页，额外的前缀缓存引用可通过最长叶子优先淘汰回收；额度不足的新请求继续等待。
+Scheduler 按全生命周期 KV 页额度及 GDN 槽位准入新请求。已接纳请求按当前 Chunk 按需分配 KV 页，额外的前缀缓存引用可通过淘汰能够释放独占 KV 页的条目回收；额度不足的新请求继续等待。
 
 ### 执行成功：推进一个共同边界
 
@@ -84,7 +84,7 @@ check result count
 
 ## 为什么无需常规抢占
 
-接纳请求时预留其最大生命周期所需 KV 页额度；活动请求预留量之和不能超过物理 KV 总页数。GDN Slot 同样在接纳时占用，请求完成时与 KV 页一并释放。前缀缓存额外持有的 KV 引用在空间紧张时按最长叶子优先淘汰；共享页的引用计数继续保证安全。
+接纳请求时预留其最大生命周期所需 KV 页额度；活动请求预留量之和不能超过物理 KV 总页数。GDN Slot 同样在接纳时占用，请求完成时与 KV 页一并释放。前缀缓存额外持有的 KV 引用在空间紧张时优先淘汰能够释放独占 KV 页的条目；共享页的引用计数继续保证安全。
 
 这一策略避免新请求挤占正在处理的 Prefill / Decode 请求，代价是最大输出长度设置较大时并发度更保守。
 
@@ -104,12 +104,12 @@ check result count
 
 | 内容 | 为什么需要 |
 | --- | --- |
-| 精确 `token_ids` 元组 | 支持缓存路径的分叉与后代关系比较；命中使用链式 SHA-256 Block Hash |
+| 链式 `block_hashes` 元组 | 保存完整 KV 块的链式 SHA-256 哈希，用于前缀匹配和祖先关系判定 |
 | `block_ids` | 共享 Full Attention 的物理 KV 块 |
 | `num_tokens` | 给出共同的历史边界 |
 | `GDNStateSnapshot` | 保存同一边界处所有 GDN 层的卷积和循环状态 |
 
-[BlockManager](../nanovllm/engine/block_manager.py)负责 KV block 的所有权与引用计数；[PrefixCache](../nanovllm/engine/prefix_cache.py)用单一链式 Block Hash 联合索引查找 KV/GDN 共同恢复边界，并在全局容量受限时保护新条目、优先淘汰最长的旧前缀，Scheduler 直接通过 BlockManager.prefix_cache 访问前缀缓存；GDN snapshot 只是与完整 KV 前缀绑定的附加 metadata。[Scheduler](../nanovllm/engine/scheduler.py)负责 KV/GDN 资源预留、联合恢复及释放。联合前缀缓存默认关闭（`max_prefix_cache_entries=0`），用于显式验证/实验时再开启，避免默认承担 GDN 快照的 D2H 成本。
+[BlockManager](../nanovllm/engine/block_manager.py)负责 KV block 的所有权与引用计数；[PrefixCache](../nanovllm/engine/prefix_cache.py)用单一链式 Block Hash 联合索引查找 KV/GDN 共同恢复边界，并按单路径配额裁剪中间 Checkpoint；全局预算超限时先裁剪当前路径中间节点，否则 FIFO 淘汰，Scheduler 直接通过 BlockManager.prefix_cache 访问前缀缓存；GDN snapshot 只是与完整 KV 前缀绑定的附加 metadata。[Scheduler](../nanovllm/engine/scheduler.py)负责 KV/GDN 资源预留、联合恢复及释放。联合前缀缓存默认关闭（`max_prefix_cache_entries=0`），用于显式验证/实验时再开启，避免默认承担 GDN 快照的 D2H 成本。
 
 ### 什么时候能发布
 
@@ -120,13 +120,13 @@ check result count
 - 边界同时是完整 KV 块边界；
 - 该精确 token 前缀尚未存在。
 
-例如 KV 块容量为 16、130-token Prompt 且启用 Prefix Cache：64 和 128 是有效候选边界。Prefill 可在一次 `[0,130)` 调用中捕获两个 GDN Checkpoint；遇到非 64 对齐的 Chunk 起点时，仅在截断点前后均至少有 64 个 token 时对齐到最深的合法完整边界，否则保持原 Chunk，避免产生极小 Prefill。20-token Prompt 不产生 Checkpoint。若 KV 块大于 64 Token，候选边界还需满足完整 KV 块约束。每条前缀链默认最多保留 4 个 Checkpoint（`max_gdn_checkpoints`），Scheduler 每轮优先选择首个有用边界与最深边界（并受全局条目/字节预算约束），路径超限时裁剪旧的中间 Checkpoint；不再为填满单路径配额而捕获大量很快会被淘汰的状态。
+例如 KV 块容量为 16、130-token Prompt 且启用 Prefix Cache：64 和 128 是有效候选边界。Prefill 可在一次 `[0,130)` 调用中捕获两个 GDN Checkpoint；当 Chunk 起点未按 64 Token 对齐时，不为捕获中间 Checkpoint 截短本轮 Chunk；起点对齐时，仅在存在合法候选边界且截断后仍能推进时才调整终点。20-token Prompt 不产生 Checkpoint。若 KV 块大于 64 Token，候选边界还需满足完整 KV 块约束。每条前缀链默认最多保留 4 个 Checkpoint（`max_gdn_checkpoints`），Scheduler 每轮优先选择首个有用边界与最深边界（并受全局条目/字节预算约束），路径超限时裁剪旧的中间 Checkpoint；不再为填满单路径配额而捕获大量很快会被淘汰的状态。
 
 整块边界还能避免共享一个将被继续写入的半满块；新请求续写时分配后续块，不会覆盖共享前缀。
 
 ### 怎样查找和恢复
 
-缓存以链式 SHA-256 Block Hash 直接定位联合 `PrefixEntry`：其中 KV Block 与 GDN Snapshot 已绑定到同一有效边界，无需维护冗余的两套索引。发布批次连续计算 Hash，查找不依赖缓存条目数。路径内可用旧的深层 Checkpoint 替换为新深层边界，并优先保留已被其他请求复用的检查点及公共根；其余全局条目数与 CPU 预算淘汰采用严格最长叶子优先（全局最长前缀必然是叶子，新条目也可能被淘汰）；当 GPU KV 页不足时优先淘汰确实能释放物理页的缓存条目。单路径检查点数量限制仍独立生效。
+缓存以链式 SHA-256 Block Hash 直接定位联合 `PrefixEntry`：其中 KV Block 与 GDN Snapshot 已绑定到同一有效边界，无需维护冗余的两套索引。发布批次连续计算 Hash，查找不依赖缓存条目数。路径内可用旧的深层 Checkpoint 替换为新深层边界，并优先保留已被其他请求复用的检查点及公共根；其余全局条目数与 CPU 预算先裁剪当前路径的中间 Checkpoint，否则按插入顺序 FIFO 淘汰；当 GPU KV 页不足时优先淘汰确实能释放物理页的缓存条目。单路径检查点数量限制仍独立生效。
 
 ```text
 新接纳的请求
@@ -166,7 +166,7 @@ check result count
 恢复后：卷积 = 原 dtype，循环矩阵 = FP32
 ```
 
-这样不会因 snapshot 本身引入 BF16 量化误差。代价是循环状态主机占用约为 BF16 方案的两倍；条目上限约束的是缓存项数，不是精确字节数，缓存还会持有 GPU KV 引用并产生设备到主机的快照传输。启动时还会为启用缓存的 64 Token 中间状态及捕获栈估算 GPU 工作区预算，避免 KV 静态容量挤占全部临时空间；这仍不是完整的 CUDA 峰值 Profile。单份快照大小由启动时的 GDN 状态池计算；如果配置的 CPU 快照预算连一份也容纳不了，调度器不会为发布前缀主动分片或捕获状态，发布时使用启动时估算的固定 `snapshot_nbytes` 计账并按全局最长叶子优先策略维护总预算，不重新逐条计算张量大小。
+这样不会因 snapshot 本身引入 BF16 量化误差。代价是循环状态主机占用约为 BF16 方案的两倍；条目上限约束缓存项数，独立的 CPU 快照预算按固定快照大小计账，缓存还会持有 GPU KV 引用并产生设备到主机的快照传输。启动时还会为启用缓存的 64 Token 中间状态及捕获栈估算 GPU 工作区预算，避免 KV 静态容量挤占全部临时空间；这仍不是完整的 CUDA 峰值 Profile。单份快照大小由启动时的 GDN 状态池计算；如果配置的 CPU 快照预算连一份也容纳不了，调度器不会为发布前缀主动分片或捕获状态，发布时使用启动时估算的固定 `snapshot_nbytes` 计账并按路径内优先裁剪、全局 FIFO 的策略维护总预算，不重新逐条计算张量大小。
 
 ## 阅读代码时应检查的约束
 

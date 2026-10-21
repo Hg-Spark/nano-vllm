@@ -19,26 +19,26 @@ REPEATS="${REPEATS:-5}"
 RESULT_DIR="${RESULT_DIR:-results/${MODE}_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$RESULT_DIR"
 
-  COMMON=("$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" --max-model-len 4096 --seed 0)
-  SHORT_REQUESTS=3
-  SHORT_OUTPUT=128
-  SHORT_MAX_SEQS=4
-  if [[ "$MODE" == "full" ]]; then
-    BATCHES=(1 2 4 8)
-    PREFIXES=(512 1024 2048)
-    BUDGETS=(256 512 1024)
-  elif [[ "$MODE" == "tail" ]]; then
-    BATCHES=()
-    PREFIXES=()
-    BUDGETS=(512)
-    SHORT_REQUESTS=7
-    SHORT_OUTPUT=512
-    SHORT_MAX_SEQS=8
-  else
-    BATCHES=(1 4)
-    PREFIXES=(1024)
-    BUDGETS=(512)
-  fi
+COMMON=("$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" --max-model-len 4096 --seed 0)
+SHORT_REQUESTS=3
+SHORT_OUTPUT=128
+SHORT_MAX_SEQS=4
+if [[ "$MODE" == "full" ]]; then
+  BATCHES=(1 2 4 8)
+  PREFIXES=(512 1024 2048)
+  BUDGETS=(256 512 1024)
+elif [[ "$MODE" == "tail" ]]; then
+  BATCHES=()
+  PREFIXES=()
+  BUDGETS=(512)
+  SHORT_REQUESTS=7
+  SHORT_OUTPUT=512
+  SHORT_MAX_SEQS=8
+else
+  BATCHES=(1 4)
+  PREFIXES=(1024)
+  BUDGETS=(512)
+fi
 for ((r=1; r<=REPEATS; r++)); do
   echo "Repeat $r of $REPEATS"
   # Fixed active Decode: measure pure Decode without Prefill/queueing effects.

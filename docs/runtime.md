@@ -115,7 +115,7 @@ KV 的有效前缀长度 = GDN 的有效前缀长度 = Sequence.committed_tokens
 
 | 字段 | 作用 |
 | --- | --- |
-| `token_ids` | 已知的输入与生成 token；`num_tokens` 和 `last_token` 由它直接取得 |
+| `token_ids` | 已知的输入与生成 token；`len(seq)` 与 `seq[-1]` 直接读取该列表 |
 | `num_prompt_tokens` | 原始输入长度，用于区分 prompt 和 completion |
 | `committed_tokens` | 两种历史共同表示的已提交长度 |
 | `block_table` | 请求的逻辑块到物理 KV 块的映射 |
@@ -153,7 +153,7 @@ flowchart TD
 | [schedule.py](../nanovllm/engine/schedule.py) | 保存本轮执行区间和快照需求 |
 | [block_manager.py](../nanovllm/engine/block_manager.py) | KV Block 分配与共享前缀引用 |
 | [state_manager.py](../nanovllm/engine/state_manager.py) | GDN 状态槽分配 |
-| [prefix_cache.py](../nanovllm/engine/prefix_cache.py) | KV Block Hash 与 GDN Checkpoint 联合匹配、最长叶子优先淘汰 |
+| [prefix_cache.py](../nanovllm/engine/prefix_cache.py) | KV Block Hash 与 GDN Checkpoint 联合匹配、路径内优先裁剪中间 Checkpoint、全局 FIFO 淘汰 |
 | [decode_graph.py](../nanovllm/engine/decode_graph.py) | Decode CUDA Graph bucket |
 | [batch_common.py](../nanovllm/engine/batch_common.py) | 统一准备 Prefill / Decode 的元数据与输入张量 |
 | [context.py](../nanovllm/utils/context.py) | 将单次 forward 的元数据传给模型层 |
