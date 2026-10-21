@@ -26,19 +26,16 @@ class ModelRunnerTest(unittest.TestCase):
         runner.prefill_wrapper = Mock()
         runner.decode_wrapper = Mock()
         indices = object()
-        layouts = (
-            SimpleNamespace(
-                q_offsets=(0, 3, 5),
-                paged_kv_indptr=(0, 2, 3),
-                paged_kv_last_page_len=(1, 2),
-            ),
-            SimpleNamespace(
-                q_offsets=(0, 1, 4),
-                paged_kv_indptr=(0, 1, 4),
-                paged_kv_last_page_len=(4, 3),
-            ),
-        )
-        for layout in layouts:
+
+        for q_offsets, indptr, last_page_len in (
+            ((0, 3, 5), (0, 2, 3), (1, 2)),
+            ((0, 1, 4), (0, 1, 4), (4, 3)),
+        ):
+            layout = SimpleNamespace(
+                q_offsets=q_offsets,
+                paged_kv_indptr=indptr,
+                paged_kv_last_page_len=last_page_len,
+            )
             for prefill, wrapper in (
                 (True, runner.prefill_wrapper),
                 (False, runner.decode_wrapper),
@@ -51,19 +48,18 @@ class ModelRunnerTest(unittest.TestCase):
                 result = runner._plan_attention(SimpleNamespace(context=context, layout=layout))
                 args = wrapper.plan.call_args.args
                 offsets = (
-                    ((0, layout.q_offsets), (1, layout.paged_kv_indptr),
-                     (3, layout.paged_kv_last_page_len))
+                    ((0, q_offsets), (1, indptr), (3, last_page_len))
                     if prefill
-                    else ((0, layout.paged_kv_indptr),
-                          (2, layout.paged_kv_last_page_len))
+                    else ((0, indptr), (2, last_page_len))
                 )
                 for index, expected in offsets:
                     self.assertEqual(args[index].dtype, torch.int32)
                     self.assertEqual(args[index].device.type, "cpu")
                     self.assertEqual(args[index].tolist(), list(expected))
                 self.assertIs(args[2 if prefill else 1], indices)
-                self.assertEqual(args[4 if prefill else 3 : 8 if prefill else 7],
-                                 (8, 2, 128, 16))
+                self.assertEqual(
+                    args[4 if prefill else 3 : 8 if prefill else 7], (8, 2, 128, 16)
+                )
                 self.assertIs(result.attention_wrapper, wrapper)
                 self.assertIs(result.paged_kv_indices, indices)
 
