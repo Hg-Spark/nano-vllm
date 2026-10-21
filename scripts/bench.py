@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 from scripts._common import cuda_memory_stats
 
+P99_MIN_SAMPLES = 1000
+
 if TYPE_CHECKING:
     from nanovllm import LLM
     from nanovllm.engine.sequence import Sequence
@@ -115,14 +117,14 @@ def run_benchmark(
         "total_token_throughput_tok_s": (prompt_tokens + output_tokens) / elapsed,
         "prefill_host_call_tok_s": prefill_tokens / prefill_seconds if prefill_seconds > 0 else 0.0,
         "decode_host_call_tok_s": decode_tokens / decode_seconds if decode_seconds > 0 else 0.0,
-        "ttft_seconds": summarize(ttft, p99_min_samples=1000),
+        "ttft_seconds": summarize(ttft, p99_min_samples=P99_MIN_SAMPLES),
         "ttft_samples": len(ttft),
-        "tpot_seconds": summarize(tpot, p99_min_samples=1000),
+        "tpot_seconds": summarize(tpot, p99_min_samples=P99_MIN_SAMPLES),
         "tpot_samples": len(tpot),
-        "itl_seconds": summarize(token_gaps, p99_min_samples=1000),
+        "itl_seconds": summarize(token_gaps, p99_min_samples=P99_MIN_SAMPLES),
         "itl_samples": len(token_gaps),
         "decode_forward_calls": decode_steps,
-        "e2e_latency_seconds": summarize(e2e, p99_min_samples=1000),
+        "e2e_latency_seconds": summarize(e2e, p99_min_samples=P99_MIN_SAMPLES),
         **cuda_memory_stats(),
     }
     if late_sequence is not None:
@@ -131,9 +133,9 @@ def run_benchmark(
             "long_prompt_tokens": late_sequence.num_prompt_tokens,
             "long_ttft_seconds": first_token_at[late_sequence.seq_id]
             - arrival_at[late_sequence.seq_id],
-            "short_token_gap_before_seconds": summarize(short_gap_before, p99_min_samples=1000),
+            "short_token_gap_before_seconds": summarize(short_gap_before, p99_min_samples=P99_MIN_SAMPLES),
             "short_token_gap_before_samples": len(short_gap_before),
-            "short_token_gap_after_seconds": summarize(short_gap_after, p99_min_samples=1000),
+            "short_token_gap_after_seconds": summarize(short_gap_after, p99_min_samples=P99_MIN_SAMPLES),
             "short_token_gap_after_samples": len(short_gap_after),
         }
     return result
