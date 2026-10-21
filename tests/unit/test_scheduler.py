@@ -180,6 +180,44 @@ class SchedulerCoreTest(unittest.TestCase):
         self.assertIsNotNone(scheduler.block_manager.prefix_cache.find(seq, 3072))
         self.assertEqual(sum(end - start for start, end in zip([0, *ends[:-1]], ends)), 3072)
 
+    def test_off_grid_prefill_recovers_with_128_token_pages(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=64,
+            max_num_seqs=2,
+            num_blocks=256,
+            block_size=128,
+        )
+        running = Sequence([1, 2], SamplingParams(max_tokens=100, ignore_eos=True))
+        scheduler.block_manager.ensure_capacity(running, len(running))
+        scheduler.state_manager.allocate(running)
+        running.committed_tokens = len(running) - 1
+        scheduler.running.append(running)
+
+        seq = Sequence(list(range(3500)), SamplingParams(max_tokens=1))
+        scheduler.add(seq)
+        endpoints = []
+        positions = []
+        for _ in range(49):
+            scheduled = scheduler.schedule()
+            self.assertEqual(scheduled.decode_tokens, 1)
+            self.assertEqual(len(scheduled.prefill_chunks), 1)
+            chunk = scheduled.prefill_chunks[0]
+            endpoints.append(chunk.end)
+            positions.extend(chunk.checkpoint_positions)
+            scheduler.postprocess(scheduled.decode_chunks, [7], False)
+            snapshots = {
+                seq.seq_id: tuple(
+                    GDNStateSnapshot(position, ()) for position in chunk.checkpoint_positions
+                )
+            }
+            scheduler.postprocess(scheduled.prefill_chunks, [None], True, snapshots)
+
+        self.assertEqual(endpoints[:2], [63, 126])
+        self.assertEqual(endpoints[-1], 3072)
+        self.assertEqual(positions, [3072])
+        self.assertEqual(seq.committed_tokens, 3072)
+        self.assertIsNotNone(scheduler.block_manager.prefix_cache.find(seq, 3072))
+
     def test_short_remaining_prompt_does_not_split_for_cache(self):
         scheduler = make_scheduler(
             max_num_batched_tokens=128,
