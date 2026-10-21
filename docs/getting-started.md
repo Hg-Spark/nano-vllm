@@ -145,9 +145,11 @@ finally:
 | 参数 | 默认值 | 含义与影响 |
 | --- | --- | --- |
 | `max_num_batched_tokens` | `512` | 一轮调度共享的 token 预算；先满足 decode，余量给 prefill |
+| `max_mixed_prefill_tokens` | `128` | 有 Decode 的轮次最多安排的 Prefill Token 数；`None` 关闭混合限额，`0` 暂停混合 Prefill |
 | `max_num_seqs` | `4` | 一轮请求数上限，也是活动 GDN 状态槽数量；分块 prefill 也占槽 |
 | `max_model_len` | `4096` | 单请求实际前向处理的 Token 上限（输入 + 最多生成 Token 数 - 1），还会被模型位置上限截断 |
 | `gpu_memory_utilization` | `0.8` | KV 容量估算使用的显存预算比例，范围 `(0,1]`；不是权重加载的硬上限 |
+| `activation_reserve_bytes` | `268435456` | 在静态 KV 定容前额外预留 256 MiB 临时激活余量；可按 GPU 峰值 Profile 调整 |
 | `kv_cache_block_size` | `16` | FlashInfer page size；当前允许 `16/32/64/128`，基线使用 16 |
 | `max_prefix_cache_entries` | `0` | 联合前缀缓存默认关闭；设为正数后限制缓存条目数，不影响请求自身的 KV/GDN 状态 |
 | `max_prefix_cache_snapshot_bytes` | `None` | CPU GDN 快照字节上限；`0` 禁止发布快照 |
@@ -170,7 +172,7 @@ MoE Prefill 与 Decode 均使用 FlashInfer CUTLASS Fused MoE，并共享按
 
 当前采用**静态定容 + 运行时逻辑 Block 按需分配**。模型权重和 MoE/FlashInfer Workspace 就位后，按剩余显存扣除 GDN 与视觉特征预留，详细公式和 Block 布局见[运行时缓存分配](runtime.md#启动时怎样分配缓存)。
 
-默认比例为 `0.8`，不再运行专用的 Attention SDPA / GDN 临时状态 Forward 去测量激活峰值。余下显存供激活、CUDA Graph 等使用，**不是严格的最坏情况保证**。如果 Prefill OOM，优先降低 `max_num_batched_tokens` 或 `gpu_memory_utilization`；Decode OOM 可进一步降低 `max_num_seqs`。需要做最大负载测试以决定目标 GPU 上的合理配置，步骤见 [验证手册](validation.md#运行时显存预算验证无需新增后端)。
+默认比例为 `0.8`，不再运行专用的 Attention SDPA / GDN 临时状态 Forward 去测量激活峰值。额外按 `activation_reserve_bytes` 预留显存；余下显存供激活、CUDA Graph 等使用，**不是严格的最坏情况保证**。如果 Prefill OOM，优先降低 `max_num_batched_tokens` 或 `gpu_memory_utilization`；Decode OOM 可进一步降低 `max_num_seqs`。需要做最大负载测试以决定目标 GPU 上的合理配置，步骤见 [验证手册](validation.md#运行时显存预算验证无需新增后端)。
 
 `decode_graph_batch_sizes` 非空时，Graph Capture 仍会先用固定输入运行一次模型以触发必要的 Kernel 初始化/编译，清理 KV/GDN 状态后再捕获；它与已经移除的**启动显存 Profiling Warmup**不是同一机制。未配置的 batch size 使用 Eager；已配置的 bucket 捕获或运行失败会直接抛异常，避免静默回退。
 
@@ -198,7 +200,7 @@ MoE Prefill 与 Decode 均使用 FlashInfer CUTLASS Fused MoE，并共享按
 | `only Qwen3.5 dense or MoE checkpoints are supported` | 检查 Qwen3.5 的 `model_type`；Qwen3 不支持 |
 | 权重加载时 OOM | 首先核对完整权重显存；降低 KV 预算不能缩小权重 |
 | 首次 Prefill / Decode 时 OOM | 静态定容不会测量最坏激活峰值；降低 `gpu_memory_utilization`、Token Budget 或并发量，并按边界负载重新测量 |
-| `insufficient GPU memory ... recurrent state pools` | 权重与状态预留后没有足够 KV 容量；检查并发、显存占用及模型规模 |
+| `insufficient GPU memory ... runtime caches and activations` | 权重与状态预留后没有足够 KV 容量；检查并发、显存占用及模型规模 |
 | `requested prompt (...) + max_tokens (...) - 1 exceeds max_model_len (...)` | 按实际处理 Token 数检查 `输入长度 + max_tokens - 1`，调整长度或有效上下文上限 |
 | `scheduler could not make progress` | 当前轮次无法安排工作；检查 KV 容量、状态槽及请求长度，不能假设分块就能无限扩展上下文 |
 | 未出现前缀命中 | 检查精确 token 前缀、完整块边界、条目是否被淘汰，以及缓存边界后是否仍有至少一个 token 待计算，见[第 2 章](scheduling.md) |
