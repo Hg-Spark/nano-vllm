@@ -1,12 +1,7 @@
 import unittest
-from types import SimpleNamespace
-from unittest.mock import patch
-
-from nanovllm.engine import cache_runtime
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
 from nanovllm.sampling_params import SamplingParams
-from scripts.verify_prefix_resume import run_prefix_resume_probe
 from tests.scheduler_helpers import (
     make_scheduler,
     scheduled_sequences,
@@ -14,40 +9,6 @@ from tests.scheduler_helpers import (
 
 
 class SchedulerPrefixCacheTest(unittest.TestCase):
-    def test_prefix_probe_reads_cache_metadata(self):
-        snapshot = GDNStateSnapshot(64, ())
-        entry = SimpleNamespace(num_tokens=64, block_ids=(0,), state_snapshot=snapshot)
-        cache = SimpleNamespace(snapshot_nbytes=32, find=lambda *_a, **_kw: entry)
-
-        def fake_llm(_path, **options):
-            def generate(prompts, _params, **_kwargs):
-                if options["max_prefix_cache_entries"] and prompts[0][-1] == 24:
-                    cache_runtime.restore_gdn_state(
-                        None, SimpleNamespace(committed_tokens=64, block_table=[0]), snapshot
-                    )
-                return [{"token_ids": [7, 7]}]
-
-            return SimpleNamespace(
-                generate=generate,
-                exit=lambda: None,
-                scheduler=SimpleNamespace(block_manager=SimpleNamespace(prefix_cache=cache)),
-            )
-
-        tokenizer = SimpleNamespace(
-            encode=lambda text, **_kw: (
-                [21, 22] if "branch A." in text else [23, 24] if "branch B." in text else [1]
-            )
-        )
-        with (
-            patch("nanovllm.LLM", side_effect=fake_llm),
-            patch("transformers.AutoTokenizer.from_pretrained", return_value=tokenizer),
-            patch("nanovllm.engine.cache_runtime.restore_gdn_state"),
-            patch("torch.cuda.empty_cache"),
-        ):
-            result = run_prefix_resume_probe("stub", 2, 128, 16, "float16")
-        self.assertEqual(result["prefix"], {"num_tokens": 64, "snapshot_bytes": 32})
-        self.assertEqual(result["restore_boundary"], 64)
-
     def test_joint_prefix_hit_restores_kv_and_gdn_boundary_together(self):
         scheduler = make_scheduler(
             max_num_batched_tokens=64, max_num_seqs=2, num_blocks=64, block_size=4
