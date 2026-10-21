@@ -45,8 +45,10 @@ class Qwen3_5MoeTest(unittest.TestCase):
             (6, self.config.num_experts_per_tok),
         )
         torch.testing.assert_close(
-            routing_weights.float().sum(dim=-1),
-            torch.ones(6),
+            routing_weights,
+            torch.tensor([[0.7310586, 0.2689414]] * 6),
+            atol=1e-6,
+            rtol=1e-6,
         )
 
     def test_flashinfer_requires_buffers_and_capacity(self):
