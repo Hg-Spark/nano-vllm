@@ -112,13 +112,22 @@ def run_prefix_resume_probe(
         cached.exit()
 
     comparison = compare_tokens(baseline_tokens, resumed_tokens)
+    full_length = len(baseline_tokens) == len(resumed_tokens) == max_new_tokens
     result = {
         "baseline_tokens": baseline_tokens,
         "resumed_tokens": resumed_tokens,
         "comparison": comparison,
+        "expected_tokens": max_new_tokens,
+        "full_length": full_length,
         "prefix": metadata,
         "restore_boundary": restored[0][0],
     }
+    if not full_length:
+        raise ValidationFailure(
+            f"FAIL: expected {max_new_tokens} greedy tokens, "
+            f"got baseline={len(baseline_tokens)}, resumed={len(resumed_tokens)}",
+            result,
+        )
     if not comparison["matched"]:
         raise ValidationFailure(
             mismatch_message(
