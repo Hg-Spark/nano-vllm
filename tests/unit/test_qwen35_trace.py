@@ -25,24 +25,28 @@ def test_report_first_mismatch_and_layer_before_logits():
     hf = []
     nano = []
     for step in range(3):
-        hf.append({
-            "logits": torch.tensor([2.0, 1.0]),
-            "layers": {
-                "embedding": torch.zeros(2),
-                "layer.0": torch.ones(2),
-                "norm": torch.ones(2),
-            },
-            "states": {},
-        })
-        nano.append({
-            "logits": torch.tensor([1.0, 3.0]) if step == 2 else torch.tensor([2.0, 1.0]),
-            "layers": {
-                "embedding": torch.zeros(2),
-                "layer.0": torch.ones(2) + (0.2 if step == 2 else 0),
-                "norm": torch.ones(2),
-            },
-            "states": {},
-        })
+        hf.append(
+            {
+                "logits": torch.tensor([2.0, 1.0]),
+                "layers": {
+                    "embedding": torch.zeros(2),
+                    "layer.0": torch.ones(2),
+                    "norm": torch.ones(2),
+                },
+                "states": {},
+            }
+        )
+        nano.append(
+            {
+                "logits": torch.tensor([1.0, 3.0]) if step == 2 else torch.tensor([2.0, 1.0]),
+                "layers": {
+                    "embedding": torch.zeros(2),
+                    "layer.0": torch.ones(2) + (0.2 if step == 2 else 0),
+                    "norm": torch.ones(2),
+                },
+                "states": {},
+            }
+        )
     report = compare_traces([0, 0, 0], hf, nano, 0.05, 2)
     assert report["first_token_mismatch"] == 2
     assert report["first_error_above_threshold"]["step"] == 2
