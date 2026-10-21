@@ -127,6 +127,10 @@ class BenchmarkAdditionsTest(unittest.TestCase):
                         "token_hash": "identical",
                         "total_restored_prefix_tokens": restored,
                         "prefix_hit_rate": hit_rate,
+                        "published_checkpoints_during_target": checkpoint_count,
+                        "evicted_checkpoints_during_target": 1 if cache_entries else 0,
+                        "retained_checkpoints_after_target": 1 if cache_entries else 0,
+                        "peak_snapshot_bytes_including_setup": 256 if cache_entries else 0,
                         "target_scheduled_checkpoint_stats": {
                             "checkpoint_positions": checkpoint_count,
                         },
@@ -148,6 +152,46 @@ class BenchmarkAdditionsTest(unittest.TestCase):
             self.assertIn("Peak CUDA allocated: 8.000 -> 7.000 GiB", rendered)
             self.assertIn("Prefix restored tokens: 1024, hit rate: 1.00", rendered)
             self.assertIn("Target scheduled checkpoints", rendered)
+            self.assertIn("published_checkpoints_during_target: 2", rendered)
+            self.assertIn("retained_checkpoints_after_target: 1", rendered)
+
+
+    def test_small_interference_p99_is_not_reported(self):
+        def result(mode):
+            return {
+                "experiment": "benchmark_interference",
+                "execution_status": "completed",
+                "config": {
+                    "scenario": "interference", "model": "model", "dtype": "bfloat16",
+                    "max_num_seqs": 4, "budget": 512, "graph_sizes": [],
+                    "cache_entries": 0, "schedule_mode": mode,
+                },
+                "result": {
+                    "gpu": "test GPU",
+                    "compute_capability": [9, 0],
+                    "metrics": {
+                        "output_throughput_tok_s": 100,
+                        "tpot_seconds": {"mean": 0.01},
+                        "long_prompt_interference": {
+                            "long_ttft_seconds": 0.2,
+                            "short_token_gap_after_seconds": {"mean": 0.02, "p99": None},
+                            "short_token_gap_after_samples": 20,
+                        },
+                    },
+                    "details": {"token_hash": "same"},
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as folder:
+            for mode in ("mixed", "exclusive_decode_first"):
+                Path(folder, mode + ".json").write_text(
+                    json.dumps(result(mode)), encoding="utf-8"
+                )
+            out = StringIO()
+            with redirect_stdout(out):
+                summarize_bench.main([folder, "--min-repeats", "1"])
+            self.assertIn("p99=n/a ms", out.getvalue())
+            self.assertIn("Synthetic P99 ITL comparison withheld", out.getvalue())
 
 
 if __name__ == "__main__":
