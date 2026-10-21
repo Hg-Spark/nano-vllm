@@ -127,7 +127,10 @@ def main(argv=None):
     # budget-matched baseline without re-running it for every Mixed cap.
     exclusive_baselines = {}
     for (_, v), runs in grouped.items():
-        if v == ((), 0, "exclusive_decode_first") and runs[0]["config"]["scenario"] == "interference":
+        if (
+            v == ((), 0, "exclusive_decode_first")
+            and runs[0]["config"]["scenario"] == "interference"
+        ):
             key = workload_key(runs[0], ignore_mixed_prefill_limit=True)
             cap = runs[0]["config"].get("mixed_prefill_limit")
             if key not in exclusive_baselines or cap == -1:
@@ -187,10 +190,12 @@ def main(argv=None):
         for v, treatment in matches:
             # The shared exclusive baseline can be from a different cap group.
             # Preserve strict token-output parity across that reuse boundary.
-            if {
-                r["details"]["token_hash"] for r in baseline
-            } != {r["details"]["token_hash"] for r in treatment}:
-                raise SystemExit("PARITY FAILURE: shared exclusive baseline differs from Mixed output")
+            if {r["details"]["token_hash"] for r in baseline} != {
+                r["details"]["token_hash"] for r in treatment
+            }:
+                raise SystemExit(
+                    "PARITY FAILURE: shared exclusive baseline differs from Mixed output"
+                )
             if min(len(baseline), len(treatment)) < args.min_repeats:
                 issues.append(f"too few repeats for {label}, {scenario} batch={p['max_num_seqs']}")
                 continue
