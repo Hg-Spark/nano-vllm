@@ -60,7 +60,7 @@ bash benchmarks/run_tests.sh --help
 
 模型、精度、GPU、重复次数与各阶段参数统一在 TOML 中修改。路径支持 `~` 和环境变量，相对路径以项目根目录为基准。
 
-`[benchmark].mode` 选择 `smoke`、`full` 或 `long` 矩阵，具体负载以原始 JSON 为准。A/B 记录建议保留 Git SHA 或源码归档哈希；汇总脚本不要求 Git 元数据；遇到 `PARITY FAILURE` 应保留失败，不绕过输出一致性检查。Tail 的基线为 Step-exclusive Decode-first，容量搜索未启用 Joint Prefix Cache，不能据此填写“前缀缓存使最大并发提升 X%”。
+`[benchmark].mode` 用于 `bench` 或 `all` 阶段，只接受 `smoke`、`full`；`tail`、`long` 通过独立阶段或直接调用 `run.sh`，避免 `all` 重复执行。具体负载以原始 JSON 为准。汇总脚本不要求额外 Git 元数据；遇到 `PARITY FAILURE` 应保留失败，不绕过输出一致性检查。Tail 的基线为 Step-exclusive Decode-first，容量搜索未启用 Joint Prefix Cache，不能据此填写“前缀缓存使最大并发提升 X%”。
 
 ## 常用入口
 
@@ -350,7 +350,7 @@ REPEATS=5 bash benchmarks/run.sh long
 | 实验 | A/B 控制 | 观察 |
 | --- | --- | --- |
 | Decode | 固定 B 下关闭或开启相同 B 的 Graph Bucket | 每步 wall-clock、吞吐、Replay 次数与覆盖率 |
-| Prefill 干扰 | Mixed 与 Decode-first Step 互斥；full 模式分别扫描无上限的总 Budget 和固定 Budget 下的 mixed-prefill cap | 长请求 TTFT、短请求 Token Gap |
+| Prefill 干扰 | Mixed 与 Decode-first Step 互斥；full 分别扫描总 Budget 和 mixed-prefill cap，同一 Budget 下复用一次 Exclusive 基线并验证输出哈希一致性 | 长请求 TTFT、短请求 Token Gap |
 | Joint Prefix | 缓存关闭与缓存开启，目标请求共享相同前缀 | TTFT、命中比例、恢复 Token、计划与实际发布/淘汰/保留 Checkpoint、峰值 Snapshot 字节数 |
 | 动态吞吐 | Eager 与 Graph Bucket | Output tok/s、TPOT、峰值显存、Graph Coverage、Eager Fallback 原因；默认覆盖率下限 95% |
 
