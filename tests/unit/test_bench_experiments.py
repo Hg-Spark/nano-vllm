@@ -57,6 +57,8 @@ class BenchmarkExperimentsTest(unittest.TestCase):
             model="stub",
             dtype="float16",
             budget=16,
+            mixed_prefill_limit=128,
+            activation_reserve_mib=256,
             max_num_seqs=4,
             max_model_len=128,
             gpu_memory_utilization=0.8,
