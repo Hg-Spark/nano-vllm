@@ -5,7 +5,7 @@ from nanovllm.config import Config
 from nanovllm.engine.block_manager import BlockManager
 from nanovllm.engine.prefix_cache import PrefixEntry
 from nanovllm.engine.schedule import GDN_CHECKPOINT_INTERVAL, ScheduledChunk, SchedulerOutput
-from nanovllm.engine.sequence import Sequence, SequenceStatus
+from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot, StateSlotManager
 
 
@@ -148,7 +148,6 @@ class Scheduler:
                 )
                 num_batched_tokens += scheduled
                 if end == len(seq):
-                    seq.status = SequenceStatus.RUNNING
                     self.running.append(seq)
                 else:
                     self.prefilling.append(seq)
@@ -225,6 +224,6 @@ class Scheduler:
             if (not seq.ignore_eos and token_id in self.eos_token_ids) or (
                 seq.num_completion_tokens == seq.max_tokens
             ):
-                seq.status = SequenceStatus.FINISHED
+                seq.finished = True
                 self._release_runtime_state(seq)
                 self.running.remove(seq)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from enum import Enum, auto
 from itertools import count
 from typing import TYPE_CHECKING
 
@@ -9,12 +8,6 @@ from nanovllm.sampling_params import SamplingParams
 if TYPE_CHECKING:
     from nanovllm.engine.state_manager import GDNStateSnapshot
     from nanovllm.multimodal.request import ImageState
-
-
-class SequenceStatus(Enum):
-    WAITING = auto()
-    RUNNING = auto()
-    FINISHED = auto()
 
 
 class Sequence:
@@ -29,7 +22,7 @@ class Sequence:
         if not token_ids:
             raise ValueError("sequence must contain at least one token")
         self.seq_id = next(Sequence.counter)
-        self.status = SequenceStatus.WAITING
+        self.finished = False
         self.token_ids = list(token_ids)
         # Chained hashes of immutable complete KV blocks, populated on demand.
         self.prefix_block_hashes: list[bytes] = []
@@ -57,7 +50,7 @@ class Sequence:
 
     @property
     def is_finished(self) -> bool:
-        return self.status == SequenceStatus.FINISHED
+        return self.finished
 
     @property
     def num_completion_tokens(self) -> int:

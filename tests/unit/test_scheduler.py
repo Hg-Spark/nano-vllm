@@ -1,7 +1,7 @@
 import unittest
 
 from nanovllm.engine.schedule import ScheduledChunk
-from nanovllm.engine.sequence import Sequence, SequenceStatus
+from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
 from nanovllm.sampling_params import SamplingParams
 from tests.scheduler_helpers import (
@@ -210,7 +210,6 @@ class SchedulerCoreTest(unittest.TestCase):
         scheduler.block_manager.ensure_capacity(seq, len(seq))
         scheduler.state_manager.allocate(seq)
         seq.committed_tokens = len(seq) - 1
-        seq.status = SequenceStatus.RUNNING
         scheduler.running.append(seq)
 
         for index, token_id in enumerate((99, 7, 100), start=1):

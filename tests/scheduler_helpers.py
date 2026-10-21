@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from nanovllm.engine.scheduler import Scheduler
-from nanovllm.engine.sequence import Sequence, SequenceStatus
+from nanovllm.engine.sequence import Sequence
 from nanovllm.sampling_params import SamplingParams
 
 
@@ -33,7 +33,6 @@ def make_running_sequence(scheduler, token_ids):
     scheduler.block_manager.ensure_capacity(seq, len(seq))
     scheduler.state_manager.allocate(seq)
     seq.committed_tokens = len(seq) - 1
-    seq.status = SequenceStatus.RUNNING
     scheduler.running.append(seq)
     return seq
 
