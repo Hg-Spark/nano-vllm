@@ -20,6 +20,7 @@ dependencies = [
     "causal-conv1d==1.7.0",
     "safetensors",
     "Pillow",
+    "tqdm",
 ]
 
 [project.urls]

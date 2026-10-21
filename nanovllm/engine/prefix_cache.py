@@ -141,8 +141,7 @@ class PrefixCache:
 
     def mark_reused(self, seq: Sequence, entry: PrefixEntry) -> None:
         """Protect only prefixes actually attached to an admitted request."""
-        digest_index = entry.num_tokens // self.block_size - 1
-        self._reused.add(seq.prefix_block_hashes[digest_index])
+        self._reused.add(entry.block_hashes[-1])
 
     def publish_many(self, seq: Sequence, snapshots: tuple[GDNStateSnapshot, ...]) -> None:
         if not snapshots or not self._can_capture():

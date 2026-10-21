@@ -66,7 +66,12 @@ def resolve_qwen3_5_rope(text_config: PretrainedConfig):
                 "Qwen3.5 mRoPE sections must non-negatively cover half rotary_dim: "
                 f"sections={section}, rotary_dim={rotary_dim}"
             )
-        if section[0] < max(section[1:]):
+        half_dim = rotary_dim // 2
+        if any(
+            count and axis + 3 * (count - 1) >= half_dim
+            for axis, count in enumerate(section)
+            if axis
+        ):
             raise ValueError("Qwen3.5 mRoPE sections exceed interleaved frequency bounds")
     return (
         rotary_dim,

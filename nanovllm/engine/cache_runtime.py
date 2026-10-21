@@ -65,17 +65,25 @@ def allocate_runtime_caches(
     state_cache_bytes = sum(
         module.state_cache_nbytes(config.max_num_seqs) for module in state_modules
     )
-    # FlashInfer materializes 64-token GDN checkpoints and ModelRunner stacks
-    # selected layer states before D2H. Keep this temporary peak out of KV capacity.
+    # Each request captures at most two selected checkpoints. Those states remain
+    # live across layers and are stacked once for D2H. FlashInfer's unselected
+    # intermediate recurrent states are temporary to a single GDN layer.
     checkpoint_workspace_bytes = 0
     snapshot_size = sum(module.state_cache_nbytes(1) for module in state_modules)
     if config.max_prefix_cache_entries > 0 and (
         config.max_prefix_cache_snapshot_bytes is None
         or config.max_prefix_cache_snapshot_bytes >= snapshot_size
     ):
-        checkpoint_slots = config.max_num_seqs
-        checkpoint_slots += config.max_num_batched_tokens // GDN_CHECKPOINT_INTERVAL
-        checkpoint_workspace_bytes = 2 * checkpoint_slots * snapshot_size
+        selected_per_seq = min(2, config.max_prefix_cache_entries)
+        selected_slots = min(
+            selected_per_seq * config.max_num_seqs,
+            config.max_num_seqs + config.max_num_batched_tokens // GDN_CHECKPOINT_INTERVAL,
+        )
+        captured_bytes = 2 * selected_slots * snapshot_size
+        intermediate_bytes = (config.max_num_batched_tokens // GDN_CHECKPOINT_INTERVAL) * max(
+            module.state_cache_nbytes(1) for module in state_modules
+        )
+        checkpoint_workspace_bytes = captured_bytes + intermediate_bytes
     model_param = model.model.embed_tokens.weight
     cache_dtype = _resolve_kv_cache_dtype(
         config,

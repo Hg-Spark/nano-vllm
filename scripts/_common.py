@@ -240,11 +240,11 @@ def prepare_fixed_decode_batch(engine, prompt, sampling, batch_size):
     if sampling.max_tokens < 2:
         raise ValueError("fixed decode requires at least two generated tokens")
 
+    required = scheduler.block_manager.required_blocks(len(prompt) + sampling.max_tokens - 1)
+    if batch_size * required > scheduler.block_manager.num_blocks:
+        raise ValueError("fixed decode batch exceeds KV capacity")
     for _ in range(batch_size):
         engine.add_request(prompt, sampling)
-    reserved = sum(scheduler._request_blocks(seq) for seq in scheduler.waiting)
-    if reserved > scheduler.block_manager.num_blocks:
-        raise ValueError("fixed decode batch exceeds KV capacity")
 
     parked = []
     try:

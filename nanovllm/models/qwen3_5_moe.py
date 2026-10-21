@@ -145,7 +145,7 @@ def initialize_moe_runtime(model, config) -> None:
     model_dtype = next(model.parameters()).dtype
     major, minor = torch.cuda.get_device_capability()
     arch = major * 10 + minor
-    if arch not in {89, 90, 100, 103, 107, 110, 120, 121}:
+    if arch not in {90, 100, 103, 107, 120, 121}:
         raise RuntimeError(f"FlashInfer MoE is unsupported on SM{arch}")
     from flashinfer.fused_moe import cutlass_fused_moe_workspace_size
 
