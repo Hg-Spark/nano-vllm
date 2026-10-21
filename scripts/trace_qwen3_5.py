@@ -308,6 +308,7 @@ def parse_args(argv=None):
 
 def run(args):
     from transformers import AutoConfig, AutoTokenizer
+
     from nanovllm.config import is_qwen3_5_moe
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
