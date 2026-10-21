@@ -163,20 +163,26 @@ class FlashInferRuntimeOpsTest(unittest.TestCase):
                     observed.synchronize.side_effect = wait_for_previous_upload
                     pool._transfer_done = observed
 
-                    second = pool.to_cuda(dtype, [3], dtype)
+                    second = pool.to_cuda(dtype, [3, 4], dtype)
                     self.assertEqual(pool.buffers[dtype].data_ptr(), ptr)
                     self.assertEqual(observed.synchronize.call_count, 1)
 
-                    expected_before_wait = [3]
-                    third = pool.to_cuda(dtype, [4, 5, 6], dtype)
-                    self.assertNotEqual(pool.buffers[dtype].data_ptr(), ptr)
+                    expected_before_wait = [3, 4]
+                    third = pool.to_cuda(dtype, [5], dtype)
+                    self.assertEqual(pool.buffers[dtype].data_ptr(), ptr)
                     self.assertEqual(observed.synchronize.call_count, 2)
-                    self.assertEqual(observed.record.call_count, 2)
+
+                    expected_before_wait = [5]
+                    grown = pool.to_cuda(dtype, [6, 7, 8], dtype)
+                    self.assertNotEqual(pool.buffers[dtype].data_ptr(), ptr)
+                    self.assertEqual(observed.synchronize.call_count, 3)
+                    self.assertEqual(observed.record.call_count, 3)
 
                     # Check the original outputs only after exercising pending
                     # transfers, so result.cpu() cannot conceal premature reuse.
                     for result, values in (
-                        (first, [1, 2]), (second, [3]), (third, [4, 5, 6])
+                        (first, [1, 2]), (second, [3, 4]),
+                        (third, [5]), (grown, [6, 7, 8]),
                     ):
                         self.assertTrue(result.is_cuda)
                         torch.testing.assert_close(
