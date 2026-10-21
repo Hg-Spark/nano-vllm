@@ -117,8 +117,8 @@ class MeasurementTest(unittest.TestCase):
         self.assertEqual(compare_tokens([1], [1, 2])["first_mismatch"], 1)
 
     def test_prefix_resume_rejects_matched_empty_outputs(self):
-        from scripts.verify_prefix_resume import run_prefix_resume_probe
         from nanovllm.engine import cache_runtime
+        from scripts.verify_prefix_resume import run_prefix_resume_probe
 
         entry = SimpleNamespace(
             num_tokens=64, block_ids=(0, 1, 2, 3), state_snapshot=object()
