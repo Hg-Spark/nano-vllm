@@ -8,8 +8,8 @@ from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 
-from benchmarks.bench_experiments import checkpoint_schedule_stats
 from benchmarks import summarize_bench
+from benchmarks.bench_experiments import checkpoint_schedule_stats
 from nanovllm.engine.sequence import Sequence
 from nanovllm.sampling_params import SamplingParams
 from tests.scheduler_helpers import make_scheduler
