@@ -13,6 +13,7 @@ class Scheduler:
     def __init__(self, config: Config, num_kv_cache_blocks: int, snapshot_nbytes: int = 0) -> None:
         self.max_num_seqs = config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
+        self.max_mixed_prefill_tokens = config.max_mixed_prefill_tokens
         self.eos_token_ids = set(config.eos_token_ids)
         self.block_manager = BlockManager(
             num_kv_cache_blocks,
@@ -54,6 +55,9 @@ class Scheduler:
         ):
             return
         num_batched_tokens = decode_count
+        token_limit = self.max_num_batched_tokens
+        if decode_count and self.max_mixed_prefill_tokens is not None:
+            token_limit = min(token_limit, decode_count + self.max_mixed_prefill_tokens)
         active = (*self.running, *self.prefilling)
         prefix_cache = self.block_manager.prefix_cache
         if prefix_cache.enabled:
@@ -74,7 +78,7 @@ class Scheduler:
         for admitted, queue in ((True, self.prefilling), (False, self.waiting)):
             for _ in range(len(queue)):
                 if (
-                    num_batched_tokens >= self.max_num_batched_tokens
+                    num_batched_tokens >= token_limit
                     or decode_count + len(prefill_chunks) >= self.max_num_seqs
                 ):
                     return
@@ -101,7 +105,7 @@ class Scheduler:
 
                 requested = min(
                     len(seq) - seq.committed_tokens,
-                    self.max_num_batched_tokens - num_batched_tokens,
+                    token_limit - num_batched_tokens,
                 )
                 scheduled = self.block_manager.max_schedulable_tokens(seq, requested)
                 while scheduled < requested and prefix_cache.evict(
