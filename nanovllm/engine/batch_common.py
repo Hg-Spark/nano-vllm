@@ -26,7 +26,6 @@ class PreparedBatch:
     positions: torch.Tensor
     context: Context
     layout: PrefillBatchLayout | DecodeBatchLayout
-    image_copy_spans: tuple[ImageCopySpan, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,7 +300,6 @@ def prepare_prefill(
             ),
             context=context,
             layout=layout,
-            image_copy_spans=layout.image_copy_spans,
         )
 
 

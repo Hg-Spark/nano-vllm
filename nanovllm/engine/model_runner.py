@@ -49,8 +49,8 @@ class ModelRunner:
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(getattr(torch, config.dtype))
         try:
-            if torch.cuda.get_device_capability()[0] not in (9, 10, 12):
-                raise RuntimeError("FlashInfer GDN requires SM90/SM100/SM120")
+            if torch.cuda.get_device_capability()[0] not in (9, 10, 11, 12):
+                raise RuntimeError("FlashInfer GDN requires SM90 or later (up to SM120)")
             with torch.device("cuda"):
                 self.model = Qwen3_5ForCausalLM(
                     config.root_config,
@@ -224,6 +224,8 @@ class ModelRunner:
         if bucket is None:
             return None
         layout = build_decode_batch_layout(chunks, self.block_size)
+        if not bucket.can_run(layout):
+            return None
         bucket.prepare(layout)
         logits = bucket.replay()
         return BatchResult(self._sample_logits(logits, seqs, list(range(len(chunks)))), {})
@@ -254,9 +256,9 @@ class ModelRunner:
 
         with use_context(context):
             with record_function(profile_range):
-                if batch.image_copy_spans:
+                if is_prefill and batch.layout.image_copy_spans:
                     inputs_embeds = self.model.model.embed_tokens(batch.input_ids)
-                    for span in batch.image_copy_spans:
+                    for span in batch.layout.image_copy_spans:
                         features = self._ensure_visual_features(span.seq)
                         dst_end = span.packed_dst_start + span.length
                         src_end = span.feature_src_start + span.length

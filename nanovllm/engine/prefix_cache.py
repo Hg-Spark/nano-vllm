@@ -32,7 +32,7 @@ def _block_hashes(
 
 @dataclass(frozen=True, slots=True)
 class PrefixEntry:
-    tokens: tuple[int, ...]
+    block_hashes: tuple[bytes, ...]
     block_ids: tuple[int, ...]
     num_tokens: int
     state_snapshot: GDNStateSnapshot
@@ -182,7 +182,12 @@ class PrefixCache:
             raise RuntimeError("KV block table is shorter than cached prefix")
 
         self._retain_blocks(block_ids)
-        entry = PrefixEntry(tuple(seq.token_ids[:position]), block_ids, position, snapshot)
+        block_hashes = tuple(
+            digest for _, digest in _block_hashes(
+                seq.token_ids, self.block_size, position, cached_hashes=seq.prefix_block_hashes
+            )
+        )
+        entry = PrefixEntry(block_hashes, block_ids, position, snapshot)
         self._entries[digest] = entry
         self._snapshot_bytes += self.snapshot_nbytes
 
@@ -201,13 +206,9 @@ class PrefixCache:
         # An out-of-order insertion may make existing descendants exceed their
         # path quota. Reject the new intermediate node if no old interior can go.
         for leaf in tuple(self._entries.values()):
-            if leaf.num_tokens <= position or leaf.tokens[:position] != entry.tokens:
+            if leaf.num_tokens <= position or leaf.block_hashes[num_blocks - 1] != digest:
                 continue
-            chain = [
-                key
-                for _, key in _block_hashes(leaf.tokens, self.block_size)
-                if key in self._entries
-            ]
+            chain = [key for key in leaf.block_hashes if key in self._entries]
             if len(chain) > limit:
                 interior = [key for key in chain[1:-1] if key != digest]
                 if not interior:
