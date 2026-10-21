@@ -1,6 +1,7 @@
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from hashlib import sha256
+from math import lcm
 from struct import pack
 
 from nanovllm.engine.schedule import GDN_CHECKPOINT_INTERVAL
@@ -28,6 +29,18 @@ def _block_hashes(
             if cached_hashes is not None:
                 cached_hashes.append(parent)
         yield start + block_size, parent
+
+
+def _sequence_block_hashes(seq: Sequence, block_size: int, stop: int) -> tuple[list[bytes], int]:
+    """Compute missing block hashes once and reuse indexed results on subsequent lookups."""
+    num_blocks = min(stop, len(seq.token_ids)) // block_size
+    hashes = seq.prefix_block_hashes
+    if len(hashes) < num_blocks:
+        for _ in _block_hashes(
+            seq.token_ids, block_size, num_blocks * block_size, cached_hashes=hashes
+        ):
+            pass
+    return hashes, num_blocks
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,11 +106,12 @@ class PrefixCache:
             end = min(end, seq.image_state.image_start)
         candidates = []
         cached = []
-        for position, digest in _block_hashes(
-            seq.token_ids, self.block_size, end, cached_hashes=seq.prefix_block_hashes
-        ):
-            if position % GDN_CHECKPOINT_INTERVAL:
-                continue
+        hashes, _ = _sequence_block_hashes(seq, self.block_size, end)
+        # A joint GDN/KV checkpoint must align to both the 64-token state grid
+        # and the KV page boundary; do not inspect non-checkpoint blocks.
+        step = lcm(GDN_CHECKPOINT_INTERVAL, self.block_size)
+        for position in range(step, end + 1, step):
+            digest = hashes[position // self.block_size - 1]
             if digest in self._entries:
                 cached.append(position)
             elif position > start:
@@ -130,14 +144,14 @@ class PrefixCache:
             return None
         if seq.image_state is not None:
             max_tokens = min(max_tokens, seq.image_state.image_start)
-        best_entry: PrefixEntry | None = None
-        for _, digest in _block_hashes(
-            seq.token_ids, self.block_size, max_tokens, cached_hashes=seq.prefix_block_hashes
-        ):
-            entry = self._entries.get(digest)
+        hashes, num_blocks = _sequence_block_hashes(seq, self.block_size, max_tokens)
+        # Search newest first, allowing a long cached prompt to return without
+        # iterating every earlier block. Non-grid entries remain discoverable.
+        for index in range(num_blocks - 1, -1, -1):
+            entry = self._entries.get(hashes[index])
             if entry is not None:
-                best_entry = entry
-        return best_entry
+                return entry
+        return None
 
     def mark_reused(self, seq: Sequence, entry: PrefixEntry) -> None:
         """Protect only prefixes actually attached to an admitted request."""
@@ -156,9 +170,12 @@ class PrefixCache:
         ):
             raise RuntimeError("invalid GDN snapshot checkpoint boundary")
         path = []
-        for position, digest in _block_hashes(
-            seq.token_ids, self.block_size, max(by_position), cached_hashes=seq.prefix_block_hashes
-        ):
+        hashes, num_blocks = _sequence_block_hashes(
+            seq, self.block_size, max(by_position)
+        )
+        for index in range(num_blocks):
+            position = (index + 1) * self.block_size
+            digest = hashes[index]
             if digest in self._entries:
                 path.append(digest)
             snapshot = by_position.get(position)
@@ -181,12 +198,8 @@ class PrefixCache:
             raise RuntimeError("KV block table is shorter than cached prefix")
 
         self._retain_blocks(block_ids)
-        block_hashes = tuple(
-            digest
-            for _, digest in _block_hashes(
-                seq.token_ids, self.block_size, position, cached_hashes=seq.prefix_block_hashes
-            )
-        )
+        hashes, _ = _sequence_block_hashes(seq, self.block_size, position)
+        block_hashes = tuple(hashes[:num_blocks])
         entry = PrefixEntry(block_hashes, block_ids, position, snapshot)
         self._entries[digest] = entry
         self._snapshot_bytes += self.snapshot_nbytes
