@@ -114,9 +114,23 @@ def parse_args(argv=None):
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--logits-relative-rms-threshold", type=float, default=0.05)
+    parser.add_argument(
+        "--trace", action="store_true",
+        help="teacher-forced per-step HF/Nano logits and layer parity diagnostics",
+    )
+    parser.add_argument(
+        "--trace-gdn-states", action="store_true",
+        help="also compare Conv and recurrent cache states (requires --trace)",
+    )
+    parser.add_argument(
+        "--trace-verbose-layers", action="store_true",
+        help="print every traced layer metric (requires --trace)",
+    )
     add_result_argument(parser)
     args = parser.parse_args(argv)
     validate_positive(parser, args, "max_new_tokens")
+    if (args.trace_gdn_states or args.trace_verbose_layers) and not args.trace:
+        parser.error("--trace-gdn-states and --trace-verbose-layers require --trace")
     validate_finite(
         parser,
         args.logits_relative_rms_threshold,
@@ -130,6 +144,15 @@ def parse_args(argv=None):
 
 
 def run(args):
+    if args.trace:
+        from scripts.trace_qwen3_5 import run as run_trace
+
+        args.relative_rmse_threshold = args.logits_relative_rms_threshold
+        args.trace_gdn_states = bool(args.trace_gdn_states)
+        args.verbose_layers = bool(args.trace_verbose_layers)
+        args.top_k = 5
+        return run_trace(args)
+
     from transformers import AutoConfig, AutoTokenizer
 
     from nanovllm.config import is_qwen3_5_moe
