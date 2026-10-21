@@ -64,9 +64,7 @@ class FlashInferGDNTest(unittest.TestCase):
             predicted = (reference_state * key[:, None, :]).sum(-1)
             delta = (v[index].float() - predicted) * beta[index, :, None]
             reference_state = reference_state + delta[:, :, None] * key[:, None, :]
-            reference_outputs.append(
-                (reference_state * query[:, None, :]).sum(-1) * dim**-0.5
-            )
+            reference_outputs.append((reference_state * query[:, None, :]).sum(-1) * dim**-0.5)
 
         output, _ = chunk_gated_delta_rule(
             q,
