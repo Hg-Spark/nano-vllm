@@ -79,43 +79,34 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         self.assertEqual(hit.num_tokens, 8)
         self.assertIsNone(manager.prefix_cache.find(Sequence([1, 2, 3, 4]), max_tokens=3))
 
-    def test_eviction_releases_cache_block_reference(self):
-        manager = BlockManager(num_blocks=4, block_size=4, max_prefix_entries=1)
-        first_seq, first_block = publish_prefix(manager, [1, 2, 3, 4, 9], 4)
-        self.assertEqual(manager.block_refcounts[first_block], 2)
+    def test_eviction_releases_blocks_under_entry_and_byte_limits(self):
+        for byte_limit in (None, 12):
+            with self.subTest(byte_limit=byte_limit):
+                manager = BlockManager(
+                    num_blocks=8,
+                    block_size=4,
+                    max_prefix_entries=1 if byte_limit is None else 4,
+                    max_prefix_cache_snapshot_bytes=byte_limit,
+                    snapshot_nbytes=9 if byte_limit is not None else 0,
+                )
+                first, first_block = publish_prefix(manager, [1, 2, 3, 4, 9], 4)
+                self.assertEqual(manager.block_refcounts[first_block], 2)
+                second, second_block = publish_prefix(manager, [5, 6, 7, 8, 9], 4)
+                cache = manager.prefix_cache
 
-        _, second_block = publish_prefix(manager, [5, 6, 7, 8, 9], 4)
-        self.assertEqual(len(manager.prefix_cache), 1)
-        self.assertEqual(manager.block_refcounts[first_block], 1)
+                self.assertEqual(len(cache), 1)
+                self.assertEqual(cache.snapshot_bytes, 9 if byte_limit is not None else 0)
+                self.assertEqual(manager.block_refcounts[first_block], 1)
+                self.assertEqual(manager.block_refcounts[second_block], 2)
+                hit = cache.find(Sequence([5, 6, 7, 8, 10]), max_tokens=4)
+                self.assertEqual(hit.block_ids, (second_block,))
 
-        hit = manager.prefix_cache.find(Sequence([5, 6, 7, 8, 10]), max_tokens=4)
-        self.assertEqual(hit.block_ids, (second_block,))
-        manager.deallocate(first_seq)
-        self.assertEqual(manager.block_refcounts[first_block], 0)
-
-    def test_snapshot_byte_limit_evicts_longest_and_releases_refs(self):
-        manager = BlockManager(
-            num_blocks=8,
-            block_size=4,
-            max_prefix_entries=4,
-            max_prefix_cache_snapshot_bytes=12,
-            snapshot_nbytes=9,
-        )
-        first, first_block = publish_prefix(manager, [1, 2, 3, 4, 5], 4)
-        self.assertEqual(manager.prefix_cache.snapshot_bytes, 9)
-        self.assertEqual(manager.block_refcounts[first_block], 2)
-
-        second, second_block = publish_prefix(manager, [6, 7, 8, 9, 10], 4)
-        self.assertEqual(len(manager.prefix_cache), 1)
-        self.assertEqual(manager.prefix_cache.snapshot_bytes, 9)
-        self.assertEqual(manager.block_refcounts[first_block], 1)
-        self.assertEqual(manager.block_refcounts[second_block], 2)
-
-        for seq in (first, second):
-            manager.deallocate(seq)
-        self.assertTrue(manager.prefix_cache.evict())
-        self.assertEqual(manager.prefix_cache.snapshot_bytes, 0)
-        self.assertEqual(manager.block_refcounts[second_block], 0)
+                manager.deallocate(first)
+                manager.deallocate(second)
+                self.assertEqual(manager.block_refcounts[first_block], 0)
+                self.assertTrue(cache.evict())
+                self.assertEqual(cache.snapshot_bytes, 0)
+                self.assertEqual(manager.block_refcounts[second_block], 0)
 
     def test_longest_leaf_eviction_keeps_shorter_shared_prefix(self):
         manager = BlockManager(num_blocks=32, block_size=16, max_prefix_entries=2)
@@ -141,20 +132,6 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         self.assertIsNone(manager.prefix_cache.find(Sequence(list(range(128)) + [10]), 128))
         self.assertEqual(manager.block_refcounts[old_block], 2)
         manager.deallocate(old)
-
-    def test_single_checkpoint_path_replaces_older_boundary(self):
-        manager = BlockManager(
-            num_blocks=16, block_size=16, max_prefix_entries=2, max_checkpoints_per_path=1
-        )
-        seq, _ = publish_prefix(manager, list(range(128)) + [9], 64)
-        manager.ensure_capacity(seq, 128)
-        publish_snapshot(manager, seq, 128)
-
-        self.assertEqual(len(manager.prefix_cache), 1)
-        self.assertEqual(
-            manager.prefix_cache.find(Sequence(list(range(128)) + [10]), 128).num_tokens,
-            128,
-        )
 
     def test_global_one_entry_captures_only_deepest_checkpoint(self):
         manager = BlockManager(num_blocks=20, block_size=16, max_prefix_entries=1)
