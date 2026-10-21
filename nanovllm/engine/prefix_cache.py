@@ -173,9 +173,7 @@ class PrefixCache:
         ):
             raise RuntimeError("invalid GDN snapshot checkpoint boundary")
         path = []
-        hashes, num_blocks = _sequence_block_hashes(
-            seq, self.block_size, max(by_position)
-        )
+        hashes, num_blocks = _sequence_block_hashes(seq, self.block_size, max(by_position))
         for index in range(num_blocks):
             position = (index + 1) * self.block_size
             digest = hashes[index]
