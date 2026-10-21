@@ -22,7 +22,9 @@ def load_config(path, root=ROOT, stage=None):
         "smoke",
         "full",
     ):
-        raise ValueError("benchmark.mode must be smoke/full for bench or all; use the tail/long stage directly")
+        raise ValueError(
+            "benchmark.mode must be smoke/full for bench or all; use the tail/long stage directly"
+        )
     return config
 
 
