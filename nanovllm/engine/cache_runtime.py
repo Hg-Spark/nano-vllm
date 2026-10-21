@@ -118,7 +118,8 @@ def allocate_runtime_caches(
     logger.info(
         "Static KV capacity: KV_budget=%d MiB, KV_blocks=%d, "
         "GDN_reserve=%d MiB, checkpoint_reserve=%d MiB, "
-        "vision_reserve=%d MiB, graph_reserve=%d MiB, activation_reserve=%d MiB",
+        "vision_reserve=%d MiB, graph_reserve=%d MiB, "
+        "activation_reserve=%d MiB",
         cache_budget // (1024**2),
         num_kv_cache_blocks,
         state_cache_bytes // (1024**2),
@@ -128,7 +129,9 @@ def allocate_runtime_caches(
         config.activation_reserve_bytes // (1024**2),
     )
     if num_kv_cache_blocks <= 0:
-        raise RuntimeError("insufficient GPU memory after reserving Qwen3.5 runtime caches and activations")
+        raise RuntimeError(
+            "insufficient GPU memory after reserving Qwen3.5 runtime caches and activations"
+        )
 
     kv_cache = torch.empty(
         2,
