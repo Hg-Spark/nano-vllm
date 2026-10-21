@@ -32,6 +32,47 @@ class SchedulerCoreTest(unittest.TestCase):
                 if expected_prefill:
                     self.assertEqual(scheduled.prefill_chunks[0].num_tokens, 3)
 
+    def test_mixed_prefill_cap_preserves_pure_prefill_budget(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=512,
+            max_num_seqs=2,
+            num_blocks=256,
+            max_mixed_prefill_tokens=64,
+        )
+        running = make_running_sequence(scheduler, [1, 2])
+        seq = Sequence(list(range(1024)), SamplingParams(max_tokens=1))
+        scheduler.add(seq)
+
+        mixed = scheduler.schedule()
+        self.assertEqual(mixed.decode_tokens, 1)
+        self.assertEqual(mixed.prefill_tokens, 64)
+        self.assertEqual(mixed.prefill_chunks[0].end, 64)
+        scheduler.postprocess(mixed.decode_chunks, [7], False)
+        scheduler.postprocess(mixed.prefill_chunks, [None], True)
+
+        # Removing the decode request restores the normal prefill budget.
+        scheduler.running.remove(running)
+        scheduler._release_runtime_state(running)
+        prefill = scheduler.schedule()
+        self.assertEqual(prefill.decode_tokens, 0)
+        self.assertGreater(prefill.prefill_tokens, 64)
+
+    def test_zero_mixed_prefill_cap_skips_prefill_until_decode_stops(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=64,
+            max_num_seqs=2,
+            num_blocks=64,
+            max_mixed_prefill_tokens=0,
+        )
+        running = make_running_sequence(scheduler, [1, 2])
+        waiting = Sequence(list(range(100)), SamplingParams(max_tokens=1))
+        scheduler.add(waiting)
+        scheduled = scheduler.schedule()
+        self.assertEqual(scheduled.decode_tokens, 1)
+        self.assertFalse(scheduled.prefill_chunks)
+        self.assertIn(waiting, scheduler.waiting)
+        self.assertIn(running, scheduler.running)
+
     def test_chunked_prefill_keeps_new_request_fifo(self):
         scheduler = make_scheduler(
             max_num_batched_tokens=4, max_num_seqs=2, num_blocks=16, block_size=4
