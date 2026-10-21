@@ -191,9 +191,7 @@ def graph_counters(runner):
 def measured_graph_usage(runner, before, decode_calls):
     replay_count, fallback_counts = graph_counters(runner)
     replays = replay_count - before[0]
-    fallbacks = {
-        name: count - before[1][name] for name, count in fallback_counts.items()
-    }
+    fallbacks = {name: count - before[1][name] for name, count in fallback_counts.items()}
     if replays < 0 or replays > decode_calls or sum(fallbacks.values()) != decode_calls - replays:
         raise RuntimeError("Decode Graph replay/fallback accounting is inconsistent")
     return {
