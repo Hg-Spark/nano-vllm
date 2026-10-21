@@ -55,12 +55,19 @@ class Scheduler:
             return
         num_batched_tokens = decode_count
         active = (*self.running, *self.prefilling)
-        occupied_blocks = {block for seq in active for block in seq.block_table}
-        reserved_blocks = len(occupied_blocks) + sum(
-            self._request_blocks(seq) - len(seq.block_table) for seq in active
-        )
-        active_count = len(self.running) + len(self.prefilling)
         prefix_cache = self.block_manager.prefix_cache
+        if prefix_cache.enabled:
+            # Cached prefixes can share physical pages across active requests.
+            occupied_blocks = {block for seq in active for block in seq.block_table}
+            reserved_blocks = len(occupied_blocks) + sum(
+                self._request_blocks(seq) - len(seq.block_table) for seq in active
+            )
+        else:
+            # Without prefix sharing, every active request owns its KV pages.
+            # Avoid rebuilding a set of all resident pages on every decode step.
+            occupied_blocks = set()
+            reserved_blocks = sum(self._request_blocks(seq) for seq in active)
+        active_count = len(self.running) + len(self.prefilling)
         planned_prefixes: set[bytes] = set()
 
         # Resume admitted prefills round-robin; admit waiting requests in FIFO order.
@@ -76,11 +83,10 @@ class Scheduler:
                 if not admitted:
                     entry = prefix_cache.find(seq, max_tokens=len(seq) - 1)
                     shared_blocks = entry.block_ids if entry is not None else ()
-                    blocks = (
-                        self._request_blocks(seq)
-                        - len(shared_blocks)
-                        + len(set(shared_blocks) - occupied_blocks)
-                    )
+                    blocks = self._request_blocks(seq)
+                    if shared_blocks:
+                        blocks -= len(shared_blocks)
+                        blocks += len(set(shared_blocks) - occupied_blocks)
                     if (
                         active_count >= self.max_num_seqs
                         or reserved_blocks + blocks > self.block_manager.num_blocks
