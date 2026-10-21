@@ -122,6 +122,20 @@ class LLMEngineStepTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "closed"):
             engine.step()
 
+    def test_context_limit_counts_only_tokens_processed_by_model(self):
+        engine = make_engine_stub()
+        engine.scheduler = make_engine_scheduler()
+        engine.config = SimpleNamespace(text_config=SimpleNamespace(vocab_size=128))
+        engine.max_model_len = 4
+        engine.max_kv_tokens = 4
+
+        # Prompt (3) + two requested samples processes four tokens in total:
+        # the final sample is returned directly and never enters the KV cache.
+        seq = engine._prepare_request([1, 2, 3], SamplingParams(max_tokens=2))
+        self.assertEqual(seq.max_tokens, 2)
+        with self.assertRaisesRegex(ValueError, "exceeds max_model_len"):
+            engine._prepare_request([1, 2, 3], SamplingParams(max_tokens=3))
+
     def test_fixed_decode_rejects_overcommitted_kv(self):
         scheduler = make_scheduler(max_num_seqs=2, num_blocks=3, block_size=4)
         engine = SimpleNamespace(
