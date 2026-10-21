@@ -93,8 +93,27 @@ class GatedDeltaNet(nn.Module):
 
         from causal_conv1d import causal_conv1d_fn
 
-        # An explicit history window before every chunk isolates the sequences
-        # while allowing one convolution over the packed, variable-length input.
+        lengths = [q_offsets[index + 1] - q_offsets[index] for index in range(len(conv_states))]
+        if len(set(lengths)) == 1:
+            # Use the kernel's native batched initial/final states for equal-size
+            # chunks. Unlike the packed fallback, this does not materialize
+            # history tokens in the convolution input or repack its output.
+            x = mixed_qkv.contiguous().view(len(conv_states), lengths[0], self.conv_dim)
+            initial_states = torch.stack([state.T for state in conv_states]).transpose(1, 2)
+            out, final_states = causal_conv1d_fn(
+                x.transpose(1, 2),
+                self.conv1d.weight.squeeze(1),
+                None,
+                initial_states=initial_states,
+                return_final_states=True,
+                activation="silu",
+            )
+            for state, final_state in zip(conv_states, final_states):
+                state.copy_(final_state)
+            return out.transpose(1, 2).reshape(-1, self.conv_dim)
+
+        # Variable-size chunks retain the packed single-kernel fallback.
+        # Explicit history windows isolate their convolution state.
         history = self.conv_kernel_size - 1
         segments = []
         for index, state in enumerate(conv_states):
