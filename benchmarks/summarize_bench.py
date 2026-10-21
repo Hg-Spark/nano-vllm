@@ -9,6 +9,8 @@ from collections import defaultdict
 from pathlib import Path
 from statistics import median
 
+from scripts.bench import P99_MIN_SAMPLES
+
 
 def workload_key(result, *, ignore_mixed_prefill_limit=False):
     p = result["config"]
@@ -82,12 +84,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("folder", help="directory of benchmark experiment JSON files")
     ap.add_argument("--min-repeats", type=int, default=5)
-    ap.add_argument("--min-itl-samples", type=int, default=1000)
+    ap.add_argument("--min-itl-samples", type=int, default=P99_MIN_SAMPLES)
     args = ap.parse_args(argv)
     if args.min_repeats < 1:
         ap.error("--min-repeats must be positive")
-    if args.min_itl_samples < 1000:
-        ap.error("--min-itl-samples must be at least 1000 for P99 reporting")
+    if args.min_itl_samples < P99_MIN_SAMPLES:
+        ap.error(f"--min-itl-samples must be at least {P99_MIN_SAMPLES} for P99 reporting")
 
     samples = []
     failed = []
