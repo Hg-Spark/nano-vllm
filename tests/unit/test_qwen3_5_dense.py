@@ -51,16 +51,38 @@ class Qwen3_5DenseTest(unittest.TestCase):
 
     def test_strict_loading_handles_either_tied_name_and_rejects_conflicts(self):
         source = Qwen3_5ForCausalLM(dense_config())
-        # Use finite deterministic weights, including GDN's uninitialized A_log.
+        # Independent HF shard layout for the fixed make_dense_config() fixture.
+        # These offsets must not come from packed_checkpoint_shards(), the
+        # production mapping being tested.
+        shards = (
+            ("model.layers.0.linear_attn.in_proj_qkv.weight",
+             "model.layers.0.linear_attn.in_proj.weight", 0, 16),
+            ("model.layers.0.linear_attn.in_proj_z.weight",
+             "model.layers.0.linear_attn.in_proj.weight", 16, 24),
+            ("model.layers.0.linear_attn.in_proj_b.weight",
+             "model.layers.0.linear_attn.in_proj.weight", 24, 26),
+            ("model.layers.0.linear_attn.in_proj_a.weight",
+             "model.layers.0.linear_attn.in_proj.weight", 26, 28),
+            ("model.layers.0.mlp.gate_proj.weight",
+             "model.layers.0.mlp.gate_up_proj.weight", 0, 12),
+            ("model.layers.0.mlp.up_proj.weight",
+             "model.layers.0.mlp.gate_up_proj.weight", 12, 24),
+            ("model.layers.1.mlp.gate_proj.weight",
+             "model.layers.1.mlp.gate_up_proj.weight", 0, 12),
+            ("model.layers.1.mlp.up_proj.weight",
+             "model.layers.1.mlp.gate_up_proj.weight", 12, 24),
+        )
         weights = {
             name: torch.full_like(param, 0.1 + i * 0.01)
             for i, (name, param) in enumerate(source.named_parameters())
         }
+        for i, (_, target, start, end) in enumerate(shards):
+            weights[target][start:end].fill_(i + 1)
         embed = "model.embed_tokens.weight"
         for mode in ("embedding_only", "head_only", "both", "conflict", "missing_ffn"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as folder:
                 checkpoint = {name: value.clone() for name, value in weights.items()}
-                for source_name, (target, start, end) in source.packed_checkpoint_shards().items():
+                for source_name, target, start, end in shards:
                     checkpoint[source_name] = weights[target][start:end].clone()
                     checkpoint.pop(target, None)
                 if mode in ("head_only", "both", "conflict"):
