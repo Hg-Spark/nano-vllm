@@ -147,6 +147,18 @@ class BenchmarkExperimentsTest(unittest.TestCase):
                 "details": {"token_hash": "same"},
             },
         }
+        # Runtime versions are part of benchmark comparability, not A/B toggles.
+        env = {**base["result"], "config": base["config"],
+               "torch_version": "2.14.0", "torch_cuda_version": "13.0"}
+        self.assertNotEqual(
+            summary.workload_key(env),
+            summary.workload_key({**env, "torch_version": "2.15.0"}),
+        )
+        self.assertNotEqual(
+            summary.workload_key(env),
+            summary.workload_key({**env, "torch_cuda_version": "13.1"}),
+        )
+
         graph = json.loads(json.dumps(base))
         graph["config"]["graph_sizes"] = [2]
         graph["result"]["metrics"]["output_throughput_tok_s"] = 150
