@@ -181,17 +181,16 @@ def main(argv=None):
             ):
                 graph_coverage = median(r["metrics"]["graph_coverage"] for r in treatment)
                 eager_calls = median(r["metrics"]["eager_decode_forward_calls"] for r in treatment)
-                print(f"  Graph coverage: {graph_coverage:.1%}; eager fallback calls: {eager_calls:.0f}")
+                print(
+                    f"  Graph coverage: {graph_coverage:.1%}; eager fallback calls: {eager_calls:.0f}"
+                )
                 reasons = ("missing_bucket", "layout_exceeded")
                 for reason in reasons:
                     count = median(
                         r["metrics"]["graph_fallback_reasons"][reason] for r in treatment
                     )
                     print(f"    {reason}: {count:.0f}")
-            if all(
-                "peak_cuda_memory_gib" in run["metrics"]
-                for run in [*baseline, *treatment]
-            ):
+            if all("peak_cuda_memory_gib" in run["metrics"] for run in [*baseline, *treatment]):
                 b_mem = number(baseline, "peak_cuda_memory_gib")
                 t_mem = number(treatment, "peak_cuda_memory_gib")
                 print(
@@ -220,10 +219,7 @@ def main(argv=None):
                         f"  Target scheduled checkpoints (not confirmed retained): "
                         f"{b_cps:.0f} -> {t_cps:.0f}"
                     )
-                if all(
-                    "published_checkpoints_during_target" in r["details"]
-                    for r in treatment
-                ):
+                if all("published_checkpoints_during_target" in r["details"] for r in treatment):
                     fields = (
                         "published_checkpoints_during_target",
                         "evicted_checkpoints_during_target",
@@ -270,12 +266,15 @@ def main(argv=None):
                         for r in runs
                     )
                     p99_values = [
-                        r["metrics"]["long_prompt_interference"]["short_token_gap_after_seconds"].get("p99")
+                        r["metrics"]["long_prompt_interference"][
+                            "short_token_gap_after_seconds"
+                        ].get("p99")
                         for r in runs
                     ]
                     p99 = (
                         median(value * 1000 for value in p99_values)
-                        if samples >= args.min_itl_samples and all(value is not None for value in p99_values)
+                        if samples >= args.min_itl_samples
+                        and all(value is not None for value in p99_values)
                         else None
                     )
                     tail_stats.append((p99, samples))
