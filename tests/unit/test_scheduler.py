@@ -16,9 +16,7 @@ class SchedulerCoreTest(unittest.TestCase):
         cases = ((4, 4, 3), (8, 1, 0))
         for budget, max_seqs, expected_prefill in cases:
             with self.subTest(budget=budget, max_seqs=max_seqs):
-                scheduler = make_scheduler(
-                    max_num_batched_tokens=budget, max_num_seqs=max_seqs
-                )
+                scheduler = make_scheduler(max_num_batched_tokens=budget, max_num_seqs=max_seqs)
                 decode_seq = make_running_sequence(scheduler, [1, 2])
                 prefill_seq = Sequence(list(range(10)))
                 scheduler.add(prefill_seq)
