@@ -133,9 +133,13 @@ def run_benchmark(
             "long_prompt_tokens": late_sequence.num_prompt_tokens,
             "long_ttft_seconds": first_token_at[late_sequence.seq_id]
             - arrival_at[late_sequence.seq_id],
-            "short_token_gap_before_seconds": summarize(short_gap_before, p99_min_samples=P99_MIN_SAMPLES),
+            "short_token_gap_before_seconds": summarize(
+                short_gap_before, p99_min_samples=P99_MIN_SAMPLES
+            ),
             "short_token_gap_before_samples": len(short_gap_before),
-            "short_token_gap_after_seconds": summarize(short_gap_after, p99_min_samples=P99_MIN_SAMPLES),
+            "short_token_gap_after_seconds": summarize(
+                short_gap_after, p99_min_samples=P99_MIN_SAMPLES
+            ),
             "short_token_gap_after_samples": len(short_gap_after),
         }
     return result
