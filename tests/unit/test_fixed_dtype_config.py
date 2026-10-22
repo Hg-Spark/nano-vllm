@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from benchmarks import run_tests
 from nanovllm.config import Config
-from scripts import verify_qwen3_5, verify_prefix_resume
+from scripts import verify_prefix_resume, verify_qwen3_5
 
 
 class FixedDtypeConfigTest(unittest.TestCase):
