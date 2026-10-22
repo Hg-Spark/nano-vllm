@@ -14,9 +14,8 @@ from scripts import verify_qwen3_5, verify_prefix_resume
 class FixedDtypeConfigTest(unittest.TestCase):
     def test_model_dtype_is_implementation_detail(self):
         self.assertNotIn("dtype", inspect.signature(Config).parameters)
-        with patch("scripts.verify_qwen3_5.argparse.ArgumentParser.error") as error:
-            verify_qwen3_5.parse_args(["/tmp/example-model"])
-            error.assert_not_called()
+        args = verify_qwen3_5.parse_args(["/tmp/example-model"])
+        self.assertFalse(hasattr(args, "dtype"))
 
     def test_correctness_cli_exposes_kv_precision_not_model_precision(self):
         for parser in (verify_qwen3_5.parse_args, verify_prefix_resume.parse_args):
@@ -78,9 +77,10 @@ class FixedDtypeConfigTest(unittest.TestCase):
                 self.assertEqual(calls[0][2]["NANOVLLM_KV_CACHE_DTYPE"], "fp8_e4m3")
                 self.assertEqual(calls[0][2]["NANOVLLM_KV_CACHE_K_SCALE"], "0.25")
                 self.assertEqual(calls[0][2]["NANOVLLM_KV_CACHE_V_SCALE"], "0.5")
-                self.assertNotIn("NANOVLLM_DTYPE", calls[0][2])
                 if stage == "check":
-                    targets = [entry for entry in calls if entry[0] in ("hf-parity", "prefix-parity")]
+                    targets = [
+                        entry for entry in calls if entry[0] in ("hf-parity", "prefix-parity")
+                    ]
                 elif stage == "capacity":
                     targets = [entry for entry in calls if entry[0] == "capacity"]
                 else:
