@@ -451,7 +451,7 @@ class FlashInferPagedAttentionIntegrationTest(unittest.TestCase):
 @unittest.skipUnless(_has_cuda_gpu(), "FlashInfer KV append Graph test requires CUDA")
 class FlashInferKVAppendGraphTest(unittest.TestCase):
     def test_graph_replay_updates_logical_positions_and_noncontiguous_pages(self):
-        for cache_dtype in (torch.float16, torch.float8_e4m3fn):
+        for cache_dtype in (torch.bfloat16, torch.float8_e4m3fn):
             with self.subTest(cache_dtype=cache_dtype):
                 self._check_graph_replay(cache_dtype)
 
@@ -459,7 +459,7 @@ class FlashInferKVAppendGraphTest(unittest.TestCase):
         bucket = DecodeGraphBucket(
             2, 64, 16, torch.zeros(1024 * 1024, dtype=torch.uint8, device="cuda")
         )
-        key = torch.randn(2, 1, 128, device="cuda", dtype=torch.float16)
+        key = torch.randn(2, 1, 128, device="cuda", dtype=torch.bfloat16)
         value = torch.randn_like(key)
         k_cache = torch.zeros(4, 16, 1, 128, device="cuda", dtype=cache_dtype)
         v_cache = torch.zeros_like(k_cache)
