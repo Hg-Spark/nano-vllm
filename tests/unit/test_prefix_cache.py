@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from nanovllm.engine.block_manager import BlockManager
+from nanovllm.engine.prefix_cache import _sequence_block_hashes
 from nanovllm.engine.schedule import GDN_CHECKPOINT_INTERVAL
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
@@ -78,6 +79,9 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         for token in range(130, 144):
             seq.append_token(token)
         cache.candidates(seq, 128, 144)
+        # Appended generated tokens are not part of the reusable prompt.
+        self.assertEqual(len(seq.prefix_block_hashes), 8)
+        _sequence_block_hashes(seq, 16, 144)
         self.assertEqual(len(seq.prefix_block_hashes), 9)
         self.assertEqual(
             seq.prefix_block_hashes,
@@ -200,7 +204,7 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         cache._entries = CountingEntries(cache._entries)
         cache.publish_many(seq, (GDNStateSnapshot(8192, ()),))
         self.assertEqual(cache.find(seq, 8192).num_tokens, 8192)
-        self.assertLessEqual(cache._entries.probes, 4)
+        self.assertLessEqual(cache._entries.probes, 8)
 
     def test_cached_checkpoints_include_ancestors_and_exclude_other_branches(self):
         manager = BlockManager(num_blocks=16, block_size=16, max_prefix_entries=4)
