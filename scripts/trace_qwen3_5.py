@@ -15,6 +15,8 @@ from scripts._common import (
     ValidationFailure,
     add_hf_experts_backend_argument,
     add_model_argument,
+    add_kv_cache_arguments,
+    kv_cache_kwargs,
     add_result_argument,
     execute,
     normalize_paths,
@@ -177,7 +179,7 @@ def trace_hf(model_path, prompt_ids, steps, experts_backend, trace_states):
     return run_hf_reference(AutoModelForCausalLM, model_path, experts_backend, evaluate)
 
 
-def trace_nano(model_path, prompt_ids, forced_tokens, max_model_len, trace_states):
+def trace_nano(model_path, prompt_ids, forced_tokens, max_model_len, trace_states, kv_options):
     from nanovllm import LLM, SamplingParams
 
     # A single full prompt prefill, no prefix reuse, and eager decode ensure
@@ -185,6 +187,7 @@ def trace_nano(model_path, prompt_ids, forced_tokens, max_model_len, trace_state
     llm = LLM(
         model_path,
         max_model_len=max_model_len,
+        **kv_options,
         max_num_seqs=1,
         max_num_batched_tokens=max(len(prompt_ids), 16),
         max_prefix_cache_entries=0,
@@ -292,6 +295,7 @@ def compare_traces(hf_tokens, hf_traces, nano_traces, threshold, top_k):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     add_model_argument(parser, required=True)
+    add_kv_cache_arguments(parser)
     add_hf_experts_backend_argument(parser)
     parser.add_argument(
         "--prompt", default="Explain why KV cache is useful in autoregressive inference."
@@ -345,6 +349,7 @@ def run(args):
         args.dtype,
         args.max_model_len,
         args.trace_gdn_states,
+        kv_cache_kwargs(args),
     )
     result = compare_traces(hf_tokens, hf, nano, args.relative_rmse_threshold, args.top_k)
     result.update(
