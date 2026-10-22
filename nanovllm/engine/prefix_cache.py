@@ -1,3 +1,4 @@
+from bisect import bisect_left, bisect_right, insort
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from hashlib import sha256
@@ -81,6 +82,10 @@ class PrefixCache:
         self._retain_blocks = retain_blocks
         self._release_blocks = release_blocks
         self._entries: dict[bytes, PrefixEntry] = {}
+        # The index contains resident checkpoint lengths, not every candidate
+        # page in a long prompt. Several hashes may share one length.
+        self._resident_lengths: list[int] = []
+        self._resident_length_counts: dict[int, int] = {}
         # Active request references, not permanent "ever-hit" flags.
         self._active_reuses: dict[bytes, int] = {}
         self._seq_reuses: dict[int, bytes] = {}
@@ -154,16 +159,21 @@ class PrefixCache:
         return candidates[:1] if len(candidates) == 1 else [candidates[0], candidates[-1]]
 
     def find(self, seq: Sequence, max_tokens: int) -> PrefixEntry | None:
-        if not self.enabled or max_tokens <= 0:
+        if not self.enabled or max_tokens <= 0 or not self._entries:
             return None
         if seq.image_state is not None:
             max_tokens = min(max_tokens, seq.image_state.image_start)
-        hashes, num_blocks = _sequence_block_hashes(seq, self.block_size, max_tokens)
-        # Search newest first, allowing a long cached prompt to return without
-        # iterating every earlier block. Non-grid entries remain discoverable.
-        for index in range(num_blocks - 1, -1, -1):
-            entry = self._entries.get(hashes[index])
-            if entry is not None:
+        # Only probe actual resident checkpoint lengths. Unlike an all-pages
+        # reverse scan, a long waiting request costs O(log K + K) for K distinct
+        # resident lengths even when its own prefix is not cached.
+        end = bisect_right(self._resident_lengths, max_tokens)
+        if not end:
+            return None
+        hashes, _ = _sequence_block_hashes(seq, self.block_size, self._resident_lengths[end - 1])
+        for position in reversed(self._resident_lengths[:end]):
+            digest = hashes[position // self.block_size - 1]
+            entry = self._entries.get(digest)
+            if entry is not None and entry.num_tokens == position:
                 return entry
         return None
 
@@ -229,6 +239,10 @@ class PrefixCache:
         block_hashes = tuple(hashes[:num_blocks])
         entry = PrefixEntry(block_hashes, block_ids, position, snapshot)
         self._entries[digest] = entry
+        if position not in self._resident_length_counts:
+            insort(self._resident_lengths, position)
+            self._resident_length_counts[position] = 0
+        self._resident_length_counts[position] += 1
         self._snapshot_bytes += self.snapshot_nbytes
         self.published_count += 1
         self.peak_snapshot_bytes = max(self.peak_snapshot_bytes, self._snapshot_bytes)
@@ -286,6 +300,13 @@ class PrefixCache:
 
     def _evict_hash(self, digest: bytes) -> None:
         entry = self._entries.pop(digest)
+        position = entry.num_tokens
+        count = self._resident_length_counts[position] - 1
+        if count:
+            self._resident_length_counts[position] = count
+        else:
+            del self._resident_length_counts[position]
+            self._resident_lengths.pop(bisect_left(self._resident_lengths, position))
         self.evicted_count += 1
         self._snapshot_bytes -= self.snapshot_nbytes
         # A request may still be using this prefix after its cache entry is evicted.
