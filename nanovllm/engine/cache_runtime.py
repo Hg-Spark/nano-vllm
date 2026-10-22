@@ -167,6 +167,122 @@ def allocate_runtime_caches(
     return kv_cache, num_kv_cache_blocks
 
 
+class GDNRestoreStaging:
+    """Bounded pinned staging for batched, two-transfer GDN checkpoint restores.
+
+    CPU snapshots retain independent ownership; this temporary staging is never
+    exposed to PrefixCache. A CUDA event guards reuse across batches.
+    """
+
+    def __init__(self, max_staging_bytes: int = 64 * 1024**2) -> None:
+        if max_staging_bytes <= 0:
+            raise ValueError("max_staging_bytes must be positive")
+        self.max_staging_bytes = max_staging_bytes
+        self._conv_host: torch.Tensor | None = None
+        self._recurrent_host: torch.Tensor | None = None
+        self._transfer_done: torch.cuda.Event | None = None
+        self._pending = False
+
+    def _wait(self) -> None:
+        if self._pending:
+            self._transfer_done.synchronize()
+            self._pending = False
+
+    def clear(self) -> None:
+        self._wait()
+        self._conv_host = None
+        self._recurrent_host = None
+        self._transfer_done = None
+
+    def restore(self, model, pending: list[tuple[Sequence, GDNStateSnapshot]]) -> None:
+        if not pending:
+            return
+        modules = model.state_cache_modules()
+        for seq, snapshot in pending:
+            if seq.state_slot < 0:
+                raise RuntimeError(f"sequence {seq.seq_id} has no state slot to restore")
+            if snapshot.num_tokens != seq.committed_tokens:
+                raise RuntimeError(
+                    f"sequence {seq.seq_id} restore boundary mismatch: "
+                    f"snapshot={snapshot.num_tokens}, logical={seq.committed_tokens}"
+                )
+            if len(snapshot.layers) != len(modules):
+                raise RuntimeError("GDN snapshot layer count does not match model")
+
+        if not modules:
+            return
+        first = pending[0][1].layers[0]
+        device = modules[0].conv_state.device
+        conv_shape, recurrent_shape = first[0].shape, first[1].shape
+        conv_dtype, recurrent_dtype = first[0].dtype, first[1].dtype
+        homogeneous = all(
+            conv.shape == conv_shape
+            and recurrent.shape == recurrent_shape
+            and conv.dtype == conv_dtype
+            and recurrent.dtype == recurrent_dtype
+            and conv.device.type == "cpu"
+            and recurrent.device.type == "cpu"
+            for _, snapshot in pending
+            for conv, recurrent in snapshot.layers
+        ) and all(module.conv_state.device == device and module.recurrent_state.device == device
+                  for module in modules)
+        per_snapshot_bytes = len(modules) * (
+            first[0].numel() * first[0].element_size()
+            + first[1].numel() * first[1].element_size()
+        )
+        if not homogeneous or device.type != "cuda" or per_snapshot_bytes > self.max_staging_bytes:
+            # Preserve support for heterogeneous/custom layer layouts and CPU tests.
+            for seq, snapshot in pending:
+                restore_gdn_state(model, seq, snapshot)
+            return
+
+        max_group_size = max(1, self.max_staging_bytes // per_snapshot_bytes)
+        num_layers = len(modules)
+        for start in range(0, len(pending), max_group_size):
+            group = pending[start : start + max_group_size]
+            count = len(group) * num_layers
+            self._wait()
+            if (
+                self._conv_host is None
+                or self._conv_host.shape[0] < count
+                or self._conv_host.shape[1:] != conv_shape
+                or self._conv_host.dtype != conv_dtype
+            ):
+                self._conv_host = torch.empty(
+                    (count, *conv_shape), dtype=conv_dtype, pin_memory=True
+                )
+            if (
+                self._recurrent_host is None
+                or self._recurrent_host.shape[0] < count
+                or self._recurrent_host.shape[1:] != recurrent_shape
+                or self._recurrent_host.dtype != recurrent_dtype
+            ):
+                self._recurrent_host = torch.empty(
+                    (count, *recurrent_shape), dtype=recurrent_dtype, pin_memory=True
+                )
+            conv_host = self._conv_host[:count]
+            recurrent_host = self._recurrent_host[:count]
+            for group_index, (_, snapshot) in enumerate(group):
+                for layer_index, (conv, recurrent) in enumerate(snapshot.layers):
+                    offset = group_index * num_layers + layer_index
+                    conv_host[offset].copy_(conv)
+                    recurrent_host[offset].copy_(recurrent)
+            # Only two host-to-device transfers per bounded group; scatter from
+            # these temporary device tensors on the same stream before forward.
+            conv_gpu = conv_host.to(device, non_blocking=True)
+            recurrent_gpu = recurrent_host.to(device, non_blocking=True)
+            for group_index, (seq, _) in enumerate(group):
+                for layer_index, module in enumerate(modules):
+                    offset = group_index * num_layers + layer_index
+                    module.restore_state_slot(
+                        seq.state_slot, (conv_gpu[offset], recurrent_gpu[offset])
+                    )
+            if self._transfer_done is None:
+                self._transfer_done = torch.cuda.Event()
+            self._transfer_done.record(torch.cuda.current_stream(device))
+            self._pending = True
+
+
 def restore_gdn_state(
     model,
     seq: Sequence,
@@ -191,10 +307,19 @@ def restore_gdn_state(
         )
 
 
-def restore_pending_states(model, seqs: list[Sequence]) -> None:
-    for seq in seqs:
-        snapshot = seq.pending_state_snapshot
-        if snapshot is None:
-            continue
-        restore_gdn_state(model, seq, snapshot)
+def restore_pending_states(
+    model, seqs: list[Sequence], staging: GDNRestoreStaging | None = None
+) -> None:
+    pending = [
+        (seq, seq.pending_state_snapshot)
+        for seq in seqs
+        if seq.pending_state_snapshot is not None
+    ]
+    if staging is None:
+        for seq, snapshot in pending:
+            restore_gdn_state(model, seq, snapshot)
+    else:
+        staging.restore(model, pending)
+    # Clear only after every restore was successfully scheduled.
+    for seq, _ in pending:
         seq.pending_state_snapshot = None
