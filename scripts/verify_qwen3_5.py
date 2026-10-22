@@ -171,9 +171,7 @@ def run(args):
             f"exceeds effective max_model_len ({effective_len})"
         )
     hf_backend = args.hf_experts_backend if is_moe else None
-    hf_tokens, hf_logits = run_hf(
-        args.model, args.prompt, args.max_new_tokens, hf_backend
-    )
+    hf_tokens, hf_logits = run_hf(args.model, args.prompt, args.max_new_tokens, hf_backend)
     nano_tokens, nano_logits = run_nanovllm(
         args.model, args.prompt, args.max_new_tokens, args.max_model_len, kv_cache_kwargs(args)
     )
