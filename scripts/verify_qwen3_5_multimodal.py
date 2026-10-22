@@ -9,6 +9,8 @@ if TYPE_CHECKING:
 from scripts._common import (
     add_hf_experts_backend_argument,
     add_model_argument,
+    add_kv_cache_arguments,
+    kv_cache_kwargs,
     add_result_argument,
     execute,
     normalize_paths,
@@ -81,6 +83,7 @@ def run_nanovllm(
     max_num_batched_tokens: int,
     max_visual_tokens_per_request: int | None,
     use_decode_graph: bool,
+    kv_options: dict,
     dtype: str,
 ) -> list[int]:
     import torch
@@ -94,6 +97,7 @@ def run_nanovllm(
         max_visual_tokens_per_request=max_visual_tokens_per_request,
         max_num_seqs=1,
         decode_graph_batch_sizes=(1,) if use_decode_graph else (),
+        **kv_options,
     )
     try:
         request = build_nano_prompt(processor, image, prompt)
@@ -111,6 +115,7 @@ def run_nanovllm(
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Compare one-image Qwen3.5 greedy generation.")
     add_model_argument(parser, required=True)
+    add_kv_cache_arguments(parser)
     add_hf_experts_backend_argument(parser)
     parser.add_argument("image")
     parser.add_argument("--prompt", default="Describe this image briefly.")
@@ -150,6 +155,7 @@ def run(args):
             args.max_num_batched_tokens,
             args.max_visual_tokens_per_request,
             args.decode_graph,
+            kv_cache_kwargs(args),
         )
     finally:
         image.close()
