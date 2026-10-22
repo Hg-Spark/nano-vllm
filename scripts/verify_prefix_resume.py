@@ -7,6 +7,8 @@ from unittest.mock import patch
 from scripts._common import (
     ValidationFailure,
     add_model_argument,
+    add_kv_cache_arguments,
+    kv_cache_kwargs,
     add_result_argument,
     compare_tokens,
     execute,
@@ -30,7 +32,7 @@ def _build_prefix_probe_prompts(tokenizer, block_size: int) -> tuple[list[int], 
 
 
 def run_prefix_resume_probe(
-    model_path: str, max_new_tokens: int, max_model_len: int, block_size: int
+    model_path: str, max_new_tokens: int, max_model_len: int, block_size: int, kv_options: dict
 ) -> dict:
     import torch
     from transformers import AutoTokenizer
@@ -47,6 +49,7 @@ def run_prefix_resume_probe(
         max_num_batched_tokens=block_size,
         max_num_seqs=1,
         kv_cache_block_size=block_size,
+        **kv_options,
         max_prefix_cache_entries=0,
     )
     try:
@@ -145,6 +148,7 @@ def parse_args(argv=None):
         description="Compare uncached and prefix-restored greedy generation."
     )
     add_model_argument(parser, required=True)
+    add_kv_cache_arguments(parser)
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--prefix-block-size", type=int, choices=(16, 32, 64, 128), default=16)
@@ -159,7 +163,11 @@ def parse_args(argv=None):
 def run(args):
     validate_model_family(args.model)
     return run_prefix_resume_probe(
-        args.model, args.max_new_tokens, args.max_model_len, args.prefix_block_size
+        args.model,
+        args.max_new_tokens,
+        args.max_model_len,
+        args.prefix_block_size,
+        kv_cache_kwargs(args),
     )
 
 
