@@ -391,7 +391,7 @@ def prepare_decode(
             paged_kv_indices=host_pool.to_cuda_cached(
                 "decode_kv_indices", layout.paged_kv_indices, "int32", layout.page_table_key
             ),
-             state_slot_ids=upload("decode_state_slots", layout.state_slots, "int32"),
+            state_slot_ids=upload("decode_state_slots", layout.state_slots, "int32"),
         )
         return PreparedBatch(
             input_ids=upload("decode_input_ids", layout.input_ids, "int64"),
