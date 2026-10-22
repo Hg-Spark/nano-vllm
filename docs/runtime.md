@@ -318,7 +318,7 @@ generate(prompts, sampling_params) 或 add_request(prompt, params)
 
 在 [ModelRunner.run()](../nanovllm/engine/model_runner.py) 中，首先将待恢复 GDN 快照写回活动槽；Decode 会先尝试匹配已捕获的 CUDA Graph bucket，不匹配则走 Eager。Eager Batch 用 [Context](../nanovllm/utils/context.py) 将 Paged KV 元数据和状态槽传递给模型层。
 
-`_plan_attention()` 在每次常规 Batch 调用时对对应 FlashInfer wrapper 执行一次 `plan()`，并由所有 Full Attention 层复用该计划；Eager Decode 和 CUDA Graph 分别调用 FlashInfer 的 Decode `plan()`，参数规格均由 `flashinfer_attention_spec()` 提供；各层仍拥有自身的物理 KV 数据。GDN Prefill 按 `q_offsets` 拆开不同请求的 token 段，读取各自 Slot，依次推进卷积与循环状态。**Packed 输入只拼接计算张量，不合并不同请求的历史。**
+`_plan_attention()` 在每次常规 Batch 调用时对对应 FlashInfer wrapper 执行一次 `plan()`，并由所有 Full Attention 层复用该计划。Eager 模式将 `qo_indptr`（仅 Prefill）、`paged_kv_indptr`、`paged_kv_last_page_len` 保留为 pinned CPU 输入，由 FlashInfer 0.7.0 的 `plan()` 生成 GPU 缓冲，随后供 GDN 与 KV Append 共用，避免提前执行重复 H2D；页索引则沿用单份 GPU Tensor。CUDA Graph 仍使用固定设备缓冲。参数规格由 `flashinfer_attention_spec()` 提供；各层仍拥有自身的物理 KV 数据。GDN Prefill 按 `q_offsets` 拆开不同请求的 token 段，读取各自 Slot，依次推进卷积与循环状态。**Packed 输入只拼接计算张量，不合并不同请求的历史。**
 
 三种实际执行路径的差异限定在准备与执行层：普通 Prefill 采用变长打包和 FlashInfer Paged Prefill；Eager Decode 每请求一个 token，使用 FlashInfer Paged Decode；可选 CUDA Graph Decode 复用固定输入地址和预捕获的模型前向。未配置的 Decode Batch Size 使用 Eager；已配置的 Graph Bucket 如果布局超出容量，同样回退 Eager；Plan 或 Replay 过程中出现异常时才将异常向上传播。三条路径都依赖同一组物理 KV/GDN Pool，**没有启动时无缓存 SDPA/GDN 参考路径**。
 
