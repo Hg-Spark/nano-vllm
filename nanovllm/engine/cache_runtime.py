@@ -167,6 +167,25 @@ def allocate_runtime_caches(
     return kv_cache, num_kv_cache_blocks
 
 
+def _validate_gdn_restore(
+    seq: Sequence, snapshot: GDNStateSnapshot, num_layers: int
+) -> None:
+    if seq.state_slot < 0:
+        raise RuntimeError(f"sequence {seq.seq_id} has no state slot to restore")
+    if snapshot.num_tokens != seq.committed_tokens:
+        raise RuntimeError(
+            f"sequence {seq.seq_id} restore boundary mismatch: "
+            f"snapshot={snapshot.num_tokens}, logical={seq.committed_tokens}"
+        )
+    if len(snapshot.layers) != num_layers:
+        raise RuntimeError("GDN snapshot layer count does not match model")
+
+
+def _copy_gdn_restore_layers(modules, seq: Sequence, snapshot: GDNStateSnapshot) -> None:
+    for module, layer_snapshot in zip(modules, snapshot.layers):
+        module.restore_state_slot(seq.state_slot, layer_snapshot)
+
+
 class GDNRestoreStaging:
     """Bounded pinned staging for batched, two-transfer GDN checkpoint restores.
 
@@ -199,15 +218,7 @@ class GDNRestoreStaging:
             return
         modules = model.state_cache_modules()
         for seq, snapshot in pending:
-            if seq.state_slot < 0:
-                raise RuntimeError(f"sequence {seq.seq_id} has no state slot to restore")
-            if snapshot.num_tokens != seq.committed_tokens:
-                raise RuntimeError(
-                    f"sequence {seq.seq_id} restore boundary mismatch: "
-                    f"snapshot={snapshot.num_tokens}, logical={seq.committed_tokens}"
-                )
-            if len(snapshot.layers) != len(modules):
-                raise RuntimeError("GDN snapshot layer count does not match model")
+            _validate_gdn_restore(seq, snapshot, len(modules))
 
         if not modules:
             return
@@ -233,7 +244,7 @@ class GDNRestoreStaging:
         if not homogeneous or device.type != "cuda" or per_snapshot_bytes > self.max_staging_bytes:
             # Preserve support for heterogeneous/custom layer layouts and CPU tests.
             for seq, snapshot in pending:
-                restore_gdn_state(model, seq, snapshot)
+                _copy_gdn_restore_layers(modules, seq, snapshot)
             return
 
         max_group_size = max(1, self.max_staging_bytes // per_snapshot_bytes)
@@ -288,23 +299,9 @@ def restore_gdn_state(
     seq: Sequence,
     snapshot: GDNStateSnapshot,
 ) -> None:
-    if seq.state_slot < 0:
-        raise RuntimeError(f"sequence {seq.seq_id} has no state slot to restore")
-    if snapshot.num_tokens != seq.committed_tokens:
-        raise RuntimeError(
-            f"sequence {seq.seq_id} restore boundary mismatch: "
-            f"snapshot={snapshot.num_tokens}, "
-            f"logical={seq.committed_tokens}"
-        )
-
     modules = model.state_cache_modules()
-    if len(snapshot.layers) != len(modules):
-        raise RuntimeError("GDN snapshot layer count does not match model")
-    for module, layer_snapshot in zip(modules, snapshot.layers):
-        module.restore_state_slot(
-            seq.state_slot,
-            layer_snapshot,
-        )
+    _validate_gdn_restore(seq, snapshot, len(modules))
+    _copy_gdn_restore_layers(modules, seq, snapshot)
 
 
 def restore_pending_states(
