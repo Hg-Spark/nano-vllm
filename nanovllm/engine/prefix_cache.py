@@ -101,13 +101,13 @@ class PrefixCache:
         # and the KV page boundary. Revisit resident entries (bounded by
         # max_entries) instead of rescanning every old checkpoint each chunk.
         step = lcm(GDN_CHECKPOINT_INTERVAL, self.block_size)
-        cached = sorted(
-            entry.num_tokens
-            for digest, entry in self._entries.items()
-            if 0 < entry.num_tokens <= end
-            and entry.num_tokens % step == 0
-            and hashes[entry.num_tokens // self.block_size - 1] == digest
-        )
+        cached = []
+        for position in self._resident_lengths[:bisect_right(self._resident_lengths, end)]:
+            if position % step:
+                continue
+            digest = hashes[position // self.block_size - 1]
+            if digest in self._entries:
+                cached.append(position)
         first_new = (start // step + 1) * step
         for position in range(first_new, end + 1, step):
             digest = hashes[position // self.block_size - 1]
@@ -187,10 +187,14 @@ class PrefixCache:
         ):
             raise RuntimeError("invalid GDN snapshot checkpoint boundary")
         path = []
-        hashes, num_blocks = _sequence_block_hashes(seq, self.block_size, max(by_position))
-        for index in range(num_blocks):
-            position = (index + 1) * self.block_size
-            digest = hashes[index]
+        stop = max(by_position)
+        hashes, _ = _sequence_block_hashes(seq, self.block_size, stop)
+        # Only resident ancestors and new checkpoints can change the path.
+        # Scanning every KV page repeats work for long prompts.
+        end = bisect_right(self._resident_lengths, stop)
+        positions = sorted(set(self._resident_lengths[:end]) | by_position.keys())
+        for position in positions:
+            digest = hashes[position // self.block_size - 1]
             if digest in self._entries:
                 path.append(digest)
             snapshot = by_position.get(position)
