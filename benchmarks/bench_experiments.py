@@ -17,8 +17,9 @@ from time import perf_counter
 
 from nanovllm.engine.schedule import GDN_CHECKPOINT_INTERVAL
 from scripts._common import (
-    add_dtype_argument,
     add_model_argument,
+    add_kv_cache_arguments,
+    kv_cache_kwargs,
     cuda_memory_stats,
     execute,
     execute_fixed_decode_step,
@@ -41,7 +42,7 @@ def parse_graph_sizes(raw: str) -> tuple[int, ...]:
 def arguments():
     p = argparse.ArgumentParser(description=__doc__)
     add_model_argument(p)
-    add_dtype_argument(p)
+    add_kv_cache_arguments(p)
     p.add_argument(
         "--scenario",
         choices=("throughput", "prefix", "interference", "decode"),
@@ -71,7 +72,6 @@ def arguments():
     )
     p.add_argument("--max-model-len", type=int, default=4096)
     p.add_argument("--gpu-memory-utilization", type=float, default=0.8)
-    p.add_argument("--kv-cache-dtype", choices=("auto", "fp8_e4m3"), default="auto")
     p.add_argument(
         "--graph-sizes", default="", help="comma separated Graph buckets, e.g. 1,2,4; empty=Eager"
     )
@@ -290,14 +290,13 @@ def run(a):
 
     engine = LLM(
         a.model,
-        dtype=a.dtype,
         max_num_batched_tokens=a.budget,
         max_num_seqs=a.max_num_seqs,
         max_model_len=a.max_model_len,
         gpu_memory_utilization=a.gpu_memory_utilization,
         activation_reserve_bytes=a.activation_reserve_mib * 1024**2,
         max_mixed_prefill_tokens=(None if a.mixed_prefill_limit == -1 else a.mixed_prefill_limit),
-        kv_cache_dtype=a.kv_cache_dtype,
+        **kv_cache_kwargs(a),
         max_prefix_cache_entries=a.cache_entries,
         decode_graph_batch_sizes=a.graph_sizes,
     )
