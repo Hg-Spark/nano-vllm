@@ -31,7 +31,7 @@ class PreparedBatch:
 @dataclass(frozen=True, slots=True)
 class PrefillBatchLayout:
     input_ids: tuple[int, ...]
-    rope_positions: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]
+    rope_positions: tuple[tuple[int, ...], ...]
     q_offsets: tuple[int, ...]
     image_copy_spans: tuple[ImageCopySpan, ...]
     kv_batch_indices: tuple[int, ...]
@@ -229,7 +229,10 @@ def build_prefill_batch_layout(
         raise ValueError("prefill batch must be non-empty with positive block_size")
 
     input_ids: list[int] = []
-    rope_positions: list[list[int]] = [[], [], []]
+    # Only multimodal batches need distinct spatial/temporal RoPE axes.
+    rope_positions: list[list[int]] = (
+        [[], [], []] if any(chunk.seq.image_state is not None for chunk in chunks) else [[]]
+    )
     q_offsets = [0]
     image_copy_spans: list[ImageCopySpan] = []
     kv_lens: list[int] = []
@@ -357,13 +360,7 @@ def prepare_prefill(
         )
         return PreparedBatch(
             input_ids=upload("prefill_input_ids", layout.input_ids, "int64"),
-            positions=upload(
-                "prefill_positions",
-                layout.rope_positions[:1]
-                if all(chunk.seq.image_state is None for chunk in chunks)
-                else layout.rope_positions,
-                "int64",
-            ),
+            positions=upload("prefill_positions", layout.rope_positions, "int64"),
             context=context,
             layout=layout,
         )
