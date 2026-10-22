@@ -1,13 +1,23 @@
 import unittest
 from hashlib import sha256
+from struct import pack
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from nanovllm.engine.block_manager import BlockManager
-from nanovllm.engine.prefix_cache import _block_hashes
 from nanovllm.engine.schedule import GDN_CHECKPOINT_INTERVAL
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
+
+
+def _block_hashes(tokens: list[int] | tuple[int, ...], block_size: int, stop: int):
+    """Independent chained SHA-256 oracle; production uses incremental Sequence hashes."""
+    parent = bytes(32)
+    for start in range(0, min(stop, len(tokens)) - block_size + 1, block_size):
+        parent = sha256(
+            parent + pack(f"<{block_size}I", *tokens[start : start + block_size])
+        ).digest()
+        yield start + block_size, parent
 
 
 def publish_snapshot(
