@@ -13,7 +13,7 @@
 | 输入 | 文本与单图（Processor / 视觉塔），不支持多图/视频 |
 | 可选 | FP8 E4M3 KV、固定 Decode CUDA Graph bucket；Prefill Eager |
 
-GDN 循环矩阵及快照保持 FP32 `[V,K]` 布局；Prefill/Decode 统一使用 FlashInfer 0.7.0，要求 SM90/100/120 且 K/V head_dim=128。无 PyTorch GDN 计算回退，SM75（例如 RTX 2080 Ti）不支持推理。输入投影和 Dense MLP 的 Gate/Up 权重在 checkpoint 加载后打包。MoE Prefill / Decode 统一使用 FlashInfer CUTLASS。模型 dtype 必须显式为 `bfloat16`。
+GDN 循环矩阵及快照保持 FP32 `[V,K]` 布局；Prefill/Decode 统一使用 FlashInfer 0.7.0，要求 SM90/100/120 且 K/V head_dim=128。无 PyTorch GDN 计算回退，SM75（例如 RTX 2080 Ti）不支持推理。输入投影和 Dense MLP 的 Gate/Up 权重在 checkpoint 加载后打包。MoE Prefill / Decode 统一使用 FlashInfer CUTLASS。模型计算 dtype 在引擎内部固定为 `bfloat16`，无需用户传参。
 
 KV 写入统一调用 FlashInfer `append_paged_kv_cache`；FP8 路径先用 PyTorch 进行 FP32 缩放、裁剪及转换，再追加到分页缓存。项目不再直接导入 Triton 或维护 Triton kernel；依赖包可能仍间接安装或使用 Triton。
 
@@ -27,9 +27,8 @@ cd nano-vllm
 python -m pip install -e ".[dev]"
 flashinfer download-kernels
 export NANOVLLM_MODEL=/absolute/path/to/Qwen3.5
-export NANOVLLM_DTYPE=bfloat16
 python example.py
-python -m scripts.chat "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE"
+python -m scripts.chat "$NANOVLLM_MODEL"
 ```
 
 依赖以 [pyproject.toml](pyproject.toml) 为准；FlashInfer 固定 0.7.0。完整说明见 [安装与运行](docs/getting-started.md)。
