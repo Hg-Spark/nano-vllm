@@ -157,7 +157,7 @@ class MeasurementTest(unittest.TestCase):
             patch("torch.cuda.empty_cache"),
             self.assertRaisesRegex(ValidationFailure, "expected 16 greedy tokens"),
         ):
-            run_prefix_resume_probe("stub-model", 16, 1024, 16, "float16")
+            run_prefix_resume_probe("stub-model", 16, 1024, 16, {})
 
     def test_logits_comparison_detects_numeric_divergence(self):
         try:
