@@ -20,8 +20,8 @@ class RotaryEmbeddingTest(unittest.TestCase):
             base=10000,
         ).cuda()
 
-        q = torch.randn(3, 2, head_dim, device="cuda", dtype=torch.float16)
-        k = torch.randn(3, 2, head_dim, device="cuda", dtype=torch.float16)
+        q = torch.randn(3, 2, head_dim, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(3, 2, head_dim, device="cuda", dtype=torch.bfloat16)
         positions = torch.tensor([[1, 2, 3]] * 3, device="cuda")
 
         q_out, k_out = rope.apply_cached(q, k, rope.head_size, rope.prepare(positions))
@@ -43,8 +43,8 @@ class RotaryEmbeddingTest(unittest.TestCase):
     def test_flashinfer_mrope_matches_reference(self):
         rope = RotaryEmbedding(64, 64, 10000, mrope_section=(11, 11, 10)).cuda()
         torch.manual_seed(5)
-        q = torch.randn(3, 2, 64, device="cuda", dtype=torch.float16)
-        k = torch.randn(3, 1, 64, device="cuda", dtype=torch.float16)
+        q = torch.randn(3, 2, 64, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(3, 1, 64, device="cuda", dtype=torch.bfloat16)
         positions = torch.tensor([[1, 2, 3], [4, 6, 8], [7, 9, 11]], device="cuda")
         frequencies = positions[:, :, None].float() * rope.inv_freq[None, None, :]
         selected = frequencies[0].clone()
