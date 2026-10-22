@@ -6,7 +6,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 PYTHON="${PYTHON:-python3}"
 : "${NANOVLLM_MODEL:?export NANOVLLM_MODEL=/path/to/model}"
-: "${NANOVLLM_DTYPE:?export NANOVLLM_DTYPE=bfloat16}"
 MODE="${1:-smoke}"
 if (( $# > 1 )); then
   echo "Usage: bash benchmarks/run.sh [smoke|full|tail|long]" >&2
@@ -20,7 +19,16 @@ REPEATS="${REPEATS:-5}"
 RESULT_DIR="${RESULT_DIR:-results/${MODE}_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$RESULT_DIR"
 
-COMMON=("$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" --seed 0)
+# Shared model KV storage settings; BF16 model compute precision is fixed.
+KV_CACHE_DTYPE="${NANOVLLM_KV_CACHE_DTYPE:-auto}"
+KV_CACHE_K_SCALE="${NANOVLLM_KV_CACHE_K_SCALE:-1.0}"
+KV_CACHE_V_SCALE="${NANOVLLM_KV_CACHE_V_SCALE:-1.0}"
+COMMON=(
+  "$NANOVLLM_MODEL" --seed 0
+  --kv-cache-dtype "$KV_CACHE_DTYPE"
+  --kv-cache-k-scale "$KV_CACHE_K_SCALE"
+  --kv-cache-v-scale "$KV_CACHE_V_SCALE"
+)
 SHORT_REQUESTS=3
 SHORT_OUTPUT=128
 SHORT_MAX_SEQS=4
