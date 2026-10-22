@@ -74,9 +74,7 @@ class FlashInferPagedAttentionIntegrationTest(unittest.TestCase):
         try:
             prefill = prepare_prefill((ScheduledChunk(seq, 0, 4),), 16, runner.metadata_pool)
             prefill_ctx = runner._plan_attention(prefill)
-            self.assertIs(
-                prefill_ctx.paged_kv_indptr, runner.prefill_wrapper._paged_kv_indptr_buf
-            )
+            self.assertIs(prefill_ctx.paged_kv_indptr, runner.prefill_wrapper._paged_kv_indptr_buf)
             self.assertIs(
                 prefill_ctx.paged_kv_last_page_len,
                 runner.prefill_wrapper._paged_kv_last_page_len_buf,
@@ -94,9 +92,7 @@ class FlashInferPagedAttentionIntegrationTest(unittest.TestCase):
                 DecodePageTableCache(),
             )
             decode_ctx = runner._plan_attention(decode)
-            self.assertIs(
-                decode_ctx.paged_kv_indptr, runner.decode_wrapper._paged_kv_indptr_buf
-            )
+            self.assertIs(decode_ctx.paged_kv_indptr, runner.decode_wrapper._paged_kv_indptr_buf)
             self.assertIs(
                 decode_ctx.paged_kv_last_page_len,
                 runner.decode_wrapper._paged_kv_last_page_len_buf,
