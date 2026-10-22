@@ -14,6 +14,7 @@ from nanovllm.engine.batch_common import (
     prepare_prefill,
 )
 from nanovllm.engine.cache_runtime import (
+    GDNRestoreStaging,
     allocate_runtime_caches,
     restore_pending_states,
 )
@@ -44,6 +45,7 @@ class ModelRunner:
         self.attention_workspace = None
         self.metadata_pool = PinnedMetadataPool()
         self.decode_page_table_cache = DecodePageTableCache()
+        self.gdn_restore_staging = GDNRestoreStaging()
         self.prefill_wrapper = None
         self.decode_wrapper = None
         self.decode_graph_buckets: dict[int, DecodeGraphBucket] = {}
@@ -129,6 +131,8 @@ class ModelRunner:
         self.metadata_pool = None
         if hasattr(self, "decode_page_table_cache"):
             self.decode_page_table_cache.clear()
+        if hasattr(self, "gdn_restore_staging"):
+            self.gdn_restore_staging.clear()
         self.kv_cache = None
         self.prefill_wrapper = None
         self.decode_wrapper = None
@@ -252,7 +256,7 @@ class ModelRunner:
         seqs = [chunk.seq for chunk in chunks]
         if not is_prefill and any(seq.pending_state_snapshot is not None for seq in seqs):
             raise RuntimeError("pending GDN prefix restore is valid only for prefill")
-        restore_pending_states(self.model, seqs)
+        restore_pending_states(self.model, seqs, self.gdn_restore_staging)
 
         if not is_prefill:
             graph_result = self._run_decode_graph(chunks, seqs)
