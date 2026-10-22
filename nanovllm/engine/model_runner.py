@@ -127,7 +127,8 @@ class ModelRunner:
         self.decode_graph_buckets.clear()
         self.metadata_pool.clear()
         self.metadata_pool = None
-        self.decode_page_table_cache.clear()
+        if hasattr(self, "decode_page_table_cache"):
+            self.decode_page_table_cache.clear()
         self.kv_cache = None
         self.prefill_wrapper = None
         self.decode_wrapper = None
@@ -232,7 +233,9 @@ class ModelRunner:
         if bucket is None:
             self.decode_graph_fallbacks["missing_bucket"] += 1
             return None
-        layout = build_decode_batch_layout(chunks, self.block_size, self.decode_page_table_cache)
+        layout = build_decode_batch_layout(
+            chunks, self.block_size, getattr(self, "decode_page_table_cache", None)
+        )
         if not bucket.can_run(layout):
             self.decode_graph_fallbacks["layout_exceeded"] += 1
             return None
