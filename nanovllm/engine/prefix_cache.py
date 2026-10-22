@@ -102,7 +102,7 @@ class PrefixCache:
         # max_entries) instead of rescanning every old checkpoint each chunk.
         step = lcm(GDN_CHECKPOINT_INTERVAL, self.block_size)
         cached = []
-        for position in self._resident_lengths[:bisect_right(self._resident_lengths, end)]:
+        for position in self._resident_lengths[: bisect_right(self._resident_lengths, end)]:
             if position % step:
                 continue
             digest = hashes[position // self.block_size - 1]
