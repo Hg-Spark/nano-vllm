@@ -84,7 +84,6 @@ def run_nanovllm(
     max_visual_tokens_per_request: int | None,
     use_decode_graph: bool,
     kv_options: dict,
-    dtype: str,
 ) -> list[int]:
     import torch
 
