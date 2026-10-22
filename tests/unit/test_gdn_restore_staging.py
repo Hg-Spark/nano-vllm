@@ -59,7 +59,8 @@ class GDNRestoreStagingTest(unittest.TestCase):
                 layer.conv_state[1], torch.full((4, 3), 5 + i, dtype=torch.bfloat16)
             )
             torch.testing.assert_close(
-                layer.recurrent_state[1], torch.full((2, 4, 4), 5 + i)
+                layer.recurrent_state[1],
+                torch.full((2, 4, 4), 5 + i, dtype=torch.float32),
             )
 
     @unittest.skipUnless(torch is not None and torch.cuda.is_available(), "requires CUDA")
