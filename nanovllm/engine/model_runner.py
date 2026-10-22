@@ -6,6 +6,7 @@ from torch.profiler import record_function
 
 from nanovllm.config import Config
 from nanovllm.engine.batch_common import (
+    DecodePageTableCache,
     PinnedMetadataPool,
     PreparedBatch,
     build_decode_batch_layout,
@@ -42,6 +43,7 @@ class ModelRunner:
         self.kv_cache = None
         self.attention_workspace = None
         self.metadata_pool = PinnedMetadataPool()
+        self.decode_page_table_cache = DecodePageTableCache()
         self.prefill_wrapper = None
         self.decode_wrapper = None
         self.decode_graph_buckets: dict[int, DecodeGraphBucket] = {}
@@ -125,6 +127,7 @@ class ModelRunner:
         self.decode_graph_buckets.clear()
         self.metadata_pool.clear()
         self.metadata_pool = None
+        self.decode_page_table_cache.clear()
         self.kv_cache = None
         self.prefill_wrapper = None
         self.decode_wrapper = None
@@ -229,7 +232,7 @@ class ModelRunner:
         if bucket is None:
             self.decode_graph_fallbacks["missing_bucket"] += 1
             return None
-        layout = build_decode_batch_layout(chunks, self.block_size)
+        layout = build_decode_batch_layout(chunks, self.block_size, self.decode_page_table_cache)
         if not bucket.can_run(layout):
             self.decode_graph_fallbacks["layout_exceeded"] += 1
             return None
@@ -256,7 +259,9 @@ class ModelRunner:
         batch = (
             prepare_prefill(chunks, self.block_size, self.metadata_pool)
             if is_prefill
-            else prepare_decode(chunks, self.block_size, self.metadata_pool)
+            else prepare_decode(
+                chunks, self.block_size, self.metadata_pool, self.decode_page_table_cache
+            )
         )
         context = self._plan_attention(batch)
         profile_range = "nanovllm::prefill_model" if is_prefill else "nanovllm::decode_model"
