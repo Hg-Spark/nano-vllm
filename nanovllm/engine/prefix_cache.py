@@ -10,28 +10,6 @@ from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
 
 
-def _block_hashes(
-    tokens: list[int] | tuple[int, ...],
-    block_size: int,
-    stop: int | None = None,
-    *,
-    cached_hashes: list[bytes] | None = None,
-):
-    """Yield chained SHA-256 hashes, computing only new complete blocks when cached."""
-    parent = bytes(32)
-    limit = min(stop, len(tokens)) if stop is not None else len(tokens)
-    for index, start in enumerate(range(0, limit - block_size + 1, block_size)):
-        if cached_hashes is not None and index < len(cached_hashes):
-            parent = cached_hashes[index]
-        else:
-            parent = sha256(
-                parent + pack(f"<{block_size}I", *tokens[start : start + block_size])
-            ).digest()
-            if cached_hashes is not None:
-                cached_hashes.append(parent)
-        yield start + block_size, parent
-
-
 def _sequence_block_hashes(seq: Sequence, block_size: int, stop: int) -> tuple[list[bytes], int]:
     """Compute missing block hashes once and reuse indexed results on subsequent lookups."""
     num_blocks = min(stop, len(seq.token_ids)) // block_size
