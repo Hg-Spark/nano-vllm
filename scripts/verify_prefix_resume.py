@@ -61,7 +61,7 @@ def run_prefix_resume_probe(
 
     cached = LLM(
         model_path,
-        dtype=dtype,
+        **kv_options,
         max_model_len=max_model_len,
         max_num_batched_tokens=block_size,
         max_num_seqs=1,
