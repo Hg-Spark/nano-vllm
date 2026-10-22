@@ -5,6 +5,8 @@ from scripts._common import (
     ValidationFailure,
     add_hf_experts_backend_argument,
     add_model_argument,
+    add_kv_cache_arguments,
+    kv_cache_kwargs,
     add_result_argument,
     execute,
     normalize_paths,
@@ -88,11 +90,11 @@ def run_hf(
 
 
 def run_nanovllm(
-    model_path: str, prompt: str, max_new_tokens: int, max_model_len: int
+    model_path: str, prompt: str, max_new_tokens: int, max_model_len: int, kv_options: dict
 ) -> tuple[list[int], list]:
     from nanovllm import LLM
 
-    llm = LLM(model_path, max_model_len=max_model_len, max_num_seqs=1)
+    llm = LLM(model_path, max_model_len=max_model_len, max_num_seqs=1, **kv_options)
     try:
         with _capture_last_logits(llm.model_runner.model) as logits:
             tokens = run_nano_greedy(llm, prompt, max_new_tokens)
@@ -104,6 +106,7 @@ def run_nanovllm(
 def parse_args(argv=None):
     parser = argparse.ArgumentParser()
     add_model_argument(parser, required=True)
+    add_kv_cache_arguments(parser)
     add_hf_experts_backend_argument(parser)
     parser.add_argument(
         "--prompt", default="Explain why KV cache is useful in autoregressive inference."
@@ -172,7 +175,7 @@ def run(args):
         args.model, args.prompt, args.max_new_tokens, hf_backend
     )
     nano_tokens, nano_logits = run_nanovllm(
-        args.model, args.prompt, args.max_new_tokens, args.max_model_len
+        args.model, args.prompt, args.max_new_tokens, args.max_model_len, kv_cache_kwargs(args)
     )
     print(f"HF tokens:   {hf_tokens}\nNano tokens: {nano_tokens}")
     result = require_greedy_parity(hf_tokens, nano_tokens, args.max_new_tokens, hf_backend)
