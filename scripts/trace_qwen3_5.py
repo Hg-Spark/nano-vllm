@@ -346,7 +346,6 @@ def run(args):
         args.model,
         prompt_ids,
         hf_tokens,
-        args.dtype,
         args.max_model_len,
         args.trace_gdn_states,
         kv_cache_kwargs(args),
