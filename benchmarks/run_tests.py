@@ -53,19 +53,33 @@ def run_logged(name, command, output, env):
 
 
 def execute(config, output):
+    kv = config.get("kv_cache", {})
+    kv_dtype = kv.get("dtype", "auto")
+    kv_k_scale = kv.get("k_scale", 1.0)
+    kv_v_scale = kv.get("v_scale", 1.0)
+    kv_args = [
+        "--kv-cache-dtype",
+        str(kv_dtype),
+        "--kv-cache-k-scale",
+        str(kv_k_scale),
+        "--kv-cache-v-scale",
+        str(kv_v_scale),
+    ]
     env = {
         **os.environ,
         "CUDA_VISIBLE_DEVICES": config["gpu"],
         "NANOVLLM_MODEL": config["model"],
-        "NANOVLLM_DTYPE": config["dtype"],
-        "REPEATS": str(config["repeats"]),
+        "REPEATS": str(config["benchmark"].get("repeats", config.get("repeats", 5))),
+        "NANOVLLM_KV_CACHE_DTYPE": str(kv_dtype),
+        "NANOVLLM_KV_CACHE_K_SCALE": str(kv_k_scale),
+        "NANOVLLM_KV_CACHE_V_SCALE": str(kv_v_scale),
         "PYTHON": sys.executable,
         "PYTHONUNBUFFERED": "1",
         "MAX_JOBS": str(config["correctness"]["max_jobs"]),
         "FLASHINFER_NVCC_THREADS": str(config["correctness"]["nvcc_threads"]),
     }
     env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
-    model = [config["model"], "--dtype", config["dtype"]]
+    model = [config["model"]]
     current = "nvidia-smi"
 
     def run(name, args):
@@ -89,6 +103,7 @@ def execute(config, output):
                 check = config["correctness"]
                 common = [
                     *model,
+                    *kv_args,
                     "--max-new-tokens",
                     str(check["max_new_tokens"]),
                     "--max-model-len",
@@ -133,7 +148,7 @@ def execute(config, output):
                 mode = config["benchmark"]["mode"] if stage == "bench" else stage
                 run(stage, ["bash", "benchmarks/run.sh", mode])
             elif stage == "capacity":
-                args = [*model, "--out-dir", str(output / "capacity")]
+                args = [*model, *kv_args, "--out-dir", str(output / "capacity")]
                 for key, value in config["capacity"].items():
                     args.extend(["--" + key.replace("_", "-"), str(value)])
                 python("capacity", "benchmarks.capacity_search", args)
