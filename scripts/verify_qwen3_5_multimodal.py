@@ -57,9 +57,7 @@ def run_hf(
             output_ids = model.generate(**inputs, do_sample=False, max_new_tokens=max_new_tokens)
         return output_ids[0, input_len:].tolist()
 
-    return run_hf_reference(
-        AutoModelForImageTextToText, model_path, hf_experts_backend, generate
-    )
+    return run_hf_reference(AutoModelForImageTextToText, model_path, hf_experts_backend, generate)
 
 
 def build_nano_prompt(processor, image, prompt: str) -> ImagePrompt:
