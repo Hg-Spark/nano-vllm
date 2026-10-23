@@ -18,9 +18,7 @@ class GDNRestoreStagingTest(unittest.TestCase):
     class Layer:
         def __init__(self, device):
             self.conv_state = torch.zeros(2, 4, 3, device=device, dtype=torch.bfloat16)
-            self.recurrent_state = torch.zeros(
-                2, 2, 4, 4, device=device, dtype=torch.float32
-            )
+            self.recurrent_state = torch.zeros(2, 2, 4, 4, device=device, dtype=torch.float32)
 
         def slot(self, slot_id):
             return self.conv_state[slot_id], self.recurrent_state[slot_id]
@@ -59,7 +57,8 @@ class GDNRestoreStagingTest(unittest.TestCase):
                 layer.conv_state[1], torch.full((4, 3), 5 + i, dtype=torch.bfloat16)
             )
             torch.testing.assert_close(
-                layer.recurrent_state[1], torch.full((2, 4, 4), 5 + i)
+                layer.recurrent_state[1],
+                torch.full((2, 4, 4), 5 + i, dtype=torch.float32),
             )
 
     @unittest.skipUnless(torch is not None and torch.cuda.is_available(), "requires CUDA")

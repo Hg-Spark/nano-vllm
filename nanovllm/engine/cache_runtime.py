@@ -167,9 +167,7 @@ def allocate_runtime_caches(
     return kv_cache, num_kv_cache_blocks
 
 
-def _validate_gdn_restore(
-    seq: Sequence, snapshot: GDNStateSnapshot, num_layers: int
-) -> None:
+def _validate_gdn_restore(seq: Sequence, snapshot: GDNStateSnapshot, num_layers: int) -> None:
     if seq.state_slot < 0:
         raise RuntimeError(f"sequence {seq.seq_id} has no state slot to restore")
     if snapshot.num_tokens != seq.committed_tokens:
@@ -235,11 +233,12 @@ class GDNRestoreStaging:
             and recurrent.device.type == "cpu"
             for _, snapshot in pending
             for conv, recurrent in snapshot.layers
-        ) and all(module.conv_state.device == device and module.recurrent_state.device == device
-                  for module in modules)
+        ) and all(
+            module.conv_state.device == device and module.recurrent_state.device == device
+            for module in modules
+        )
         per_snapshot_bytes = len(modules) * (
-            first[0].numel() * first[0].element_size()
-            + first[1].numel() * first[1].element_size()
+            first[0].numel() * first[0].element_size() + first[1].numel() * first[1].element_size()
         )
         if not homogeneous or device.type != "cuda" or per_snapshot_bytes > self.max_staging_bytes:
             # Preserve support for heterogeneous/custom layer layouts and CPU tests.
@@ -294,29 +293,11 @@ class GDNRestoreStaging:
             self._pending = True
 
 
-def restore_gdn_state(
-    model,
-    seq: Sequence,
-    snapshot: GDNStateSnapshot,
-) -> None:
-    modules = model.state_cache_modules()
-    _validate_gdn_restore(seq, snapshot, len(modules))
-    _copy_gdn_restore_layers(modules, seq, snapshot)
-
-
-def restore_pending_states(
-    model, seqs: list[Sequence], staging: GDNRestoreStaging | None = None
-) -> None:
+def restore_pending_states(model, seqs: list[Sequence], staging: GDNRestoreStaging) -> None:
     pending = [
-        (seq, seq.pending_state_snapshot)
-        for seq in seqs
-        if seq.pending_state_snapshot is not None
+        (seq, seq.pending_state_snapshot) for seq in seqs if seq.pending_state_snapshot is not None
     ]
-    if staging is None:
-        for seq, snapshot in pending:
-            restore_gdn_state(model, seq, snapshot)
-    else:
-        staging.restore(model, pending)
+    staging.restore(model, pending)
     # Clear only after every restore was successfully scheduled.
     for seq, _ in pending:
         seq.pending_state_snapshot = None

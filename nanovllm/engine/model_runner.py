@@ -1,5 +1,4 @@
 import logging
-from dataclasses import replace
 
 import torch
 from torch.profiler import record_function
@@ -8,7 +7,6 @@ from nanovllm.config import Config
 from nanovllm.engine.batch_common import (
     DecodePageTableCache,
     PinnedMetadataPool,
-    PreparedBatch,
     build_decode_batch_layout,
     prepare_decode,
     prepare_prefill,
@@ -22,11 +20,11 @@ from nanovllm.engine.decode_graph import FLASHINFER_GRAPH_WORKSPACE_BYTES, Decod
 from nanovllm.engine.schedule import BatchResult, ScheduledChunk
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
-from nanovllm.layers.attention import flashinfer_attention_spec
+from nanovllm.layers.attention import flashinfer_attention_spec, plan_flashinfer_attention
 from nanovllm.layers.sampler import Sampler
 from nanovllm.models.qwen3_5 import Qwen3_5ForCausalLM
 from nanovllm.models.qwen3_5_moe import initialize_moe_runtime
-from nanovllm.utils.context import Context, use_context
+from nanovllm.utils.context import use_context
 from nanovllm.utils.loader import load_model
 
 logger = logging.getLogger(__name__)
@@ -150,53 +148,6 @@ class ModelRunner:
             torch.cuda.synchronize()
         self._release_cuda_resources()
 
-    def _plan_attention(self, batch: PreparedBatch) -> Context:
-        context = batch.context
-        layout = batch.layout
-        suffix = "prefill" if context.is_prefill else "decode"
-        kv_indptr = self.metadata_pool.host_view(f"{suffix}_kv_indptr", len(layout.paged_kv_indptr))
-        last_page_len = self.metadata_pool.host_view(
-            f"{suffix}_page_len", len(layout.paged_kv_last_page_len)
-        )
-        num_qo_heads, num_kv_heads, head_dim, common = self.attention_spec
-        if context.is_prefill:
-            self.prefill_wrapper.plan(
-                self.metadata_pool.host_view("prefill_q_offsets", len(layout.q_offsets)),
-                kv_indptr,
-                context.paged_kv_indices,
-                last_page_len,
-                num_qo_heads,
-                num_kv_heads,
-                head_dim,
-                self.block_size,
-                causal=True,
-                **common,
-            )
-            wrapper = self.prefill_wrapper
-        else:
-            self.decode_wrapper.plan(
-                kv_indptr,
-                context.paged_kv_indices,
-                last_page_len,
-                num_qo_heads,
-                num_kv_heads,
-                head_dim,
-                self.block_size,
-                **common,
-            )
-            wrapper = self.decode_wrapper
-        self.metadata_pool.record_plan_transfer()
-        # Eager FlashInfer 0.7.0 owns the device copies of this metadata.
-        # Share those buffers with KV append and GDN instead of uploading a
-        # duplicate Context copy before plan(). Graph buckets are separate.
-        return replace(
-            context,
-            attention_wrapper=wrapper,
-            qo_indptr=wrapper._qo_indptr_buf if context.is_prefill else None,
-            paged_kv_indptr=wrapper._paged_kv_indptr_buf,
-            paged_kv_last_page_len=wrapper._paged_kv_last_page_len_buf,
-        )
-
     def _ensure_visual_features(self, seq: Sequence) -> torch.Tensor:
         state = seq.image_state
         if state is None:
@@ -279,7 +230,14 @@ class ModelRunner:
                 chunks, self.block_size, self.metadata_pool, self.decode_page_table_cache
             )
         )
-        context = self._plan_attention(batch)
+        context = plan_flashinfer_attention(
+            batch,
+            self.metadata_pool,
+            self.prefill_wrapper,
+            self.decode_wrapper,
+            self.attention_spec,
+            self.block_size,
+        )
         profile_range = "nanovllm::prefill_model" if is_prefill else "nanovllm::decode_model"
 
         with use_context(context):

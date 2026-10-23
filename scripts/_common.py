@@ -22,6 +22,21 @@ def add_model_argument(parser: argparse.ArgumentParser, *, required: bool = Fals
         )
 
 
+def add_kv_cache_arguments(parser: argparse.ArgumentParser) -> None:
+    """Optional KV storage precision; model compute precision remains BF16."""
+    parser.add_argument("--kv-cache-dtype", choices=("auto", "fp8_e4m3"), default="auto")
+    parser.add_argument("--kv-cache-k-scale", type=float, default=1.0)
+    parser.add_argument("--kv-cache-v-scale", type=float, default=1.0)
+
+
+def kv_cache_kwargs(args) -> dict[str, str | float]:
+    return {
+        "kv_cache_dtype": args.kv_cache_dtype,
+        "kv_cache_k_scale": args.kv_cache_k_scale,
+        "kv_cache_v_scale": args.kv_cache_v_scale,
+    }
+
+
 def add_hf_experts_backend_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--hf-experts-backend",
@@ -231,8 +246,10 @@ def prepare_fixed_decode_batch(engine, prompt, sampling, batch_size):
     if sampling.max_tokens < 2:
         raise ValueError("fixed decode requires at least two generated tokens")
 
-    required = scheduler.block_manager.required_blocks(len(prompt) + sampling.max_tokens - 1)
-    if batch_size * required > scheduler.block_manager.num_blocks:
+    required = scheduler.cache_manager.block_manager.required_blocks(
+        len(prompt) + sampling.max_tokens - 1
+    )
+    if batch_size * required > scheduler.cache_manager.block_manager.num_blocks:
         raise ValueError("fixed decode batch exceeds KV capacity")
     for _ in range(batch_size):
         engine.add_request(prompt, sampling)

@@ -13,6 +13,7 @@ if torch is not None:
     from nanovllm.engine.decode_graph import DecodeGraphBucket
     from nanovllm.engine.model_runner import ModelRunner
     from nanovllm.engine.sequence import Sequence
+    from nanovllm.layers.attention import plan_flashinfer_attention
     from nanovllm.sampling_params import SamplingParams
     from nanovllm.utils.context import Context
 
@@ -61,14 +62,17 @@ class ModelRunnerTest(unittest.TestCase):
                 # Simulate buffers populated by FlashInfer 0.7.0 plan().
                 wrapper._qo_indptr_buf = torch.tensor(q_offsets, dtype=torch.int32)
                 wrapper._paged_kv_indptr_buf = torch.tensor(indptr, dtype=torch.int32)
-                wrapper._paged_kv_last_page_len_buf = torch.tensor(
-                    last_page_len, dtype=torch.int32
+                wrapper._paged_kv_last_page_len_buf = torch.tensor(last_page_len, dtype=torch.int32)
+                result = plan_flashinfer_attention(
+                    SimpleNamespace(context=context, layout=layout),
+                    runner.metadata_pool,
+                    runner.prefill_wrapper,
+                    runner.decode_wrapper,
+                    runner.attention_spec,
+                    runner.block_size,
                 )
-                result = runner._plan_attention(SimpleNamespace(context=context, layout=layout))
                 self.assertIs(result.paged_kv_indptr, wrapper._paged_kv_indptr_buf)
-                self.assertIs(
-                    result.paged_kv_last_page_len, wrapper._paged_kv_last_page_len_buf
-                )
+                self.assertIs(result.paged_kv_last_page_len, wrapper._paged_kv_last_page_len_buf)
                 if prefill:
                     self.assertIs(result.qo_indptr, wrapper._qo_indptr_buf)
                 else:
@@ -184,10 +188,7 @@ class ModelRunnerTest(unittest.TestCase):
         )
         bucket.load(layout)
         bucket.load(layout)
-        uploads = [
-            call.args[0]
-            for call in bucket._copy_layout.call_args_list
-        ]
+        uploads = [call.args[0] for call in bucket._copy_layout.call_args_list]
         self.assertEqual(uploads.count("paged_kv_indices"), 1)
         changed = SimpleNamespace(**vars(layout))
         changed.page_table_key = (16, ((42, 2, 1, 1),))

@@ -4,11 +4,13 @@ import argparse
 import json
 
 from scripts._common import (
+    add_kv_cache_arguments,
     add_model_argument,
     add_result_argument,
     cuda_memory_stats,
     execute,
     execute_fixed_decode_step,
+    kv_cache_kwargs,
     kv_cache_stats,
     normalize_paths,
     prepare_fixed_decode_batch,
@@ -43,11 +45,7 @@ def parse_args(argv=None):
         type=int,
         default=2048,
     )
-    parser.add_argument(
-        "--kv-cache-dtype",
-        choices=("auto", "fp8_e4m3"),
-        default="auto",
-    )
+    add_kv_cache_arguments(parser)
     parser.add_argument("--token-id", type=int, default=1)
     parser.add_argument("--trace", default=None)
     add_result_argument(parser)
@@ -81,7 +79,7 @@ def run(args):
         max_num_seqs=args.batch_size,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_model_len=args.context_len + max_tokens + 1,
-        kv_cache_dtype=args.kv_cache_dtype,
+        **kv_cache_kwargs(args),
         max_prefix_cache_entries=0,
     )
     try:

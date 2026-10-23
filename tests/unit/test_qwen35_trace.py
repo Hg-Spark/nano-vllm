@@ -1,9 +1,11 @@
 """CPU-only checks for the Qwen3.5 teacher-forced parity reporter."""
 
+from types import SimpleNamespace
+
 import torch
 from torch import nn
 
-from scripts.trace_qwen3_5 import _LayerCapture, _metric, compare_traces
+from scripts.trace_qwen3_5 import _hf_states, _LayerCapture, _metric, compare_traces
 
 
 def test_metric_reports_exact_relative_error_and_shape():
@@ -60,17 +62,22 @@ class FakeNanoLayer(nn.Module):
         return hidden * 2, hidden
 
 
+class FakeFusedNorm(nn.Module):
+    def forward_with_residual(self, hidden, residual):
+        return hidden + residual
+
+
 class FakeNanoBackbone(nn.Module):
     def __init__(self):
         super().__init__()
         self.embed_tokens = nn.Embedding(10, 4)
         self.layers = nn.ModuleList([FakeNanoLayer()])
-        self.norm = nn.Identity()
+        self.norm = FakeFusedNorm()
 
     def forward(self, ids):
         embedding = self.embed_tokens(ids)
         hidden, residual = self.layers[0](embedding)
-        return self.norm(hidden + residual)
+        return self.norm.forward_with_residual(hidden, residual)
 
 
 def test_nano_hook_reconstructs_residual_stream_before_mutation():
@@ -85,3 +92,19 @@ def test_nano_hook_reconstructs_residual_stream_before_mutation():
     finally:
         capture.close()
     assert not model.layers[0]._forward_hooks
+    assert "forward_with_residual" not in vars(model.norm)
+
+
+def test_hf_gdn_state_collection_uses_layer_cache_and_valid_history():
+    conv = torch.arange(8, dtype=torch.float32).reshape(1, 2, 4)
+    recurrent = torch.arange(24, dtype=torch.float32).reshape(1, 2, 3, 4)
+    layer = SimpleNamespace(
+        block_type="linear_attention",
+        linear_attn=SimpleNamespace(conv_kernel_size=4),
+    )
+    cache = SimpleNamespace(
+        layers=[SimpleNamespace(conv_states={0: conv}, recurrent_states={0: recurrent})]
+    )
+    states = _hf_states(cache, SimpleNamespace(layers=[layer]))
+    torch.testing.assert_close(states["gdn.0.conv"], conv[0, :, -3:])
+    torch.testing.assert_close(states["gdn.0.recurrent"], recurrent[0].transpose(-1, -2))

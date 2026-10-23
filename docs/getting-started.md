@@ -63,18 +63,17 @@ python -c 'import torch, flashinfer, transformers; print("PyTorch:", torch.__ver
 
 ```bash
 export NANOVLLM_MODEL=/absolute/path/to/Qwen3.5-MoE
-export NANOVLLM_DTYPE=bfloat16
 python example.py
 ```
 
-[example.py](../example.py)读取两个环境变量 `NANOVLLM_MODEL`、`NANOVLLM_DTYPE` 并应用聊天模板。`Config` 会对模型路径调用 `expanduser()`，因此可以使用 `~` 表示用户主目录。
+[example.py](../example.py)仅读取环境变量 `NANOVLLM_MODEL` 并应用聊天模板。`Config` 会对模型路径调用 `expanduser()`，因此可以使用 `~` 表示用户主目录。
 
 ## 用中文对话提示运行
 
 单卡 WSL 示例（BF16、Eager）：
 
 ```bash
-python -m scripts.chat "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
+python -m scripts.chat "$NANOVLLM_MODEL" \
   --max-model-len 512 --max-num-batched-tokens 128 \
   --gpu-memory-utilization 0.9 --max-new-tokens 64 --temperature 0
 ```
@@ -84,7 +83,7 @@ python -m scripts.chat "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
 交互式多轮对话：
 
 ```bash
-python -m scripts.chat "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
+python -m scripts.chat "$NANOVLLM_MODEL" \
   --system "你是一个简洁、准确的中文助手。" \
   --max-new-tokens 256 --temperature 0.7
 ```
@@ -113,7 +112,6 @@ prompt = tokenizer.apply_chat_template(
 
 llm = LLM(
     model_path,
-    dtype=os.environ["NANOVLLM_DTYPE"],
     max_model_len=4096,
     max_num_seqs=2,
     max_num_batched_tokens=256,
@@ -136,7 +134,7 @@ finally:
 
 `exit()` 当前负责同步 CUDA，并让引擎的退出处理只执行一次；它不承诺立即释放所有仍被 Python 对象引用的模型张量。
 
-模型的 `dtype` 是**必填参数**，仅允许 `"bfloat16"`。不从检查点推断，不支持模型 dtype 为 `"auto"`。这与 KV 存储参数 `kv_cache_dtype="auto"` 不同：后者表示 KV 采用当前模型计算精度。
+模型计算精度内部固定为 BF16，无需传入 `dtype`；`kv_cache_dtype="auto"` 表示 KV 使用 BF16，`"fp8_e4m3"` 则将 Full Attention 的 KV Cache 存储为 FP8 E4M3。
 
 ## 参数怎样影响执行
 

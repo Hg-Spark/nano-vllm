@@ -1,13 +1,17 @@
 # Paths support ~ and environment variables; relative paths use the project root.
 model = "~/models/Qwen3.5-2B"
-dtype = "bfloat16"                 # only bfloat16
 gpu = "0"                         # CUDA_VISIBLE_DEVICES
-stage = "check"                     # all, check, bench, tail, long, capacity
-repeats = 5                     # Formal performance A/B; set to 1 explicitly for smoke.
+stage = "check"                     # all, check, bench, tail, long, prefix, capacity
 output_dir = "results"             # Each run creates a new run_* directory.
 
 [benchmark]
-mode = "smoke"                    # benchmarks/run.sh: smoke, full, tail, long.
+mode = "smoke"                    # smoke or full; use stage=tail/long separately.
+repeats = 5                       # Set 1 only for smoke; >=5 for formal A/B.
+
+[kv_cache]
+dtype = "auto"                   # auto (BF16 KV) or fp8_e4m3 (FP8 KV).
+k_scale = 1.0                     # FP8 dequantization scale; calibrate before parity.
+v_scale = 1.0                     # BF16 model compute is fixed independently.
 
 [correctness]
 max_jobs = 1                      # Parallel Ninja compiler jobs.

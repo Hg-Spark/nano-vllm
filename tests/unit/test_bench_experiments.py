@@ -56,7 +56,6 @@ class BenchmarkExperimentsTest(unittest.TestCase):
         )
         args = SimpleNamespace(
             model="stub",
-            dtype="float16",
             budget=16,
             mixed_prefill_limit=128,
             activation_reserve_mib=256,
@@ -64,6 +63,8 @@ class BenchmarkExperimentsTest(unittest.TestCase):
             max_model_len=128,
             gpu_memory_utilization=0.8,
             kv_cache_dtype="auto",
+            kv_cache_k_scale=1.0,
+            kv_cache_v_scale=1.0,
             cache_entries=0,
             graph_sizes=(1,),
             min_graph_coverage=0.0,
@@ -114,8 +115,9 @@ class BenchmarkExperimentsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             args = SimpleNamespace(
                 model="stub",
-                dtype="float16",
                 kv_cache_dtype="auto",
+                kv_cache_k_scale=1.0,
+                kv_cache_v_scale=1.0,
                 budget=512,
                 input_len=2048,
                 output_len=128,

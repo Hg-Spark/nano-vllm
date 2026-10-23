@@ -57,7 +57,7 @@ class LLMEngineStepTest(unittest.TestCase):
     def test_decode_failure_disables_engine(self):
         scheduler = make_scheduler(max_num_seqs=2, num_blocks=32, block_size=4, eos_token_ids=(99,))
         running = make_running_sequence(scheduler, list(range(65)))
-        scheduler.block_manager.prefix_cache.publish_many(running, (GDNStateSnapshot(64, ()),))
+        scheduler.cache_manager.prefix_cache.publish_many(running, (GDNStateSnapshot(64, ()),))
         image = SimpleNamespace(visual_features=object(), image_start=0)
         scheduler.add(Sequence([3, 4], SamplingParams(max_tokens=2), image_state=image))
         engine = make_engine_stub()
@@ -69,9 +69,10 @@ class LLMEngineStepTest(unittest.TestCase):
 
         self.assertTrue(engine._closed)
         self.assertTrue(scheduler.is_finished())
-        self.assertEqual(len(scheduler.block_manager.prefix_cache), 0)
+        self.assertEqual(len(scheduler.cache_manager.prefix_cache), 0)
         self.assertEqual(
-            len(scheduler.block_manager.free_block_ids), scheduler.block_manager.num_blocks
+            len(scheduler.cache_manager.block_manager.free_block_ids),
+            scheduler.cache_manager.block_manager.num_blocks,
         )
         self.assertIsNone(image.visual_features)
         engine.exit()  # Repeated cleanup is safe.
