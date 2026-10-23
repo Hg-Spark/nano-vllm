@@ -22,7 +22,7 @@ bash benchmarks/run_tests.sh configs/tests.toml
 
 普通依赖默认使用[清华 PyPI 镜像](https://mirrors.tuna.tsinghua.edu.cn/help/pypi/)，PyTorch 使用官方 CUDA 源。临时切换普通依赖的镜像可在运行前设置 `export UV_DEFAULT_INDEX=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple`。
 
-默认执行 `check`：GPU 信息采集、单元/集成测试、32-token HF 贪心对齐和前缀恢复对齐。性能测试需显式选择 `bench`、`tail` 或 `capacity`；正式 A/B 对照将 `repeats` 设置为至少 5。各阶段失败即停止，配置、原始 JSON、日志与 `status.txt` 保存在 `results/run_<UTC时间>/`。每次 `check` 都重新执行，不使用历史成功标记跳过。
+默认执行 `check`：GPU 信息采集、单元/集成测试、32-token HF 贪心对齐和前缀恢复对齐。性能测试需显式选择 `bench`、`tail`、`long` 或 `capacity`；正式 A/B 对照将 `repeats` 设置为至少 5。各阶段失败即停止，配置、原始 JSON、日志与 `status.txt` 保存在 `results/run_<UTC时间>/`。每次 `check` 都重新执行，不使用历史成功标记跳过。
 
 单元测试和集成测试分别运行，实时显示每个用例，首次失败立即停止并打印简短堆栈，输出同时写入 `unit-tests.log` 和 `integration-tests.log`。`[correctness]` 的 `max_jobs`、`nvcc_threads` 默认均为 1，控制所有阶段的 FlashInfer JIT 编译并发；它们不限制测试请求并发数，也不保证内存峰值低于某个上限。
 
@@ -41,6 +41,10 @@ bash benchmarks/run_tests.sh configs/tests.toml tail
 ```
 
 ```bash
+bash benchmarks/run_tests.sh configs/tests.toml long
+```
+
+```bash
 bash benchmarks/run_tests.sh configs/tests.toml capacity
 ```
 
@@ -56,7 +60,7 @@ bash benchmarks/run_tests.sh --help
 
 模型、精度、GPU、重复次数与各阶段参数统一在 TOML 中修改。路径支持 `~` 和环境变量，相对路径以项目根目录为基准。
 
-`[benchmark].mode` 选择现有 `smoke` 或 `full` 矩阵，具体负载以原始 JSON 为准。A/B 记录建议保留 Git SHA 或源码归档哈希；汇总脚本不要求 Git 元数据；遇到 `PARITY FAILURE` 应保留失败，不绕过输出一致性检查。Tail 的基线为 Step-exclusive Decode-first，容量搜索未启用 Joint Prefix Cache，不能据此填写“前缀缓存使最大并发提升 X%”。
+`[benchmark].mode` 用于 `bench` 或 `all` 阶段，只接受 `smoke`、`full`；`tail`、`long` 通过独立阶段或直接调用 `run.sh`，避免 `all` 重复执行。具体负载以原始 JSON 为准。汇总脚本不要求额外 Git 元数据；遇到 `PARITY FAILURE` 应保留失败，不绕过输出一致性检查。Tail 的基线为 Step-exclusive Decode-first，容量搜索未启用 Joint Prefix Cache，不能据此填写“前缀缓存使最大并发提升 X%”。
 
 ## 常用入口
 
@@ -215,9 +219,9 @@ python -m benchmarks.bench_experiments "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYP
 
 TTFT、TPOT、E2E 在 `step()` 返回并同步 GPU 后记录，因此包含同一轮中 Decode 后续的 Prefill 阻塞。主机调用吞吐来自 `_run_batch()` 的 `StepStats`，在异步 CUDA 执行时不代表精确 GPU Kernel 耗时；需要分阶段 GPU 性能时，应使用 CUDA Events 或 Profiler。重算会增加实际安排的 token 数。FP8 节省缓存存储也不保证端到端峰值按比例降低。
 
-JSON 中延迟以秒表示，指标保存在 `--out` 指定的文件中；命令会拒绝覆盖已有结果。只有少量请求时，P99 是小样本插值统计，不能当作线上尾延迟结论。
+JSON 中延迟以秒表示，指标保存在 `--out` 指定的文件中；命令会拒绝覆盖已有结果。TTFT、TPOT、E2E 与 ITL 在样本不足 1000 时将 P99 置为 `null`，仍保留 Mean/P50 与样本数量，避免误用小样本 P99。
 
-Prefix Cache 默认关闭；使用 `--scenario prefix --cache-entries 32` 可测量共享前缀，随机输入无法代表真实业务的共享前缀分布。在本地保存基线结果，并补充脚本没有自动记录的依赖版本、检查点 revision 和有效上下文上限。
+Prefix Cache 默认关闭；使用 `--scenario prefix --cache-entries 32` 可测量共享前缀，随机输入无法代表真实业务的共享前缀分布。在本地保存基线结果用于 A/B 对照。
 
 ### 长 Prompt 干扰实验
 
@@ -329,7 +333,7 @@ python -m scripts.verify_qwen3_5_multimodal "$NANOVLLM_MODEL" /path/to/image.jpg
 
 ## Hybrid Benchmark 消融实验
 
-在仓库根目录使用统一脚本执行五类离线实验：固定 Batch Decode、动态吞吐、共享前缀和长 Prompt 干扰。它们直接驱动 Engine，不包含 HTTP 或泊松到达流量；输出延迟不能作为在线服务 SLO 结论。
+在仓库根目录使用统一脚本执行四类离线实验：固定 Batch Decode、动态吞吐、共享前缀和长 Prompt 干扰。它们直接驱动 Engine，不包含 HTTP 或泊松到达流量；输出延迟不能作为在线服务 SLO 结论。
 
 ```bash
 export NANOVLLM_MODEL=/absolute/path/to/Qwen3.5
@@ -337,20 +341,24 @@ export NANOVLLM_DTYPE=bfloat16
 REPEATS=1 bash benchmarks/run.sh smoke
 REPEATS=5 bash benchmarks/run.sh full
 REPEATS=5 bash benchmarks/run.sh tail
+# 可选：需要额外 KV 容量的 8K/16K 长 Prompt 实验
+REPEATS=5 bash benchmarks/run.sh long
 ```
 
 `RESULT_DIR` 可自定义保存位置。Benchmark 不会重复运行 HF 校验；正式性能对照请先运行 `check` 阶段。单组实验可运行 `python -m benchmarks.bench_experiments --help`；仅汇总可运行 `python -m benchmarks.summarize_bench results/<目录> --min-repeats 5`。
 
 | 实验 | A/B 控制 | 观察 |
 | --- | --- | --- |
-| Decode | 固定 B 下关闭或开启相同 B 的 Graph Bucket | 每步 wall-clock、吞吐与 Replay 次数 |
-| Prefill 干扰 | 同调度器的 Mixed 与 Decode-first Step 互斥 | 长请求 TTFT、短请求 Token Gap |
-| Joint Prefix | 缓存关闭与缓存开启，目标请求共享相同前缀 | TTFT、命中比例、恢复 Token、Snapshot 存储字节 |
-| 动态吞吐 | Eager 与 Graph Bucket | Output tok/s、TPOT、峰值显存 |
+| Decode | 固定 B 下关闭或开启相同 B 的 Graph Bucket | 每步 wall-clock、吞吐、Replay 次数与覆盖率 |
+| Prefill 干扰 | Mixed 与 Decode-first Step 互斥；full 分别扫描总 Budget 和 mixed-prefill cap，同一 Budget 下复用一次 Exclusive 基线并验证输出哈希一致性 | 长请求 TTFT、短请求 Token Gap |
+| Joint Prefix | 缓存关闭与缓存开启，目标请求共享相同前缀 | TTFT、命中比例、恢复 Token、计划与实际发布/淘汰/保留 Checkpoint、峰值 Snapshot 字节数 |
+| 动态吞吐 | Eager 与 Graph Bucket | Output tok/s、TPOT、峰值显存、Graph Coverage、Eager Fallback 原因；默认覆盖率下限 95% |
 
 ### Tail ITL 与完整 Decode 并发边界
 
 `tail` 模式在同一组短请求 Decode 期间注入一个长 Prompt，使用 7 个短请求、每个 512 个输出 token、Batch 上限 8，分别运行 Mixed 与 Step-exclusive Decode-first。每组至少执行 5 次。公共 `scripts.bench.run_benchmark` 记录每次同步观察到的相邻输出 token 间隔（`itl_seconds` / `itl_samples`），`long_prompt_interference.short_token_gap_after_samples` 为长请求注入后的短请求间隔样本数。结果汇总只有在 **每次 A/B 运行至少 1000 个后段间隔样本** 时才打印 Synthetic P99 ITL 降幅。
+
+`long` 模式将注入的长 Prompt 扩展至 8K 和 16K，短请求并发数保持 7、Batch 上限 8；该模式独立于 `full` 运行，避免标准矩阵因显存不足直接失败。正式运行前应确认模型最大上下文长度与 KV 容量能够满足负载。
 
 此处 ITL 的时间戳在 `step()` 返回、GPU 同步后获取，可能包含其他请求的 Prefill、主机调度与同步时间；它是离线合成负载下的观察间隔，不能直接称为线上服务 P99 ITL。对于正式在线 P99 仍需按实际请求到达时间戳测量，并报告分位数的请求/Token 样本量。
 

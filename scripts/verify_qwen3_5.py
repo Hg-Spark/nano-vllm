@@ -115,15 +115,18 @@ def parse_args(argv=None):
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--logits-relative-rms-threshold", type=float, default=0.05)
     parser.add_argument(
-        "--trace", action="store_true",
+        "--trace",
+        action="store_true",
         help="teacher-forced per-step HF/Nano logits and layer parity diagnostics",
     )
     parser.add_argument(
-        "--trace-gdn-states", action="store_true",
+        "--trace-gdn-states",
+        action="store_true",
         help="also compare Conv and recurrent cache states (requires --trace)",
     )
     parser.add_argument(
-        "--trace-verbose-layers", action="store_true",
+        "--trace-verbose-layers",
+        action="store_true",
         help="print every traced layer metric (requires --trace)",
     )
     add_result_argument(parser)

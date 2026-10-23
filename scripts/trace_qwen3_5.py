@@ -38,7 +38,11 @@ def _metric(ref, actual):
     import torch
 
     if ref.shape != actual.shape:
-        return {"reference_shape": list(ref.shape), "actual_shape": list(actual.shape), "matched_shape": False}
+        return {
+            "reference_shape": list(ref.shape),
+            "actual_shape": list(actual.shape),
+            "matched_shape": False,
+        }
     if not torch.isfinite(ref).all().item() or not torch.isfinite(actual).all().item():
         return {"matched_shape": True, "finite": False}
     delta = actual.float() - ref.float()
@@ -47,8 +51,7 @@ def _metric(ref, actual):
         "finite": True,
         "max_abs": delta.abs().max().item(),
         "relative_rmse": (
-            delta.square().mean().sqrt()
-            / ref.float().square().mean().sqrt().clamp_min(1e-12)
+            delta.square().mean().sqrt() / ref.float().square().mean().sqrt().clamp_min(1e-12)
         ).item(),
     }
 
@@ -85,6 +88,7 @@ class _LayerCapture:
                 else:
                     value = output
                 self.current[f"layer.{index}"] = _snapshot_last(value)
+
             return capture
 
         def final_hook(_module, _inputs, output):
@@ -154,7 +158,9 @@ def trace_hf(model_path, prompt_ids, steps, dtype, experts_backend, trace_states
             with torch.inference_mode():
                 for step in range(steps):
                     result = model(
-                        input_ids=ids, past_key_values=past, use_cache=True,
+                        input_ids=ids,
+                        past_key_values=past,
+                        use_cache=True,
                         return_dict=True,
                     )
                     past = result.past_key_values
@@ -169,9 +175,7 @@ def trace_hf(model_path, prompt_ids, steps, dtype, experts_backend, trace_states
             capture.close()
         return generated, traces
 
-    return run_hf_reference(
-        AutoModelForCausalLM, model_path, dtype, experts_backend, evaluate
-    )
+    return run_hf_reference(AutoModelForCausalLM, model_path, dtype, experts_backend, evaluate)
 
 
 def trace_nano(model_path, prompt_ids, forced_tokens, dtype, max_model_len, trace_states):
@@ -180,9 +184,13 @@ def trace_nano(model_path, prompt_ids, forced_tokens, dtype, max_model_len, trac
     # A single full prompt prefill, no prefix reuse, and eager decode ensure
     # one unambiguous logits/hidden-state capture for each generated token.
     llm = LLM(
-        model_path, dtype=dtype, max_model_len=max_model_len,
-        max_num_seqs=1, max_num_batched_tokens=max(len(prompt_ids), 16),
-        max_prefix_cache_entries=0, decode_graph_batch_sizes=(),
+        model_path,
+        dtype=dtype,
+        max_model_len=max_model_len,
+        max_num_seqs=1,
+        max_num_batched_tokens=max(len(prompt_ids), 16),
+        max_prefix_cache_entries=0,
+        decode_graph_batch_sizes=(),
         max_visual_tokens_per_request=0,
     )
     runner = llm.model_runner
@@ -190,6 +198,7 @@ def trace_nano(model_path, prompt_ids, forced_tokens, dtype, max_model_len, trac
     original_sampler = runner._sample_logits
     traces = []
     try:
+
         def forced_sampler(logits, seqs, sample_indices):
             if len(sample_indices) != 1 or len(seqs) != 1:
                 raise RuntimeError("teacher forcing requires one sampled request")
@@ -199,19 +208,19 @@ def trace_nano(model_path, prompt_ids, forced_tokens, dtype, max_model_len, trac
             layers = capture.snapshot()
             slot = seqs[sample_indices[0]].state_slot
             states = _nano_states(runner.model.model, slot) if trace_states else {}
-            traces.append({
-                "logits": _snapshot_last(logits),
-                "layers": layers,
-                "states": states,
-            })
+            traces.append(
+                {
+                    "logits": _snapshot_last(logits),
+                    "layers": layers,
+                    "states": states,
+                }
+            )
             return [forced_tokens[step]]
 
         runner._sample_logits = forced_sampler
         output = llm.generate(
             [prompt_ids],
-            SamplingParams(
-                temperature=0.0, max_tokens=len(forced_tokens), ignore_eos=True
-            ),
+            SamplingParams(temperature=0.0, max_tokens=len(forced_tokens), ignore_eos=True),
             use_tqdm=False,
         )
         actual = output[0]["token_ids"]
@@ -246,8 +255,7 @@ def compare_traces(hf_tokens, hf_traces, nano_traces, threshold, top_k):
         if hf["states"].keys() != nano["states"].keys():
             raise RuntimeError("GDN state trace sites differ between HF and Nano")
         state_metrics = {
-            key: _metric(hf["states"][key], nano["states"][key])
-            for key in hf["states"]
+            key: _metric(hf["states"][key], nano["states"][key]) for key in hf["states"]
         }
 
         # Report the earliest layer before the final logits. GDN cache errors
@@ -257,24 +265,23 @@ def compare_traces(hf_tokens, hf_traces, nano_traces, threshold, top_k):
             *state_metrics.items(),
             ("logits", logit_metric),
         ]:
-            if (
-                metric.get("relative_rmse", float("inf")) > threshold
-                and first_large_error is None
-            ):
+            if metric.get("relative_rmse", float("inf")) > threshold and first_large_error is None:
                 first_large_error = {"step": step, "site": site, "metrics": metric}
 
-        per_step.append({
-            "step": step,
-            "phase": "prefill" if step == 0 else "decode",
-            "forced_token": int(hf_tokens[step]),
-            "hf_argmax": hf_argmax,
-            "nano_argmax": nano_argmax,
-            "logits": logit_metric,
-            "hf_topk": _topk(hlog, top_k),
-            "nano_topk": _topk(nlog, top_k),
-            "layers": layer_metrics,
-            "gdn_states": state_metrics,
-        })
+        per_step.append(
+            {
+                "step": step,
+                "phase": "prefill" if step == 0 else "decode",
+                "forced_token": int(hf_tokens[step]),
+                "hf_argmax": hf_argmax,
+                "nano_argmax": nano_argmax,
+                "logits": logit_metric,
+                "hf_topk": _topk(hlog, top_k),
+                "nano_topk": _topk(nlog, top_k),
+                "layers": layer_metrics,
+                "gdn_states": state_metrics,
+            }
+        )
     return {
         "steps": len(per_step),
         "first_token_mismatch": first_token_mismatch,
@@ -289,7 +296,9 @@ def parse_args(argv=None):
     add_model_argument(parser, required=True)
     add_dtype_argument(parser)
     add_hf_experts_backend_argument(parser)
-    parser.add_argument("--prompt", default="Explain why KV cache is useful in autoregressive inference.")
+    parser.add_argument(
+        "--prompt", default="Explain why KV cache is useful in autoregressive inference."
+    )
     parser.add_argument("--max-new-tokens", type=int, default=8)
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--relative-rmse-threshold", type=float, default=0.05)
@@ -300,14 +309,18 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     validate_positive(parser, args, "max_new_tokens", "max_model_len", "top_k")
     validate_finite(
-        parser, args.relative_rmse_threshold, "relative-rmse-threshold",
-        minimum=0, inclusive=False,
+        parser,
+        args.relative_rmse_threshold,
+        "relative-rmse-threshold",
+        minimum=0,
+        inclusive=False,
     )
     return normalize_paths(args, "model", "result_file")
 
 
 def run(args):
     from transformers import AutoConfig, AutoTokenizer
+
     from nanovllm.config import is_qwen3_5_moe
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
@@ -322,20 +335,29 @@ def run(args):
 
     backend = args.hf_experts_backend if is_qwen3_5_moe(cfg) else None
     hf_tokens, hf = trace_hf(
-        args.model, prompt_ids, args.max_new_tokens, args.dtype,
-        backend, args.trace_gdn_states,
+        args.model,
+        prompt_ids,
+        args.max_new_tokens,
+        args.dtype,
+        backend,
+        args.trace_gdn_states,
     )
     nano = trace_nano(
-        args.model, prompt_ids, hf_tokens, args.dtype,
-        args.max_model_len, args.trace_gdn_states,
+        args.model,
+        prompt_ids,
+        hf_tokens,
+        args.dtype,
+        args.max_model_len,
+        args.trace_gdn_states,
     )
-    result = compare_traces(
-        hf_tokens, hf, nano, args.relative_rmse_threshold, args.top_k
+    result = compare_traces(hf_tokens, hf, nano, args.relative_rmse_threshold, args.top_k)
+    result.update(
+        {
+            "prompt_length": len(prompt_ids),
+            "forced_tokens": hf_tokens,
+            "hf_experts_backend": backend,
+        }
     )
-    result.update({
-        "prompt_length": len(prompt_ids), "forced_tokens": hf_tokens,
-        "hf_experts_backend": backend,
-    })
     print("Step  Phase     HF top1  Nano top1  Logits relRMSE  Max abs")
     for row in result["per_step"]:
         metrics = row["logits"]

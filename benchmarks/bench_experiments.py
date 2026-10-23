@@ -75,6 +75,12 @@ def arguments():
     p.add_argument(
         "--graph-sizes", default="", help="comma separated Graph buckets, e.g. 1,2,4; empty=Eager"
     )
+    p.add_argument(
+        "--min-graph-coverage",
+        type=float,
+        default=0.0,
+        help="fail a Graph throughput run if fewer than this fraction of decode forwards replay",
+    )
     p.add_argument("--cache-entries", type=int, default=0, help="0 disables prefix cache")
     p.add_argument("--shared-prefix-len", type=int, default=1024, help="prefix scenario")
     p.add_argument("--suffix-len", type=int, default=256, help="prefix scenario")
@@ -97,6 +103,10 @@ def arguments():
     if not a.model:
         p.error("model path or NANOVLLM_MODEL must be provided")
     a.graph_sizes = parse_graph_sizes(a.graph_sizes)
+    if not 0.0 <= a.min_graph_coverage <= 1.0 or a.min_graph_coverage != a.min_graph_coverage:
+        p.error("--min-graph-coverage must be between 0 and 1")
+    if a.min_graph_coverage and (a.scenario != "throughput" or not a.graph_sizes):
+        p.error("--min-graph-coverage requires --scenario throughput and --graph-sizes")
     validate_positive(p, a, "input_len", "num_requests")
     if a.mixed_prefill_limit < -1:
         p.error("--mixed-prefill-limit must be -1 or non-negative")
@@ -142,6 +152,10 @@ def tokens_hash(seqs):
     return hashlib.sha256(data.encode()).hexdigest()
 
 
+def random_prompts(rng, vocab, count, length):
+    return [[rng.randrange(vocab) for _ in range(length)] for _ in range(count)]
+
+
 def make_requests(engine, prompts, max_tokens):
     from nanovllm import SamplingParams
 
@@ -149,7 +163,47 @@ def make_requests(engine, prompts, max_tokens):
     return [engine._prepare_request(prompt, params) for prompt in prompts]
 
 
-def run_fixed_decode(engine, a, graph_replays):
+def checkpoint_schedule_stats(chunks, block_size: int) -> dict[str, int]:
+    """Count scheduled (not necessarily retained) joint GDN/KV checkpoints."""
+    from math import lcm
+
+    joint_step = lcm(GDN_CHECKPOINT_INTERVAL, block_size)
+    offgrid = [chunk for chunk in chunks if chunk.start % joint_step]
+    return {
+        "prefill_chunks": len(chunks),
+        "checkpoint_chunks": sum(bool(chunk.checkpoint_positions) for chunk in chunks),
+        "checkpoint_positions": sum(len(chunk.checkpoint_positions) for chunk in chunks),
+        "offgrid_prefill_chunks": len(offgrid),
+        "offgrid_realignments": sum(
+            chunk.end % joint_step == 0 and chunk.end in chunk.checkpoint_positions
+            for chunk in offgrid
+        ),
+    }
+
+
+def graph_counters(runner):
+    return (
+        sum(bucket.replay_count for bucket in runner.decode_graph_buckets.values()),
+        runner.decode_graph_fallbacks.copy(),
+    )
+
+
+def measured_graph_usage(runner, before, decode_calls):
+    replay_count, fallback_counts = graph_counters(runner)
+    replays = replay_count - before[0]
+    fallbacks = {name: count - before[1][name] for name, count in fallback_counts.items()}
+    if replays < 0 or replays > decode_calls or sum(fallbacks.values()) != decode_calls - replays:
+        raise RuntimeError("Decode Graph replay/fallback accounting is inconsistent")
+    return {
+        "graph_replays": replays,
+        "decode_forward_calls": decode_calls,
+        "graph_coverage": replays / decode_calls if decode_calls else 0.0,
+        "eager_decode_forward_calls": decode_calls - replays,
+        "graph_fallback_reasons": fallbacks,
+    }
+
+
+def run_fixed_decode(engine, a):
     """Measure real Scheduler + ModelRunner at a fixed active decode batch."""
     import torch
 
@@ -170,7 +224,7 @@ def run_fixed_decode(engine, a, graph_replays):
 
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
-    replay_before = graph_replays()
+    graph_before = graph_counters(engine.model_runner)
     step_durations = []
     gpu_step_durations = []
     start_ev = torch.cuda.Event(enable_timing=True)
@@ -186,26 +240,29 @@ def run_fixed_decode(engine, a, graph_replays):
         step_durations.append(t1 - t0)
         gpu_step_durations.append(start_ev.elapsed_time(end_ev) / 1000.0)
     duration = perf_counter() - t_begin
-    replays = graph_replays() - replay_before
-    if a.graph_sizes and replays != a.measure_steps:
-        raise RuntimeError(f"expected {a.measure_steps} measured graph replays, got {replays}")
-    if not a.graph_sizes and replays:
+    graph_metrics = measured_graph_usage(engine.model_runner, graph_before, a.measure_steps)
+    if a.graph_sizes and graph_metrics["graph_replays"] != a.measure_steps:
+        raise RuntimeError(
+            f"expected {a.measure_steps} measured graph replays, got {graph_metrics['graph_replays']}"
+        )
+    if not a.graph_sizes and graph_metrics["graph_replays"]:
         raise RuntimeError("Eager unexpectedly used a graph")
     # CUDA event elapsed time includes host submission gaps, not pure kernel time.
     seqs = list(engine.scheduler.running)
     if len(seqs) != a.max_num_seqs:
         raise RuntimeError("fixed decode batch lost running requests")
+    step_latency = summarize(step_durations)
     metrics = {
         "requests": a.max_num_seqs,
         "measured_decode_steps": a.measure_steps,
         "output_tokens": a.max_num_seqs * a.measure_steps,
         "elapsed_seconds": duration,
         "output_throughput_tok_s": a.max_num_seqs * a.measure_steps / duration,
-        "step_latency_seconds": summarize(step_durations),
+        "step_latency_seconds": step_latency,
         "cuda_event_step_window_seconds": summarize(gpu_step_durations),
-        "tpot_seconds": summarize(step_durations),
+        "tpot_seconds": step_latency,
         **cuda_memory_stats(),
-        "graph_replays": replays,
+        **graph_metrics,
     }
     return metrics, {
         "token_hash": tokens_hash(seqs),
@@ -257,47 +314,54 @@ def run(a):
         warmup = make_requests(engine, [[1] * 15], 2)
         run_benchmark(engine, warmup)
 
-        first_prefill_start = {}
-        sched_prefill_tokens = 0
-        original_schedule = engine.scheduler.schedule
-
-        def graph_replays():
-            return sum(
-                bucket.replay_count for bucket in engine.model_runner.decode_graph_buckets.values()
-            )
-
         if a.schedule_mode == "exclusive_decode_first":
             enable_exclusive_decode_first(engine.scheduler)
 
-        def tracked_schedule():
-            nonlocal sched_prefill_tokens
-            outcome = original_schedule()
-            sched_prefill_tokens += outcome.prefill_tokens
-            for chunk in outcome.prefill_chunks:
-                first_prefill_start.setdefault(chunk.seq.seq_id, chunk.start)
-            return outcome
+        track_schedule = a.scenario == "prefix" or a.cache_entries > 0
+        first_prefill_start = {}
+        sched_prefill_tokens = 0
+        checkpoint_stats = {
+            "prefill_chunks": 0,
+            "checkpoint_chunks": 0,
+            "checkpoint_positions": 0,
+            "offgrid_prefill_chunks": 0,
+            "offgrid_realignments": 0,
+        }
+        if track_schedule:
+            original_schedule = engine.scheduler.schedule
 
-        engine.scheduler.schedule = tracked_schedule
-        replay_before = graph_replays()
+            def tracked_schedule():
+                nonlocal sched_prefill_tokens
+                outcome = original_schedule()
+                sched_prefill_tokens += outcome.prefill_tokens
+                if a.cache_entries and outcome.prefill_chunks:
+                    observed = checkpoint_schedule_stats(
+                        outcome.prefill_chunks, engine.scheduler.block_manager.block_size
+                    )
+                    for name, count in observed.items():
+                        checkpoint_stats[name] += count
+                if a.scenario == "prefix":
+                    for chunk in outcome.prefill_chunks:
+                        first_prefill_start.setdefault(chunk.seq.seq_id, chunk.start)
+                return outcome
+
+            engine.scheduler.schedule = tracked_schedule
+        graph_before = graph_counters(engine.model_runner)
 
         if a.scenario == "decode":
-            metrics, details = run_fixed_decode(engine, a, graph_replays)
+            metrics, details = run_fixed_decode(engine, a)
 
         elif a.scenario == "throughput":
-            prompts = [
-                [rng.randrange(vocab) for _ in range(a.input_len)] for _ in range(a.num_requests)
-            ]
+            prompts = random_prompts(rng, vocab, a.num_requests, a.input_len)
             seqs = make_requests(engine, prompts, a.output_len)
             metrics = run_benchmark(engine, seqs)
             completion_hash = tokens_hash(seqs)
             details = {"token_hash": completion_hash}
 
         elif a.scenario == "interference":
-            prompts = [
-                [rng.randrange(vocab) for _ in range(a.input_len)] for _ in range(a.num_requests)
-            ]
+            prompts = random_prompts(rng, vocab, a.num_requests, a.input_len)
             short = make_requests(engine, prompts, a.output_len)
-            late_prompt = [rng.randrange(vocab) for _ in range(a.late_input_len)]
+            late_prompt = random_prompts(rng, vocab, 1, a.late_input_len)[0]
             late = make_requests(engine, [late_prompt], a.output_len)[0]
             metrics = run_benchmark(
                 engine,
@@ -321,11 +385,14 @@ def run(a):
             # regardless of the target requests' different suffixes.
             warm = make_requests(engine, [shared + warm_tail[:1]], 1)
             run_benchmark(engine, warm)  # Build exactly the same history in both A/B runs.
-            replay_before = graph_replays()
+            graph_before = graph_counters(engine.model_runner)
             cache = engine.scheduler.block_manager.prefix_cache
             entries_before = len(cache)
             bytes_before = cache.snapshot_bytes
+            published_before = cache.published_count
+            evicted_before = cache.evicted_count
             target = make_requests(engine, [shared + tail for tail in target_tails], a.output_len)
+            checkpoint_before_target = checkpoint_stats.copy()
             metrics = run_benchmark(engine, target)
             restored = [first_prefill_start.get(seq.seq_id, -1) for seq in target]
             if any(start < 0 for start in restored):
@@ -341,20 +408,40 @@ def run(a):
                 "cache_entries_before_target": entries_before,
                 "snapshot_bytes_before_target": bytes_before,
                 "snapshot_bytes_after_target": cache.snapshot_bytes,
+                "peak_snapshot_bytes_including_setup": cache.peak_snapshot_bytes,
+                "published_checkpoints_during_target": cache.published_count - published_before,
+                "evicted_checkpoints_during_target": cache.evicted_count - evicted_before,
+                "retained_checkpoints_after_target": len(cache),
                 "restored_tokens_per_target": restored,
                 "prefix_hit_rate": sum(start > 0 for start in restored) / len(restored),
                 "total_restored_prefix_tokens": sum(max(start, 0) for start in restored),
+                "target_scheduled_checkpoint_stats": {
+                    name: count - checkpoint_before_target[name]
+                    for name, count in checkpoint_stats.items()
+                },
                 "token_hash": tokens_hash(target),
             }
 
         if a.scenario != "decode":
-            measured_replays = graph_replays() - replay_before
-            if a.graph_sizes and a.scenario == "throughput" and measured_replays == 0:
-                raise RuntimeError(
-                    "Graph buckets were captured, but no measured replay was observed"
+            graph_metrics = measured_graph_usage(
+                engine.model_runner, graph_before, metrics["decode_forward_calls"]
+            )
+            metrics.update(graph_metrics)
+            if (
+                a.graph_sizes
+                and a.scenario == "throughput"
+                and (
+                    not graph_metrics["graph_replays"]
+                    or graph_metrics["graph_coverage"] < a.min_graph_coverage
                 )
-            metrics["graph_replays"] = measured_replays
-        details["scheduled_prefill_tokens_including_setup"] = sched_prefill_tokens
+            ):
+                raise RuntimeError(
+                    f"Graph coverage {graph_metrics['graph_coverage']:.1%} "
+                    f"below required {a.min_graph_coverage:.1%}"
+                )
+        if track_schedule:
+            details["scheduled_prefill_tokens_including_setup"] = sched_prefill_tokens
+            details["scheduled_checkpoint_stats_including_setup"] = checkpoint_stats
         result = {
             "source": "nano-vllm qwen3.5 engine, no HTTP",
             "gpu": gpu,
