@@ -37,6 +37,10 @@ class Sequence:
         # Set only on a joint-prefix hit. ModelRunner consumes the snapshot
         # immediately before executing the resumed prefill chunk.
         self.pending_state_snapshot: GDNStateSnapshot | None = None
+        # Prompt checkpoint remains immutable; the completion checkpoint rolls
+        # forward independently. Both enter the global cache on completion.
+        self.prompt_snapshot: GDNStateSnapshot | None = None
+        self.completion_snapshot: GDNStateSnapshot | None = None
         self.image_state = image_state
         if sampling_params is None:
             sampling_params = SamplingParams()

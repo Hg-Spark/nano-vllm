@@ -217,7 +217,7 @@ class ModelRunner:
             return None
         bucket.prepare(layout)
         logits = bucket.replay()
-        return BatchResult(self._sample_logits(logits, seqs, list(range(len(chunks)))), {})
+        return BatchResult(self._sample_logits(logits, seqs, list(range(len(chunks)))))
 
     @torch.inference_mode()
     def run(
@@ -301,41 +301,49 @@ class ModelRunner:
             else:
                 results = [None for _ in seqs]
 
-        prefix_snapshots: dict[int, tuple[GDNStateSnapshot, ...]] = {}
-        if is_prefill:
-            state_modules = self.model.state_cache_modules()
-            captured = [
-                (
-                    chunk.seq.seq_id,
-                    position,
-                    tuple(
-                        module.slot(chunk.seq.state_slot)
-                        if position == chunk.end
-                        else module.checkpoint_state_slot(chunk.seq.state_slot, position)
-                        for module in state_modules
-                    ),
+        return BatchResult(results)
+
+    @torch.inference_mode()
+    def capture_live_states(
+        self, candidates: list[tuple[Sequence, int]]
+    ) -> dict[int, tuple[GDNStateSnapshot, ...]]:
+        """Capture at most one final live state per request, before slot release."""
+        modules = self.model.state_cache_modules()
+        if not candidates:
+            return {}
+        states = [
+            (seq.seq_id, position, tuple(module.slot(seq.state_slot) for module in modules))
+            for seq, position in candidates
+        ]
+        # One D2H copy per tensor family, avoiding per-layer synchronizations.
+        conv_cpu = torch.stack([conv for _, _, layers in states for conv, _ in layers]).cpu()
+        recurrent_cpu = torch.stack(
+            [recurrent for _, _, layers in states for _, recurrent in layers]
+        ).cpu()
+        layer_count = len(modules)
+        snapshots = {}
+        for index, (seq_id, position, _) in enumerate(states):
+            offset = index * layer_count
+            seq = candidates[index][0]
+            prompt_boundary = (
+                (seq.num_prompt_tokens - 1) // self.block_size
+            ) * self.block_size
+            previous = (
+                seq.prompt_snapshot
+                if position == prompt_boundary
+                else seq.completion_snapshot
+            )
+            if previous is not None and len(previous.layers) == layer_count:
+                # Roll completion state in its private CPU tensors. Never
+                # mutate the immutable prompt state or a published entry.
+                for j, (conv, recurrent) in enumerate(previous.layers):
+                    conv.copy_(conv_cpu[offset + j])
+                    recurrent.copy_(recurrent_cpu[offset + j])
+                layers = previous.layers
+            else:
+                layers = tuple(
+                    (conv_cpu[offset + j].clone(), recurrent_cpu[offset + j].clone())
+                    for j in range(layer_count)
                 )
-                for chunk in chunks
-                for position in chunk.checkpoint_positions
-            ]
-            if captured:
-                # Collect all layers and boundaries in two contiguous D2H transfers.
-                conv_cpu = torch.stack(
-                    [conv for _, _, layers in captured for conv, _ in layers]
-                ).cpu()
-                recurrent_cpu = torch.stack(
-                    [state for _, _, layers in captured for _, state in layers]
-                ).cpu()
-                num_layers = len(state_modules)
-                collected: dict[int, list[GDNStateSnapshot]] = {}
-                for index, (seq_id, position, _) in enumerate(captured):
-                    offset = index * num_layers
-                    layers = tuple(
-                        (conv_cpu[offset + i].clone(), recurrent_cpu[offset + i].clone())
-                        for i in range(num_layers)
-                    )
-                    collected.setdefault(seq_id, []).append(GDNStateSnapshot(position, layers))
-                prefix_snapshots = {
-                    seq_id: tuple(snapshots) for seq_id, snapshots in collected.items()
-                }
-        return BatchResult(results, prefix_snapshots)
+            snapshots[seq_id] = (GDNStateSnapshot(position, layers),)
+        return snapshots

@@ -2,7 +2,6 @@
 
 import argparse
 import gc
-from math import lcm
 from unittest.mock import patch
 
 from scripts._common import (
@@ -77,6 +76,8 @@ def run_prefix_resume_probe(
     kv_options: dict,
     shared_prefix_len: int | None = None,
     prefill_budget: int | None = None,
+    snapshot_source: str = "prompt",
+    decode_graph: bool = False,
 ) -> dict:
     import torch
     from transformers import AutoTokenizer
@@ -84,15 +85,32 @@ def run_prefix_resume_probe(
     from nanovllm import LLM, SamplingParams
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
-    shared_prefix_len = shared_prefix_len or lcm(64, block_size)
+    shared_prefix_len = shared_prefix_len or block_size
     prefill_budget = prefill_budget or block_size
-    joint_step = lcm(64, block_size)
-    if shared_prefix_len < joint_step or shared_prefix_len % joint_step:
-        raise ValueError(f"shared prefix must align to the {joint_step}-token joint boundary")
+    if shared_prefix_len < block_size or shared_prefix_len % block_size:
+        raise ValueError(f"shared prefix must align to the {block_size}-token KV page boundary")
     if prefill_budget <= 0:
         raise ValueError("prefill budget must be positive")
+    if snapshot_source not in ("prompt", "decode"):
+        raise ValueError("snapshot_source must be prompt or decode")
+    if snapshot_source == "decode" and shared_prefix_len <= 1:
+        raise ValueError("decode snapshot requires at least two shared tokens")
     prompt_a, prompt_b = _build_prefix_probe_prompts(tokenizer, shared_prefix_len)
     params = SamplingParams(temperature=0.0, max_tokens=max_new_tokens, ignore_eos=True)
+    warm_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=2 if snapshot_source == "decode" else 1,
+        ignore_eos=True,
+    )
+    # Capture precisely the requested boundary under the new contract:
+    # prompt snapshots stop one token before the prompt ends, while a decode
+    # snapshot can capture the final forwarded token even on completion.
+    warm_prompt = (
+        prompt_a[:shared_prefix_len] + [prompt_b[-1]]
+        if snapshot_source == "prompt"
+        else prompt_a[: shared_prefix_len - 1]
+    )
+    graph_options = {"decode_graph_batch_sizes": (1,)} if decode_graph else {}
 
     baseline = LLM(
         model_path,
@@ -102,9 +120,20 @@ def run_prefix_resume_probe(
         kv_cache_block_size=block_size,
         **kv_options,
         max_prefix_cache_entries=0,
+        **graph_options,
     )
     try:
-        baseline_tokens = baseline.generate([prompt_b], params, use_tqdm=False)[0]["token_ids"]
+        warm_baseline = (
+            baseline.generate([warm_prompt], warm_params, use_tqdm=False)[0]["token_ids"]
+            if snapshot_source == "decode"
+            else None
+        )
+        continuation = (
+            warm_prompt + warm_baseline + prompt_b[shared_prefix_len:]
+            if snapshot_source == "decode"
+            else prompt_b
+        )
+        baseline_tokens = baseline.generate([continuation], params, use_tqdm=False)[0]["token_ids"]
     finally:
         baseline.exit()
     gc.collect()
@@ -118,17 +147,19 @@ def run_prefix_resume_probe(
         max_num_seqs=1,
         kv_cache_block_size=block_size,
         max_prefix_cache_entries=4,
+        **graph_options,
     )
     try:
-        cached.generate(
-            [prompt_a],
-            SamplingParams(temperature=0.0, max_tokens=1, ignore_eos=True),
-            use_tqdm=False,
-        )
+        warm_cached = cached.generate([warm_prompt], warm_params, use_tqdm=False)[0]["token_ids"]
+        if warm_baseline is not None and warm_cached != warm_baseline:
+            raise ValidationFailure(
+                "FAIL: warmup generation differed before restoring conversation snapshot",
+                {"baseline_warmup": warm_baseline, "cached_warmup": warm_cached},
+            )
         from nanovllm.engine.sequence import Sequence
 
         prefix_cache = cached.scheduler.cache_manager.prefix_cache
-        entry = prefix_cache.find(Sequence(prompt_b), max_tokens=len(prompt_b) - 1)
+        entry = prefix_cache.find(Sequence(continuation), max_tokens=len(continuation) - 1)
         metadata = (
             None
             if entry is None
@@ -155,7 +186,18 @@ def run_prefix_resume_probe(
             return original_restore(staging, model, pending)
 
         with patch.object(cache_runtime.GDNRestoreStaging, "restore", observe_restore):
-            resumed_tokens = cached.generate([prompt_b], params, use_tqdm=False)[0]["token_ids"]
+            graph_before = sum(
+                bucket.replay_count for bucket in cached.model_runner.decode_graph_buckets.values()
+            )
+            resumed_tokens = cached.generate([continuation], params, use_tqdm=False)[0]["token_ids"]
+            graph_after = sum(
+                bucket.replay_count for bucket in cached.model_runner.decode_graph_buckets.values()
+            )
+            if decode_graph and graph_after <= graph_before:
+                raise ValidationFailure(
+                    "FAIL: decode graph was enabled but no graph replay occurred",
+                    {"graph_replays": graph_after - graph_before},
+                )
         if restored != [(shared_prefix_len, entry.block_ids, True)]:
             raise ValidationFailure(
                 "FAIL: prefix-resume did not restore the cached KV/GDN boundary",
@@ -168,9 +210,11 @@ def run_prefix_resume_probe(
         baseline_tokens, resumed_tokens, max_new_tokens, metadata, restored[0][0]
     )
     result["shared_prefix_len"] = shared_prefix_len
+    result["snapshot_source"] = snapshot_source
+    result["decode_graph"] = decode_graph
     result["prefill_budget"] = prefill_budget
     result["kv_block_size"] = block_size
-    print("PASS: prefix resume preserves greedy token sequence")
+    print(f"PASS: {snapshot_source} snapshot restore preserves greedy token sequence")
     return result
 
 
@@ -187,13 +231,24 @@ def parse_args(argv=None):
         "--shared-prefix-len",
         type=int,
         default=0,
-        help="zero uses the first joint KV/GDN checkpoint; otherwise a multiple of lcm(64, block size)",
+        help="zero uses one KV block; otherwise an aligned shared history length",
     )
     parser.add_argument(
         "--prefill-budget",
         type=int,
         default=0,
-        help="tokens per scheduling step; 0 uses the KV block size (65 can exercise off-grid recovery)",
+        help="tokens per scheduling step; 0 uses the KV block size",
+    )
+    parser.add_argument(
+        "--snapshot-source",
+        choices=("prompt", "decode"),
+        default="prompt",
+        help="capture after Prefill or after the final processed Decode token",
+    )
+    parser.add_argument(
+        "--decode-graph",
+        action="store_true",
+        help="enable B=1 CUDA Graph and require actual replay during continuation",
     )
     add_result_argument(parser)
     args = parser.parse_args(argv)
@@ -215,6 +270,8 @@ def run(args):
         kv_cache_kwargs(args),
         shared_prefix_len=(args.shared_prefix_len or None),
         prefill_budget=(args.prefill_budget or None),
+        snapshot_source=args.snapshot_source,
+        decode_graph=args.decode_graph,
     )
 
 

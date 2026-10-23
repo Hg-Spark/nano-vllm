@@ -101,10 +101,6 @@ class FlashInferGDNTest(unittest.TestCase):
             (0, 2, 66),
             torch.tensor([0, 2, 66], device="cuda", dtype=torch.int32),
             torch.tensor([0, 1], device="cuda", dtype=torch.int32),
-            0,
-            ((), ()),
-            (0, 0, 0),
-            None,
         )
         actual_state = self.layer.state_pool.recurrent_state.clone()
         actual_conv = self.layer.state_pool.conv_state.clone()
@@ -120,10 +116,6 @@ class FlashInferGDNTest(unittest.TestCase):
                     (0, end - start),
                     torch.tensor([0, end - start], device="cuda", dtype=torch.int32),
                     torch.tensor([slot], device="cuda", dtype=torch.int32),
-                    0,
-                    ((),),
-                    (0, 0),
-                    None,
                 )
             )
         torch.testing.assert_close(actual, torch.cat(parts), atol=5e-2, rtol=5e-2)
@@ -133,32 +125,23 @@ class FlashInferGDNTest(unittest.TestCase):
         torch.testing.assert_close(actual_conv, self.layer.state_pool.conv_state)
 
     @torch.no_grad()
-    def test_intermediate_checkpoints_match_chunked_resume(self):
+    def test_prefill_boundary_snapshot_matches_chunked_resume(self):
         inputs = torch.randn(192, 256, device="cuda", dtype=torch.bfloat16)
-        offsets = torch.tensor([0, 192], device="cuda", dtype=torch.int32)
+        pool = self.layer.state_pool
         slot_ids = torch.tensor([0], device="cuda", dtype=torch.int32)
-        checkpoints = torch.tensor([0, 3], device="cuda", dtype=torch.int64)
         full_output = self.layer._forward_prefill_batch(
             inputs,
             (0,),
             (0,),
             (0, 192),
-            offsets,
+            torch.tensor([0, 192], device="cuda", dtype=torch.int32),
             slot_ids,
-            64,
-            ((64, 128),),
-            (0, 3),
-            checkpoints,
         )
-        pool = self.layer.state_pool
-        checkpoint_states = {
-            position: tuple(state.clone() for state in pool.checkpoint_state_slot(0, position))
-            for position in (64, 128)
-        }
         final_states = tuple(state.clone() for state in pool.slot(0))
         pool.conv_state.zero_()
         pool.recurrent_state.zero_()
         outputs = []
+        intermediate = None
         for start in (0, 64, 128):
             outputs.append(
                 self.layer._forward_prefill_batch(
@@ -168,16 +151,29 @@ class FlashInferGDNTest(unittest.TestCase):
                     (0, 64),
                     torch.tensor([0, 64], device="cuda", dtype=torch.int32),
                     slot_ids,
-                    0,
-                    ((),),
-                    (0, 0),
-                    None,
                 )
             )
-            expected = checkpoint_states.get(start + 64, final_states)
-            for actual, reference in zip(pool.slot(0), expected):
-                torch.testing.assert_close(actual, reference, atol=5e-2, rtol=5e-2)
+            if start == 64:
+                intermediate = tuple(state.clone() for state in pool.slot(0))
         torch.testing.assert_close(full_output, torch.cat(outputs), atol=5e-2, rtol=5e-2)
+        for actual, reference in zip(pool.slot(0), final_states):
+            torch.testing.assert_close(actual, reference, atol=5e-2, rtol=5e-2)
+
+        # A checkpoint is a copy of the live state at a real Forward boundary.
+        assert intermediate is not None
+        for target, state in zip(pool.slot(1), intermediate):
+            target.copy_(state)
+        resumed = self.layer._forward_prefill_batch(
+            inputs[128:],
+            (1,),
+            (128,),
+            (0, 64),
+            torch.tensor([0, 64], device="cuda", dtype=torch.int32),
+            torch.tensor([1], device="cuda", dtype=torch.int32),
+        )
+        torch.testing.assert_close(resumed, outputs[-1], atol=5e-2, rtol=5e-2)
+        for actual, reference in zip(pool.slot(1), final_states):
+            torch.testing.assert_close(actual, reference, atol=5e-2, rtol=5e-2)
 
     @torch.no_grad()
     def test_decode_matches_bf16_operand_reference_and_state(self):

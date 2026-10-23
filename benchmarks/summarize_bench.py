@@ -262,27 +262,11 @@ def main(argv=None):
                     if restored:
                         raise SystemExit("Unshared-prefix workload unexpectedly restored tokens")
                     print("  Zero-overlap workload: TTFT reduction below zero is cache overhead")
-                if all(
-                    "target_scheduled_checkpoint_stats" in run["details"]
-                    for run in [*baseline, *treatment]
-                ):
-                    b_cps = median(
-                        run["details"]["target_scheduled_checkpoint_stats"]["checkpoint_positions"]
-                        for run in baseline
-                    )
-                    t_cps = median(
-                        run["details"]["target_scheduled_checkpoint_stats"]["checkpoint_positions"]
-                        for run in treatment
-                    )
-                    print(
-                        f"  Target scheduled checkpoints (not confirmed retained): "
-                        f"{b_cps:.0f} -> {t_cps:.0f}"
-                    )
-                if all("published_checkpoints_during_target" in r["details"] for r in treatment):
+                if all("published_snapshots_during_target" in r["details"] for r in treatment):
                     fields = (
-                        "published_checkpoints_during_target",
-                        "evicted_checkpoints_during_target",
-                        "retained_checkpoints_after_target",
+                        "published_snapshots_during_target",
+                        "evicted_snapshots_during_target",
+                        "retained_snapshots_after_target",
                         "peak_snapshot_bytes_including_setup",
                     )
                     for field in fields:

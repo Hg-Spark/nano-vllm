@@ -52,7 +52,7 @@ def run_benchmark(
     first_token_at: dict[int, float] = {}
     finished_at: dict[int, float] = {}
     prefill_tokens = decode_tokens = max_prefill_step_tokens = max_decode_step_tokens = steps = 0
-    prefill_seconds = decode_seconds = 0.0
+    prefill_seconds = decode_seconds = snapshot_capture_seconds = 0.0
 
     def record_request_times(now: float) -> None:
         for seq in all_sequences:
@@ -80,6 +80,7 @@ def run_benchmark(
         prefill_tokens += stats.prefill_tokens
         decode_seconds += stats.decode_seconds
         prefill_seconds += stats.prefill_seconds
+        snapshot_capture_seconds += getattr(stats, "snapshot_capture_seconds", 0.0)
         max_prefill_step_tokens = max(max_prefill_step_tokens, stats.prefill_tokens)
         max_decode_step_tokens = max(max_decode_step_tokens, stats.decode_tokens)
         if stats.decode_tokens:
@@ -117,6 +118,7 @@ def run_benchmark(
         "total_token_throughput_tok_s": (prompt_tokens + output_tokens) / elapsed,
         "prefill_host_call_tok_s": prefill_tokens / prefill_seconds if prefill_seconds > 0 else 0.0,
         "decode_host_call_tok_s": decode_tokens / decode_seconds if decode_seconds > 0 else 0.0,
+        "snapshot_capture_seconds": snapshot_capture_seconds,
         "ttft_seconds": summarize(ttft, p99_min_samples=P99_MIN_SAMPLES),
         "ttft_samples": len(ttft),
         "tpot_seconds": summarize(tpot, p99_min_samples=P99_MIN_SAMPLES),

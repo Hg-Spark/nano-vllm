@@ -22,7 +22,7 @@ python -m benchmarks.run_tests --config configs/tests.toml
 
 普通依赖默认使用[清华 PyPI 镜像](https://mirrors.tuna.tsinghua.edu.cn/help/pypi/)，PyTorch 使用官方 CUDA 源。临时切换普通依赖的镜像可在运行前设置 `export UV_DEFAULT_INDEX=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple`。
 
-默认执行 `check`：GPU 信息采集、单元/集成测试、32-token HF 贪心对齐和前缀恢复对齐。性能测试需显式选择 `bench`、`tail`、`long` 或 `capacity`；正式 A/B 对照将 `[benchmark].repeats` 设置为至少 5。各阶段失败即停止，配置、原始 JSON、日志与 `status.txt` 保存在 `results/run_<UTC时间>/`。每次 `check` 都重新执行，不使用历史成功标记跳过。
+默认执行 `check`：GPU 信息采集、单元/集成测试、32-token HF 贪心对齐、Prefill 与 Decode 结束两类前缀恢复对齐。性能测试需显式选择 `bench`、`tail`、`long` 或 `capacity`；正式 A/B 对照将 `[benchmark].repeats` 设置为至少 5。各阶段失败即停止，配置、原始 JSON、日志与 `status.txt` 保存在 `results/run_<UTC时间>/`。每次 `check` 都重新执行，不使用历史成功标记跳过。
 
 单元测试和集成测试分别运行，实时显示每个用例，首次失败立即停止并打印简短堆栈，输出同时写入 `unit-tests.log` 和 `integration-tests.log`。`[correctness]` 的 `max_jobs`、`nvcc_threads` 默认均为 1，控制所有阶段的 FlashInfer JIT 编译并发；它们不限制测试请求并发数，也不保证内存峰值低于某个上限。
 
@@ -186,11 +186,11 @@ python -m scripts.verify_prefix_resume "$NANOVLLM_MODEL" \
 4. 运行 B，复用共享 KV 并恢复保持原始状态精度的 GDN 快照。
 5. 比较 B 的两条生成序列，并输出快照边界和大小。
 
-第二阶段比较的是“不开启联合前缀复用”与“恢复联合前缀快照”，**两者都使用正常 Paged KV 和持久 GDN State Slot**，并不是已移除的无持久缓存 Warmup。此项不能单独当作 HF 对齐证明。若没有产生缓存条目，探针会失败。该探针在 KV Block Size 为 16/32/64 时仍构造至少 64 Token 的共享前缀，以匹配固定 GDN Checkpoint 网格。验证脚本通过包装 `GDNRestoreStaging.restore()` 观察实际恢复调用，并检查 `restore_boundary` 与共享 KV Block，避免仅凭缓存条目推断真实命中。
+第二阶段比较的是“不开启联合前缀复用”与“恢复联合前缀快照”，**两者都使用正常 Paged KV 和持久 GDN State Slot**，并不是已移除的无持久缓存 Warmup。此项不能单独当作 HF 对齐证明。若没有产生缓存条目，探针会失败。该探针采用共享前缀后追加一个 Sentinel Token 的 Prompt Warmup，使回答前 Checkpoint 正好位于期望的完整 KV Block 边界；Decode 来源则在最终已处理 Token 到达目标边界时捕获。验证脚本通过包装 `GDNRestoreStaging.restore()` 观察实际恢复调用，并检查 `restore_boundary` 与共享 KV Block，避免仅凭缓存条目推断真实命中。
 
 将误差指标记录在独立的本地实验结果中。当前 snapshot 不再主动降精度；恢复验证仍用于发现状态边界、复制或其他执行路径问题。
 
-Prefix Cache 的 GPU KV 静态容量会按每请求最多两个选中 Checkpoint 的跨层驻留/捕获栈，以及单层 FlashInfer 中间 Checkpoint 的上界预留工作区；真实峰值仍应以 GPU Profile 验证。Prefix Cache 可同时限制条目数（`max_prefix_cache_entries`）和 CPU GDN 快照总大小（`max_prefix_cache_snapshot_bytes`，单位字节）。字节限制默认为 `None`，即不额外限制；设置为 `0` 时跳过快照发布。初始化时会估算一份 GDN 状态快照的大小；即使预算大于零，只要不足以容纳一份快照，也不执行为该缓存条目额外分片或 GPU→CPU 拷贝。发布时按固定 `snapshot_nbytes` 计账，不重新扫描快照张量；多个快照超过总预算时优先裁剪当前路径的中间 Checkpoint，否则按全局 FIFO 淘汰并释放关联 KV Block 引用。Benchmark 的 `snapshot_bytes_before_target` / `snapshot_bytes_after_target` 直接读取缓存统计。
+Prefix Cache 在 GPU KV 静态容量中预留批量最终 GDN 状态堆叠缓冲，不再预留 FlashInfer 64-token 中间 Checkpoint。Prompt 在最后一个 Token 前的最近完整 KV Page 边界捕获固定状态，Decode 在完整 Page 边界更新一个 Completion 暂存（包括结束步）；请求结束才统一发布两种独立候选。全局条目和 `max_prefix_cache_snapshot_bytes` 限制已发布的 Resident Snapshot；活跃请求的两份暂存额外由 `2 × max_num_seqs × snapshot_nbytes` 硬性槽位上限约束，分别提供 `staging_snapshot_bytes`、`peak_staging_snapshot_bytes` 和 `peak_total_snapshot_bytes` 统计。CPU 快照保持卷积原始 dtype 与循环状态 FP32，临时 D2H 堆叠不在这些逻辑持久驻留指标内。
 
 ## 测量端到端性能
 
@@ -349,7 +349,7 @@ REPEATS=5 bash benchmarks/run.sh long
 | --- | --- | --- |
 | Decode | 固定 B 下关闭或开启相同 B 的 Graph Bucket | 每步 wall-clock、吞吐、Replay 次数与覆盖率 |
 | Prefill 干扰 | Mixed 与 Decode-first Step 互斥；full 分别扫描总 Budget 和 mixed-prefill cap，同一 Budget 下复用一次 Exclusive 基线并验证输出哈希一致性 | 长请求 TTFT、短请求 Token Gap |
-| Joint Prefix | 缓存关闭与缓存开启，目标请求共享相同前缀 | TTFT、命中比例、恢复 Token、计划与实际发布/淘汰/保留 Checkpoint、峰值 Snapshot 字节数 |
+| Joint Prefix | 缓存关闭与缓存开启，目标请求共享相同前缀 | TTFT、命中比例、恢复 Token、实际发布/淘汰/保留的联合 Snapshot、峰值 Snapshot 字节数 |
 | 动态吞吐 | Eager 与 Graph Bucket | Output tok/s、TPOT、峰值显存、Graph Coverage、Eager Fallback 原因；默认覆盖率下限 95% |
 
 ### Tail ITL 与完整 Decode 并发边界

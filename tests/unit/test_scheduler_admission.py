@@ -31,17 +31,10 @@ class SchedulerAdmissionTest(unittest.TestCase):
             if output.decode_chunks:
                 scheduler.postprocess(output.decode_chunks, [2] * len(output.decode_chunks), False)
             if output.prefill_chunks:
-                snapshots = {
-                    chunk.seq.seq_id: tuple(
-                        GDNStateSnapshot(position, ()) for position in chunk.checkpoint_positions
-                    )
-                    for chunk in output.prefill_chunks
-                    if chunk.checkpoint_positions
-                }
                 sampled = [
                     2 if chunk.end == len(chunk.seq) else None for chunk in output.prefill_chunks
                 ]
-                scheduler.postprocess(output.prefill_chunks, sampled, True, snapshots)
+                scheduler.postprocess(output.prefill_chunks, sampled, True)
             if scheduler.is_finished():
                 break
 
@@ -82,8 +75,8 @@ class SchedulerAdmissionTest(unittest.TestCase):
             scheduler.add(Sequence(list(range(64)) + suffix, SamplingParams(max_tokens=1)))
         scheduled = scheduler.schedule()
         self.assertEqual(len(scheduled.prefill_chunks), 2)
-        self.assertEqual([chunk.num_tokens for chunk in scheduled.prefill_chunks], [64, 64])
-        self.assertEqual(len(scheduler.cache_manager.block_manager.free_block_ids), 1)
+        self.assertEqual([chunk.num_tokens for chunk in scheduled.prefill_chunks], [48, 48])
+        self.assertEqual(len(scheduler.cache_manager.block_manager.free_block_ids), 3)
 
     def test_partial_prefills_resume_before_new_requests(self):
         scheduler = make_scheduler(
