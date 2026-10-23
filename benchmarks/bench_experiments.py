@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Qwen3.5 Hybrid Runtime benchmark experiments for Hg-Spark/nano-vllm@qwen3.5.
+"""Qwen3.5 Hybrid Runtime benchmark experiments for Hg-Spark/nano-vllm@hybrid-runtime.
 
 Uses scripts.bench and nanovllm from the repository root.
 Measures the engine directly (no HTTP, network time, or Poisson arrivals).

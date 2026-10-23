@@ -25,7 +25,7 @@ class BenchmarkSummaryTest(unittest.TestCase):
                 "schedule_mode": "mixed",
                 "mixed_prefill_limit": 128,
                 "activation_reserve_mib": 256,
-                "kv_cache_dtype": "fp8",
+                "kv_cache_dtype": "fp8_e4m3",
                 "kv_cache_k_scale": 1.0,
                 "kv_cache_v_scale": 1.0,
             },
