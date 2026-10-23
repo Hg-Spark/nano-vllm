@@ -37,7 +37,7 @@ class DecodePageTableCacheTest(unittest.TestCase):
 
     def test_batch_row_order_and_page_reuse_invalidate_key(self):
         manager = BlockManager(num_blocks=16, block_size=16)
-        left, right = Sequence([1] * 17), Sequence([2] * 17)
+        left, right = Sequence([1] * 17), Sequence([2] * 9)
         manager.ensure_capacity(left, len(left))
         manager.ensure_capacity(right, len(right))
         cache = DecodePageTableCache()
@@ -45,6 +45,10 @@ class DecodePageTableCacheTest(unittest.TestCase):
         b = build_decode_batch_layout((decode_chunk(right), decode_chunk(left)), 16, cache)
         self.assertNotEqual(a.page_table_key, b.page_table_key)
         self.assertEqual(b.paged_kv_indices, tuple(right.block_table + left.block_table))
+        self.assertEqual(b.kv_batch_indices, (0, 1))
+        self.assertEqual(b.kv_positions, (8, 16))
+        self.assertEqual(b.paged_kv_indptr, (0, 1, 3))
+        self.assertEqual(b.paged_kv_last_page_len, (9, 1))
 
         # Same sequence ID, same page count, but new physical mapping.
         manager.deallocate(left)

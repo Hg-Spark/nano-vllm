@@ -2,7 +2,6 @@ import unittest
 from types import SimpleNamespace
 
 from nanovllm.engine.batch_common import (
-    build_decode_batch_layout,
     build_prefill_batch_layout,
     stage_pinned,
 )
@@ -87,25 +86,6 @@ class PrefillBatchLayoutTest(unittest.TestCase):
         )
         self.assertEqual(len(layout.image_copy_spans), 1)
         self.assertEqual(layout.image_copy_spans[0].length, 2)
-
-    def test_decode_append_metadata_uses_request_order_and_logical_positions(self):
-        first = Sequence([1, 2, 3, 4, 5])
-        first.block_table = [7, 2]
-        first.state_slot = 3
-        first.committed_tokens = 4
-        second = Sequence([6, 7])
-        second.block_table = [9]
-        second.state_slot = 1
-        second.committed_tokens = 1
-
-        layout = build_decode_batch_layout(
-            (ScheduledChunk(first, 4, 5), ScheduledChunk(second, 1, 2)), block_size=4
-        )
-
-        self.assertEqual(layout.kv_batch_indices, (0, 1))
-        self.assertEqual(layout.kv_positions, (4, 1))
-        self.assertEqual(layout.paged_kv_indptr, (0, 2, 3))
-        self.assertEqual(layout.paged_kv_indices, (7, 2, 9))
 
 
 if __name__ == "__main__":
