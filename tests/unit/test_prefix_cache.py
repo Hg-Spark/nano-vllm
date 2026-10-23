@@ -214,26 +214,13 @@ class PrefixCacheTest(unittest.TestCase):
         self.assertEqual(len(cache), 1)
         manager.release(second)
 
-    def test_find_is_read_only_until_prefix_is_attached(self):
-        manager = make_cache_manager(num_blocks=16, block_size=16, max_prefix_entries=2)
-        original, _ = publish_prefix(manager, [1] * 65, 64)
-        cache = manager.prefix_cache
-        newcomer = Sequence([1] * 64 + [2])
-        hit = cache.find(newcomer, max_tokens=64)
-        self.assertEqual(cache._active_reuses, {})
-        manager.block_manager.attach_shared_prefix(newcomer, hit.block_ids, hit.num_tokens)
-        cache.mark_reused(newcomer, hit)
-        self.assertEqual(sum(cache._active_reuses.values()), 1)
-        manager.release(original)
-        manager.release(newcomer)
-        self.assertEqual(cache._active_reuses, {})
-        self.assertEqual(cache._seq_reuses, {})
-
     def test_reuse_reference_counts_and_eviction_survives_live_requests(self):
         manager = make_cache_manager(num_blocks=16, block_size=16, max_prefix_entries=4)
         original, _ = publish_prefix(manager, [1] * 65, 64)
         cache = manager.prefix_cache
         entry = cache.find(original, max_tokens=64)
+        self.assertEqual(cache._active_reuses, {})  # Lookup does not attach a prefix.
+        self.assertEqual(cache._seq_reuses, {})
         consumers = [Sequence([1] * 64 + [token]) for token in (2, 3)]
         for seq in consumers:
             manager.block_manager.attach_shared_prefix(seq, entry.block_ids, entry.num_tokens)

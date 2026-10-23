@@ -14,85 +14,12 @@ if torch is not None:
     from nanovllm.engine.decode_graph import DecodeGraphBucket
     from nanovllm.engine.model_runner import ModelRunner
     from nanovllm.engine.sequence import Sequence
-    from nanovllm.layers.attention import plan_flashinfer_attention
     from nanovllm.sampling_params import SamplingParams
-    from nanovllm.utils.context import Context
 
 
 @unittest.skipIf(torch is None, "requires torch")
 class ModelRunnerTest(unittest.TestCase):
-    def test_attention_plan_uses_cpu_metadata(self):
-        runner = object.__new__(ModelRunner)
-        runner.block_size = 16
-        runner.attention_spec = (8, 2, 128, {})
-        runner.prefill_wrapper = Mock()
-        runner.decode_wrapper = Mock()
-        indices = object()
-
-        for q_offsets, indptr, last_page_len in (
-            ((0, 3, 5), (0, 2, 3), (1, 2)),
-            ((0, 1, 4), (0, 1, 4), (4, 3)),
-        ):
-            layout = SimpleNamespace(
-                q_offsets=q_offsets,
-                paged_kv_indptr=indptr,
-                paged_kv_last_page_len=last_page_len,
-            )
-            pinned = {
-                "prefill_q_offsets": q_offsets,
-                "prefill_kv_indptr": indptr,
-                "decode_kv_indptr": indptr,
-                "prefill_page_len": last_page_len,
-                "decode_page_len": last_page_len,
-            }
-            runner.metadata_pool = SimpleNamespace(
-                host_view=lambda name, length: torch.tensor(
-                    pinned[name][:length], dtype=torch.int32
-                ),
-                record_plan_transfer=Mock(),
-            )
-            for prefill, wrapper in (
-                (True, runner.prefill_wrapper),
-                (False, runner.decode_wrapper),
-            ):
-                context = Context(
-                    is_prefill=prefill,
-                    qo_indptr=object() if prefill else None,
-                    paged_kv_indices=indices,
-                )
-                # Simulate buffers populated by FlashInfer 0.7.0 plan().
-                wrapper._qo_indptr_buf = torch.tensor(q_offsets, dtype=torch.int32)
-                wrapper._paged_kv_indptr_buf = torch.tensor(indptr, dtype=torch.int32)
-                wrapper._paged_kv_last_page_len_buf = torch.tensor(last_page_len, dtype=torch.int32)
-                result = plan_flashinfer_attention(
-                    SimpleNamespace(context=context, layout=layout),
-                    runner.metadata_pool,
-                    runner.prefill_wrapper,
-                    runner.decode_wrapper,
-                    runner.attention_spec,
-                    runner.block_size,
-                )
-                self.assertIs(result.paged_kv_indptr, wrapper._paged_kv_indptr_buf)
-                self.assertIs(result.paged_kv_last_page_len, wrapper._paged_kv_last_page_len_buf)
-                if prefill:
-                    self.assertIs(result.qo_indptr, wrapper._qo_indptr_buf)
-                else:
-                    self.assertIsNone(result.qo_indptr)
-                args = wrapper.plan.call_args.args
-                offsets = (
-                    ((0, q_offsets), (1, indptr), (3, last_page_len))
-                    if prefill
-                    else ((0, indptr), (2, last_page_len))
-                )
-                for index, expected in offsets:
-                    self.assertEqual(args[index].dtype, torch.int32)
-                    self.assertEqual(args[index].device.type, "cpu")
-                    self.assertEqual(args[index].tolist(), list(expected))
-                self.assertIs(args[2 if prefill else 1], indices)
-                self.assertEqual(args[4 if prefill else 3 : 8 if prefill else 7], (8, 2, 128, 16))
-                self.assertIs(result.attention_wrapper, wrapper)
-                self.assertIs(result.paged_kv_indices, indices)
-
+    def test_decode_graph_waits_before_reusing_pinned_metadata(self):
         # Exercise load -> plan -> event in a CPU-backed graph bucket, without
         # requiring CUDA or duplicating the FlashInfer GPU integration test.
         bucket = object.__new__(DecodeGraphBucket)

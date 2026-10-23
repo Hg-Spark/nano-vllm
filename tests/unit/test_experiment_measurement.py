@@ -135,17 +135,18 @@ class MeasurementTest(unittest.TestCase):
         self.assertEqual(compare_tokens([1, 2], [1, 3])["first_mismatch"], 1)
         self.assertEqual(compare_tokens([1], [1, 2])["first_mismatch"], 1)
 
-    def test_prefix_resume_rejects_matched_empty_outputs(self):
+    def test_prefix_resume_rejects_invalid_greedy_outputs(self):
         from scripts.verify_prefix_resume import validate_prefix_resume_result
 
-        with self.assertRaisesRegex(ValidationFailure, "expected 16 greedy tokens"):
-            validate_prefix_resume_result([], [], 16, {"num_tokens": 64}, 64)
-
-    def test_prefix_resume_rejects_mismatched_tokens(self):
-        from scripts.verify_prefix_resume import validate_prefix_resume_result
-
-        with self.assertRaisesRegex(ValidationFailure, "token 1"):
-            validate_prefix_resume_result([10, 20], [10, 30], 2, {"num_tokens": 64}, 64)
+        for actual, expected, target_len, message in (
+            ([], [], 16, "expected 16 greedy tokens"),
+            ([10, 20], [10, 30], 2, "token 1"),
+        ):
+            with self.subTest(actual=actual, expected=expected):
+                with self.assertRaisesRegex(ValidationFailure, message):
+                    validate_prefix_resume_result(
+                        actual, expected, target_len, {"num_tokens": 64}, 64
+                    )
 
     def test_logits_comparison_detects_numeric_divergence(self):
         try:
