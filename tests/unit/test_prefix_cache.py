@@ -181,6 +181,27 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         self.assertEqual(cached, [])
         self.assertEqual(cache._entries.probes, 1)
 
+    def test_publish_probes_resident_ancestors_not_every_historical_page(self):
+        manager = BlockManager(num_blocks=520, block_size=16, max_prefix_entries=4)
+        seq = Sequence(list(range(8193)))
+        manager.ensure_capacity(seq, 8192)
+        cache = manager.prefix_cache
+        cache.publish_many(seq, (GDNStateSnapshot(64, ()),))
+
+        class CountingEntries(dict):
+            def __init__(self, entries):
+                super().__init__(entries)
+                self.probes = 0
+
+            def __contains__(self, key):
+                self.probes += 1
+                return super().__contains__(key)
+
+        cache._entries = CountingEntries(cache._entries)
+        cache.publish_many(seq, (GDNStateSnapshot(8192, ()),))
+        self.assertEqual(cache.find(seq, 8192).num_tokens, 8192)
+        self.assertLessEqual(cache._entries.probes, 4)
+
     def test_cached_checkpoints_include_ancestors_and_exclude_other_branches(self):
         manager = BlockManager(num_blocks=16, block_size=16, max_prefix_entries=4)
         seq = Sequence(list(range(257)))

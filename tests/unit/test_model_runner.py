@@ -58,7 +58,21 @@ class ModelRunnerTest(unittest.TestCase):
                     qo_indptr=object() if prefill else None,
                     paged_kv_indices=indices,
                 )
+                # Simulate buffers populated by FlashInfer 0.7.0 plan().
+                wrapper._qo_indptr_buf = torch.tensor(q_offsets, dtype=torch.int32)
+                wrapper._paged_kv_indptr_buf = torch.tensor(indptr, dtype=torch.int32)
+                wrapper._paged_kv_last_page_len_buf = torch.tensor(
+                    last_page_len, dtype=torch.int32
+                )
                 result = runner._plan_attention(SimpleNamespace(context=context, layout=layout))
+                self.assertIs(result.paged_kv_indptr, wrapper._paged_kv_indptr_buf)
+                self.assertIs(
+                    result.paged_kv_last_page_len, wrapper._paged_kv_last_page_len_buf
+                )
+                if prefill:
+                    self.assertIs(result.qo_indptr, wrapper._qo_indptr_buf)
+                else:
+                    self.assertIsNone(result.qo_indptr)
                 args = wrapper.plan.call_args.args
                 offsets = (
                     ((0, q_offsets), (1, indptr), (3, last_page_len))

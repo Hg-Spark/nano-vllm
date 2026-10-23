@@ -91,7 +91,8 @@ def _validate_qwen3_5_rope_support(
 @dataclass(slots=True)
 class Config:
     model: str
-    dtype: str
+    # Fixed model compute/weight dtype; FP8 KV is selected independently.
+    dtype: str = field(init=False, default="bfloat16")
     max_num_batched_tokens: int = 512
     max_num_seqs: int = 4
     max_model_len: int = 4096
@@ -117,8 +118,6 @@ class Config:
     head_dim: int = field(init=False)
 
     def __post_init__(self) -> None:
-        if self.dtype != "bfloat16":
-            raise ValueError("dtype must be 'bfloat16'")
         self.model = os.path.expanduser(self.model)
         if not os.path.isdir(self.model):
             raise ValueError(f"model path does not exist: {self.model}")

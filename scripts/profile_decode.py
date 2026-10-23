@@ -4,7 +4,6 @@ import argparse
 import json
 
 from scripts._common import (
-    add_dtype_argument,
     add_model_argument,
     add_result_argument,
     cuda_memory_stats,
@@ -35,7 +34,6 @@ def parse_args(argv=None):
         description=("Profile Qwen3.5 hybrid decode and report GPU time breakdown.")
     )
     add_model_argument(parser, required=True)
-    add_dtype_argument(parser)
     parser.add_argument("--context-len", type=int, default=4096)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--warmup-steps", type=int, default=4)
@@ -80,7 +78,6 @@ def run(args):
     max_tokens = args.warmup_steps + args.profile_steps + 8
     engine = LLMEngine(
         args.model,
-        dtype=args.dtype,
         max_num_seqs=args.batch_size,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_model_len=args.context_len + max_tokens + 1,
@@ -147,7 +144,7 @@ def run(args):
             "context_len": args.context_len,
             "profile_steps": args.profile_steps,
             "kv_cache_dtype": args.kv_cache_dtype,
-            "dtype": args.dtype,
+            "dtype": "bfloat16",
             "decode_gpu_ms": decode_us / 1000.0,
             "full_attention_decode_gpu_ms": (attention_us / 1000.0),
             "kv_store_gpu_ms": kv_store_us / 1000.0,

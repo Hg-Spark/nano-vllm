@@ -3,7 +3,6 @@
 import argparse
 
 from scripts._common import (
-    add_dtype_argument,
     add_model_argument,
     normalize_paths,
     validate_finite,
@@ -16,7 +15,6 @@ HELP = "/clear: clear conversation; /help: show commands; /exit or /quit: exit"
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     add_model_argument(parser)
-    add_dtype_argument(parser)
     parser.add_argument("--system", default="", help="optional system prompt")
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--temperature", type=float, default=0.0)
@@ -91,7 +89,6 @@ def run(args) -> None:
     )
     llm = LLM(
         args.model,
-        dtype=args.dtype,
         max_model_len=args.max_model_len,
         max_num_seqs=1,
         max_num_batched_tokens=args.max_num_batched_tokens,

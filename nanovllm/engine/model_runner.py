@@ -186,7 +186,16 @@ class ModelRunner:
             )
             wrapper = self.decode_wrapper
         self.metadata_pool.record_plan_transfer()
-        return replace(context, attention_wrapper=wrapper)
+        # Eager FlashInfer 0.7.0 owns the device copies of this metadata.
+        # Share those buffers with KV append and GDN instead of uploading a
+        # duplicate Context copy before plan(). Graph buckets are separate.
+        return replace(
+            context,
+            attention_wrapper=wrapper,
+            qo_indptr=wrapper._qo_indptr_buf if context.is_prefill else None,
+            paged_kv_indptr=wrapper._paged_kv_indptr_buf,
+            paged_kv_last_page_len=wrapper._paged_kv_last_page_len_buf,
+        )
 
     def _ensure_visual_features(self, seq: Sequence) -> torch.Tensor:
         state = seq.image_state
