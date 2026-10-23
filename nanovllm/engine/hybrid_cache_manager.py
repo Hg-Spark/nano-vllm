@@ -112,21 +112,34 @@ class HybridCacheManager:
             return end, (), 0
 
         step = lcm(GDN_CHECKPOINT_INTERVAL, self.block_manager.block_size)
-        candidates, _ = self.prefix_cache.candidates(seq, start, end)
+        candidates = self.prefix_cache.candidates(seq, start, end)
         candidates = [
             pair
             for pair in candidates
             if pair[1] not in planned_prefixes and pair[0] < seq.num_prompt_tokens
         ]
-        # Only trim inexpensive tails; never force an additional tiny forward.
         if end < len(seq):
-            aligned_end = end - end % step
-            if (
-                start < aligned_end < end
-                and end - aligned_end <= 8
-                and any(position == aligned_end for position, _ in candidates)
-            ):
-                end = aligned_end
+            if start % step:
+                # Deterministic sparse recovery: an early boundary, then every
+                # fourth joint grid boundary. No dependency on resident paths.
+                boundary = (start // step + 1) * step
+                if (
+                    end % step
+                    and end - start <= 2 * step
+                    and boundary < end
+                    and (boundary == step or boundary % (4 * step) == 0)
+                    and any(position == boundary for position, _ in candidates)
+                ):
+                    end = boundary
+            else:
+                # Aligned chunks may cheaply stop on a usable boundary.
+                aligned_end = end - end % step
+                if (
+                    start < aligned_end < end
+                    and end - aligned_end <= 8
+                    and any(position == aligned_end for position, _ in candidates)
+                ):
+                    end = aligned_end
 
         candidates = [pair for pair in candidates if pair[0] <= end]
         if start % step:

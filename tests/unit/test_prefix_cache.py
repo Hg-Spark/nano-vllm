@@ -112,9 +112,8 @@ class PrefixCacheTest(unittest.TestCase):
             self.assertIsNone(cache.find(seq, max_tokens=128))
             self.assertEqual(hash_fn.call_count, 0)
 
-            candidates, cached = cache.candidates(seq, 64, 160)
+            candidates = cache.candidates(seq, 64, 160)
             self.assertEqual([position for position, _ in candidates], [128])
-            self.assertEqual(cached, [])
             self.assertEqual(hash_fn.call_count, 10)
 
             # Previously calculated blocks are never hashed again.
@@ -178,11 +177,10 @@ class PrefixCacheTest(unittest.TestCase):
                     num_blocks=16, block_size=block_size, max_prefix_entries=4
                 )
                 seq = Sequence(list(range(401)))
-                candidates, cached = manager.prefix_cache.candidates(seq, 0, 400)
+                candidates = manager.prefix_cache.candidates(seq, 0, 400)
                 self.assertEqual(
                     [position for position, _ in candidates], [64, 128, 192, 256, 320, 384]
                 )
-                self.assertEqual(cached, [])
                 self.assertEqual(len(seq.prefix_block_hashes), expected_hashes)
 
     def test_candidate_scan_only_probes_new_boundaries(self):
@@ -201,9 +199,8 @@ class PrefixCacheTest(unittest.TestCase):
                 return super().__contains__(digest)
 
         cache._entries = CountingEntries(cache._entries)
-        candidates, cached = cache.candidates(seq, 8128, 8192)
+        candidates = cache.candidates(seq, 8128, 8192)
         self.assertEqual([position for position, _ in candidates], [8192])
-        self.assertEqual(cached, [])
         self.assertEqual(cache._entries.probes, 1)
 
     def test_publish_probes_resident_ancestors_not_every_historical_page(self):
@@ -227,7 +224,7 @@ class PrefixCacheTest(unittest.TestCase):
         self.assertEqual(cache.find(seq, 8192).num_tokens, 8192)
         self.assertLessEqual(cache._entries.probes, 8)
 
-    def test_cached_checkpoints_include_ancestors_and_exclude_other_branches(self):
+    def test_candidate_probe_skips_resident_ancestors_and_sibling_paths(self):
         manager = make_cache_manager(num_blocks=16, block_size=16, max_prefix_entries=4)
         seq = Sequence(list(range(257)))
         manager.block_manager.ensure_capacity(seq, 192)
@@ -237,13 +234,11 @@ class PrefixCacheTest(unittest.TestCase):
             (GDNStateSnapshot(64, ()), GDNStateSnapshot(192, ())),
         )
 
-        candidates, cached = cache.candidates(seq, 128, 256)
-        self.assertEqual(cached, [64, 192])
+        candidates = cache.candidates(seq, 128, 256)
         self.assertEqual([position for position, _ in candidates], [256])
 
         diverged = Sequence(seq.token_ids[:80] + [999] + seq.token_ids[81:])
-        candidates, cached = cache.candidates(diverged, 128, 256)
-        self.assertEqual(cached, [64])
+        candidates = cache.candidates(diverged, 128, 256)
         self.assertEqual([position for position, _ in candidates], [192, 256])
 
     def test_longest_exact_prefix_and_max_tokens_cap(self):
@@ -338,7 +333,7 @@ class PrefixCacheTest(unittest.TestCase):
     def test_global_one_entry_captures_only_deepest_checkpoint(self):
         manager = make_cache_manager(num_blocks=20, block_size=16, max_prefix_entries=1)
         seq = Sequence(list(range(256)))
-        candidates, cached = manager.prefix_cache.candidates(seq, 0, 256)
+        candidates = manager.prefix_cache.candidates(seq, 0, 256)
         self.assertEqual(
             [position for position, _ in manager.prefix_cache.select_checkpoints(candidates)],
             [256],
@@ -348,7 +343,7 @@ class PrefixCacheTest(unittest.TestCase):
         seq = Sequence(list(range(1024)) + [9])
         manager.block_manager.ensure_capacity(seq, 1024)
         publish_snapshot(manager, seq, 512)
-        candidates, cached = manager.prefix_cache.candidates(seq, 512, 1024)
+        candidates = manager.prefix_cache.candidates(seq, 512, 1024)
         self.assertEqual(
             [p for p, _ in manager.prefix_cache.select_checkpoints(candidates)],
             [1024],
@@ -362,7 +357,7 @@ class PrefixCacheTest(unittest.TestCase):
         shorter.block_manager.ensure_capacity(original, 128)
         publish_snapshot(shorter, original, 128)
         other = Sequence(list(range(1, 193)) + [9])
-        candidates, cached = shorter.prefix_cache.candidates(other, 0, 192)
+        candidates = shorter.prefix_cache.candidates(other, 0, 192)
         self.assertEqual(
             [p for p, _ in shorter.prefix_cache.select_checkpoints(candidates)],
             [192],
@@ -380,7 +375,7 @@ class PrefixCacheTest(unittest.TestCase):
         manager.block_manager.ensure_capacity(seq, 192)
         cache = manager.prefix_cache
         cache.publish_many(seq, (GDNStateSnapshot(64, ()), GDNStateSnapshot(128, ())))
-        candidates, cached = cache.candidates(seq, 128, 192)
+        candidates = cache.candidates(seq, 128, 192)
         self.assertEqual(
             [p for p, _ in cache.select_checkpoints(candidates)],
             [192],
@@ -462,7 +457,7 @@ class PrefixCacheTest(unittest.TestCase):
         self.assertEqual(len(manager.prefix_cache), 0)
         self.assertEqual(manager.prefix_cache.snapshot_bytes, 0)
         self.assertEqual(manager.block_manager.block_refcounts[block_id], 1)
-        self.assertFalse(manager.prefix_cache.candidates(seq, 0, 4)[0])
+        self.assertFalse(manager.prefix_cache.candidates(seq, 0, 4))
 
     def test_prefix_cache_only_caches_text_before_image_span(self):
         manager = make_cache_manager(num_blocks=32, block_size=4, max_prefix_entries=4)
@@ -472,7 +467,7 @@ class PrefixCacheTest(unittest.TestCase):
         manager.block_manager.ensure_capacity(seq, 72)
 
         self.assertEqual(
-            [position for position, _ in manager.prefix_cache.candidates(seq, 0, 80)[0]],
+            [position for position, _ in manager.prefix_cache.candidates(seq, 0, 80)],
             [64],
         )
         self.assertEqual(len(manager.prefix_cache), 0)
@@ -544,7 +539,7 @@ class PrefixCacheTest(unittest.TestCase):
     def test_select_deepest_checkpoint(self):
         manager = make_cache_manager(num_blocks=24, block_size=16, max_prefix_entries=4)
         seq = Sequence(list(range(128)))
-        candidates, _ = manager.prefix_cache.candidates(seq, 0, 128)
+        candidates = manager.prefix_cache.candidates(seq, 0, 128)
         selected = manager.prefix_cache.select_checkpoints(candidates)
         self.assertEqual([position for position, _ in selected], [128])
 

@@ -84,34 +84,21 @@ class PrefixCache:
             and (self.max_snapshot_bytes is None or self.snapshot_nbytes <= self.max_snapshot_bytes)
         )
 
-    def candidates(
-        self, seq: Sequence, start: int, end: int
-    ) -> tuple[list[tuple[int, bytes]], list[int]]:
-        """Find new and cached 64-token boundaries in one block-hash pass."""
+    def candidates(self, seq: Sequence, start: int, end: int) -> list[tuple[int, bytes]]:
+        """Probe new aligned boundaries; resident length lookups belong to find()."""
         if not self._can_capture():
-            return [], []
+            return []
         end = min(end, seq.num_prompt_tokens)
         if seq.image_state is not None:
             end = min(end, seq.image_state.image_start)
-        candidates = []
         hashes, _ = _sequence_block_hashes(seq, self.block_size, end)
-        # A joint GDN/KV checkpoint must align to both the 64-token state grid
-        # and the KV page boundary. Revisit resident entries (bounded by
-        # max_entries) instead of rescanning every old checkpoint each chunk.
         step = lcm(GDN_CHECKPOINT_INTERVAL, self.block_size)
-        cached = []
-        for position in self._resident_lengths[: bisect_right(self._resident_lengths, end)]:
-            if position % step:
-                continue
-            digest = hashes[position // self.block_size - 1]
-            if digest in self._entries:
-                cached.append(position)
         first_new = (start // step + 1) * step
-        for position in range(first_new, end + 1, step):
-            digest = hashes[position // self.block_size - 1]
-            if digest not in self._entries:
-                candidates.append((position, digest))
-        return candidates, cached
+        return [
+            (position, hashes[position // self.block_size - 1])
+            for position in range(first_new, end + 1, step)
+            if hashes[position // self.block_size - 1] not in self._entries
+        ]
 
     def _capacity(self) -> int:
         """Effective global capacity across entry count and CPU snapshot bytes."""

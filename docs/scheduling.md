@@ -122,9 +122,9 @@ check result count
 
 例如 KV 块容量为 16、130-token Prompt 且启用 Prefix Cache：64 和 128 是有效候选边界。Prefill 可在一次 `[0,130)` 调用中捕获最深的一个可复用 GDN Checkpoint（128）；20-token Prompt 不产生 Checkpoint。合法联合边界的步长是 `lcm(64, kv_cache_block_size)`；在当前支持的 16/32/64-token KV 页配置下，联合快照都只能发布在 64、128、192 等 64-token 边界。
 
-**Checkpoint 边界选择：** 每轮最多捕获一个最深的可复用联合边界。调度首先根据 Token Budget 规划执行范围；若将 Chunk 末端截断至合法边界只损失 8 个以内的 Token，可以小幅截断，再检查 KV 容量。容量不足时仅对缩短后的实际执行范围重新规划。
+**Checkpoint 边界选择：** 每轮最多捕获一个最深的可复用联合边界。调度首先根据 Token Budget 规划执行范围；起点已对齐时若截断到合法边界只损失 8 个以内的 Token，可以小幅截断。对起点失准的短 Chunk（最多两个网格宽度），在首个联合网格及之后每四个网格允许固定节奏的恢复；不依赖历史 Checkpoint 状态。容量不足时仅对缩短后的实际执行范围重新规划。
 
-Chunk 起点已对齐时，可捕获 FlashInfer 内部 Checkpoint；起点失准时，只允许在终点正好对齐的情况下捕获最终 Live State。当前不为 Off-grid 强制发起 1-token Forward，因此长期失准的固定预算可能降低前缀缓存命中深度。完整 Prompt 不额外拆分。
+Chunk 起点已对齐时，可捕获 FlashInfer 内部 Checkpoint；起点失准时，只允许在终点正好对齐的情况下捕获最终 Live State。稀疏恢复可能产生极短 Forward，但避免每个 64-token 边界都触发。完整 Prompt 不额外拆分。
 
 缓存节点被真实请求复用时会按请求计入活跃复用引用；请求结束时由 `HybridCacheManager.release()` 解除标记，避免曾命中过的中间节点永久享有裁剪优先权。缓存条目即使在请求运行期间被淘汰，KV Block 仍由独立的物理引用计数保障安全。
 

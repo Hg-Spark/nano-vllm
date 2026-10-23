@@ -203,7 +203,7 @@ class SchedulerCoreTest(unittest.TestCase):
         self.assertEqual(scheduled.prefill_chunks[0].checkpoint_positions, (64,))
         self.assertEqual(scheduled.prefill_chunks[0].checkpoint_interval, 64)
 
-    def test_off_grid_prefill_preserves_budget_without_tiny_forwards(self):
+    def test_off_grid_prefill_uses_sparse_deterministic_recovery(self):
         scheduler = make_scheduler(
             max_num_batched_tokens=64,
             max_num_seqs=2,
@@ -236,10 +236,10 @@ class SchedulerCoreTest(unittest.TestCase):
             }
             scheduler.postprocess(batch.prefill_chunks, [None], True, snapshots)
 
-        # Off-grid chunks avoid mandatory one-token checkpoint recovery.
-        self.assertEqual(ends, [63, 126, 189, 252, 315, 378, 441, 504])
-        self.assertEqual(captured, [])
-        self.assertEqual(seq.committed_tokens, 504)
+        # A fixed grid captures early and sparse deep checkpoints without path history.
+        self.assertEqual(ends, [63, 64, 127, 190, 253, 256, 319, 382])
+        self.assertEqual(captured, [64, 256])
+        self.assertEqual(seq.committed_tokens, 382)
 
     def test_off_grid_terminal_chunk_never_splits_for_checkpoint(self):
         scheduler = make_scheduler(
