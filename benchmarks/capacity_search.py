@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model")
-    parser.add_argument("--dtype", choices=("float16", "bfloat16"), required=True)
+    parser.add_argument("--dtype", choices=("bfloat16",), required=True)
     parser.add_argument("--kv-cache-dtype", choices=("auto", "fp8_e4m3"), default="auto")
     parser.add_argument("--max-batch", type=int, default=32)
     parser.add_argument("--budget", type=int, default=512)

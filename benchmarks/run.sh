@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 PYTHON="${PYTHON:-python3}"
 : "${NANOVLLM_MODEL:?export NANOVLLM_MODEL=/path/to/model}"
-: "${NANOVLLM_DTYPE:?export NANOVLLM_DTYPE=float16 or bfloat16}"
+: "${NANOVLLM_DTYPE:?export NANOVLLM_DTYPE=bfloat16}"
 MODE="${1:-smoke}"
 if (( $# > 1 )); then
   echo "Usage: bash benchmarks/run.sh [smoke|full|tail]" >&2

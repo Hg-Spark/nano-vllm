@@ -102,6 +102,46 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         self.assertEqual(cached, [])
         self.assertEqual(len(seq.prefix_block_hashes), 3)
 
+    def test_candidate_scan_only_probes_new_boundaries(self):
+        manager = BlockManager(num_blocks=8, block_size=16, max_prefix_entries=4)
+        seq = Sequence(list(range(8193)))
+        cache = manager.prefix_cache
+        cache.find(seq, max_tokens=8192)  # Warm the block hashes.
+
+        class CountingEntries(dict):
+            def __init__(self, entries):
+                super().__init__(entries)
+                self.probes = 0
+
+            def __contains__(self, digest):
+                self.probes += 1
+                return super().__contains__(digest)
+
+        cache._entries = CountingEntries(cache._entries)
+        candidates, cached = cache.candidates(seq, 8128, 8192)
+        self.assertEqual([position for position, _ in candidates], [8192])
+        self.assertEqual(cached, [])
+        self.assertEqual(cache._entries.probes, 1)
+
+    def test_cached_checkpoints_include_ancestors_and_exclude_other_branches(self):
+        manager = BlockManager(num_blocks=16, block_size=16, max_prefix_entries=4)
+        seq = Sequence(list(range(257)))
+        manager.ensure_capacity(seq, 192)
+        cache = manager.prefix_cache
+        cache.publish_many(
+            seq,
+            (GDNStateSnapshot(64, ()), GDNStateSnapshot(192, ())),
+        )
+
+        candidates, cached = cache.candidates(seq, 128, 256)
+        self.assertEqual(cached, [64, 192])
+        self.assertEqual([position for position, _ in candidates], [256])
+
+        diverged = Sequence(seq.token_ids[:80] + [999] + seq.token_ids[81:])
+        candidates, cached = cache.candidates(diverged, 128, 256)
+        self.assertEqual(cached, [64])
+        self.assertEqual([position for position, _ in candidates], [192, 256])
+
     def test_longest_exact_prefix_and_max_tokens_cap(self):
         manager = BlockManager(num_blocks=8, block_size=4, max_prefix_entries=4)
         publish_prefix(manager, [1, 2, 3, 4, 9], 4)
@@ -266,12 +306,45 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         cache = manager.prefix_cache
         newcomer = Sequence([1] * 64 + [2])
         hit = cache.find(newcomer, max_tokens=64)
-        self.assertEqual(cache._reused, set())
+        self.assertEqual(cache._active_reuses, {})
         manager.attach_shared_prefix(newcomer, hit.block_ids, hit.num_tokens)
         cache.mark_reused(newcomer, hit)
-        self.assertEqual(len(cache._reused), 1)
+        self.assertEqual(sum(cache._active_reuses.values()), 1)
         manager.deallocate(original)
         manager.deallocate(newcomer)
+        self.assertEqual(cache._active_reuses, {})
+        self.assertEqual(cache._seq_reuses, {})
+
+    def test_reuse_reference_counts_and_eviction_survives_live_requests(self):
+        manager = BlockManager(num_blocks=16, block_size=16, max_prefix_entries=4)
+        original, _ = publish_prefix(manager, [1] * 65, 64)
+        cache = manager.prefix_cache
+        entry = cache.find(original, max_tokens=64)
+        consumers = [Sequence([1] * 64 + [token]) for token in (2, 3)]
+        for seq in consumers:
+            manager.attach_shared_prefix(seq, entry.block_ids, entry.num_tokens)
+            cache.mark_reused(seq, entry)
+        digest = entry.block_hashes[-1]
+        self.assertEqual(cache._active_reuses[digest], 2)
+
+        manager.deallocate(consumers[0])
+        self.assertEqual(cache._active_reuses[digest], 1)
+        # Eviction releases only the cache owner; live request KV refs remain valid.
+        self.assertTrue(cache.evict())
+        self.assertNotIn(digest, cache._entries)
+        self.assertEqual(cache._active_reuses[digest], 1)
+        manager.deallocate(consumers[1])
+        self.assertEqual(cache._active_reuses, {})
+        self.assertEqual(cache._seq_reuses, {})
+        manager.deallocate(original)
+        self.assertEqual(len(manager.free_block_ids), manager.num_blocks)
+
+    def test_unmark_reused_is_idempotent(self):
+        manager = BlockManager(num_blocks=8, block_size=16, max_prefix_entries=2)
+        seq = Sequence([1] * 65)
+        manager.deallocate(seq)
+        manager.deallocate(seq)
+        self.assertEqual(manager.prefix_cache._active_reuses, {})
 
     def test_zero_snapshot_budget_skips_publication(self):
         manager = BlockManager(

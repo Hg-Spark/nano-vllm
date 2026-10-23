@@ -89,6 +89,7 @@ class BlockManager:
         seq.block_table.extend(self._allocate_block() for _ in range(missing))
 
     def deallocate(self, seq: Sequence) -> None:
+        self.prefix_cache.unmark_reused(seq)
         if seq.block_table:
             self.release_blocks(seq.block_table)
             seq.block_table.clear()
