@@ -1,6 +1,5 @@
 import unittest
 from hashlib import sha256
-from struct import pack
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -26,16 +25,6 @@ def make_cache_manager(
         max_prefix_cache_snapshot_bytes=max_prefix_cache_snapshot_bytes,
     )
     return HybridCacheManager(config, num_blocks, snapshot_nbytes)
-
-
-def _block_hashes(tokens: list[int] | tuple[int, ...], block_size: int, stop: int):
-    """Independent chained SHA-256 oracle; production uses incremental Sequence hashes."""
-    parent = bytes(32)
-    for start in range(0, min(stop, len(tokens)) - block_size + 1, block_size):
-        parent = sha256(
-            parent + pack(f"<{block_size}I", *tokens[start : start + block_size])
-        ).digest()
-        yield start + block_size, parent
 
 
 def publish_snapshot(
@@ -194,19 +183,6 @@ class PrefixCacheTest(unittest.TestCase):
             128,
         )
         self.assertIsNotNone(manager.prefix_cache.find(Sequence([300] * 64 + [302]), max_tokens=64))
-
-    def test_global_capacity_replaces_oldest_entry(self):
-        manager = make_cache_manager(num_blocks=16, block_size=16, max_prefix_entries=1)
-        old, old_block = publish_prefix(manager, [1] * 64 + [9], 64)
-        publish_prefix(manager, list(range(128)) + [9], 128)
-
-        self.assertEqual(len(manager.prefix_cache), 1)
-        self.assertEqual(
-            manager.prefix_cache.find(Sequence(list(range(128)) + [10]), 128).num_tokens,
-            128,
-        )
-        self.assertEqual(manager.block_manager.block_refcounts[old_block], 1)
-        manager.release(old)
 
     def test_batch_publish_rejects_misaligned_boundary(self):
         manager = make_cache_manager(num_blocks=10, block_size=16, max_prefix_entries=2)

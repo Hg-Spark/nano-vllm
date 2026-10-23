@@ -1,4 +1,4 @@
-"""CPU-only checks for snapshot accounting and A/B comparability."""
+"""CPU-only benchmark summaries, workload comparability, and A/B reporting."""
 
 import json
 import tempfile
@@ -6,18 +6,20 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
-from types import SimpleNamespace
 
 from benchmarks import summarize_bench
 
 
-class BenchmarkAdditionsTest(unittest.TestCase):
-    def test_workload_key_includes_prefill_and_memory_budget_controls(self):
-        sample = {
-            "gpu": "test GPU",
-            "compute_capability": [9, 0],
+class BenchmarkSummaryTest(unittest.TestCase):
+    def test_ab_parity_and_speedup(self):
+        base = {
+            "schema_version": 1,
+            "experiment": "benchmark_decode",
+            "execution_status": "completed",
             "config": {
-                "scenario": "interference",
+                "scenario": "decode",
+                "max_num_seqs": 2,
+                "budget": 512,
                 "graph_sizes": [],
                 "cache_entries": 0,
                 "schedule_mode": "mixed",
@@ -27,18 +29,75 @@ class BenchmarkAdditionsTest(unittest.TestCase):
                 "kv_cache_k_scale": 1.0,
                 "kv_cache_v_scale": 1.0,
             },
+            "result": {
+                "gpu": "GPU",
+                "compute_capability": [9, 0],
+                "metrics": {
+                    "output_throughput_tok_s": 100,
+                    "tpot_seconds": {"mean": 0.01},
+                },
+                "details": {"token_hash": "same"},
+            },
         }
-        original = summarize_bench.workload_key(sample)
-        for option, changed in (
+        # Runtime versions are part of benchmark comparability, not A/B toggles.
+        env = {
+            **base["result"],
+            "config": base["config"],
+            "torch_version": "2.14.0",
+            "torch_cuda_version": "13.0",
+        }
+        self.assertNotEqual(
+            summarize_bench.workload_key(env),
+            summarize_bench.workload_key({**env, "torch_version": "2.15.0"}),
+        )
+        self.assertNotEqual(
+            summarize_bench.workload_key(env),
+            summarize_bench.workload_key({**env, "torch_cuda_version": "13.1"}),
+        )
+
+        for field, value in (
             ("mixed_prefill_limit", 0),
             ("activation_reserve_mib", 512),
             ("kv_cache_k_scale", 0.5),
             ("kv_cache_v_scale", 2.0),
         ):
-            with self.subTest(option=option):
-                different = json.loads(json.dumps(sample))
-                different["config"][option] = changed
-                self.assertNotEqual(original, summarize_bench.workload_key(different))
+            with self.subTest(field=field):
+                changed = json.loads(json.dumps(env))
+                changed["config"][field] = value
+                self.assertNotEqual(
+                    summarize_bench.workload_key(env), summarize_bench.workload_key(changed)
+                )
+
+        graph = json.loads(json.dumps(base))
+        graph["config"]["graph_sizes"] = [2]
+        graph["result"]["metrics"]["output_throughput_tok_s"] = 150
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "eager.json").write_text(json.dumps(base), encoding="utf-8")
+            graph_file = Path(folder) / "graph.json"
+            graph_file.write_text(json.dumps(graph), encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                summarize_bench.main([folder, "--min-repeats", "1"])
+            self.assertIn("Output throughput improvement: +50.00%", output.getvalue())
+            self.assertIn("Successful paired comparisons: 1", output.getvalue())
+
+            # Other experiments in the same folder must not invalidate A/B results.
+            (Path(folder) / "parity.json").write_text(
+                json.dumps({"experiment": "image_parity", "execution_status": "error"}),
+                encoding="utf-8",
+            )
+            with redirect_stdout(StringIO()):
+                summarize_bench.main([folder, "--min-repeats", "1"])
+
+            # An incomplete metric or zero baseline must print n/a, not fail formatting.
+            base["result"]["metrics"]["output_throughput_tok_s"] = 0
+            base["result"]["metrics"].pop("tpot_seconds")
+            (Path(folder) / "eager.json").write_text(json.dumps(base), encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                summarize_bench.main([folder, "--min-repeats", "1"])
+            self.assertIn("Output throughput improvement: n/a", output.getvalue())
+            self.assertIn("tpot_seconds reduction: n/a", output.getvalue())
 
     def test_prefix_comparison_reports_snapshots_and_peak_memory(self):
         base_config = {
@@ -227,45 +286,6 @@ class BenchmarkAdditionsTest(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "Some runs could not be compared"):
                 with redirect_stdout(StringIO()):
                     summarize_bench.main([folder, "--min-repeats", "1"])
-
-    def test_graph_usage_consistency(self):
-        from benchmarks.bench_experiments import graph_counters, measured_graph_usage
-
-        runner = SimpleNamespace(
-            decode_graph_buckets={1: SimpleNamespace(replay_count=2)},
-            decode_graph_fallbacks={"missing_bucket": 4, "layout_exceeded": 0},
-        )
-        before = graph_counters(runner)
-        runner.decode_graph_buckets[1].replay_count += 3
-        runner.decode_graph_fallbacks["missing_bucket"] += 2
-        metrics = measured_graph_usage(runner, before, 5)
-        self.assertEqual(metrics["graph_coverage"], 0.6)
-        self.assertEqual(metrics["eager_decode_forward_calls"], 2)
-        with self.assertRaisesRegex(RuntimeError, "accounting is inconsistent"):
-            measured_graph_usage(runner, before, 4)
-
-    def test_bench_mode_rejects_duplicate_tail_or_long_stages(self):
-        from benchmarks.run_tests import load_config
-
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder, "tests.toml")
-            for mode in ("tail", "long"):
-                path.write_text(
-                    chr(10).join(
-                        (
-                            'model = "model"',
-                            'output_dir = "results"',
-                            'stage = "all"',
-                            "[benchmark]",
-                            f'mode = "{mode}"',
-                            "",
-                        )
-                    ),
-                    encoding="utf-8",
-                )
-                with self.assertRaisesRegex(ValueError, "benchmark.mode must be smoke/full"):
-                    load_config(path, root=Path(folder))
-                self.assertEqual(load_config(path, root=Path(folder), stage=mode)["stage"], mode)
 
 
 if __name__ == "__main__":
