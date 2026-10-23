@@ -28,7 +28,7 @@ class LogitsSelectionTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "require ModelRunner token_indices"):
                 Qwen3_5ForCausalLM.compute_logits(FakeHead(), hidden)
 
-    def test_sampler_accepts_staged_positions_without_allocating_indices(self):
+    def test_mixed_sampler_keeps_greedy_rows_and_uses_tensor_positions(self):
         sampler = Sampler()
         logits = torch.tensor([[9.0, 0.0], [8.0, 1.0], [1.0, 9.0]])
         temperatures = torch.ones(3, dtype=torch.float32)

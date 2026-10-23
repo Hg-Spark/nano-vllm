@@ -35,7 +35,7 @@
 ## 获取代码并安装
 
 ```bash
-git clone --branch qwen3.5 --single-branch https://github.com/Hg-Spark/nano-vllm.git
+git clone --branch hybrid-runtime --single-branch https://github.com/Hg-Spark/nano-vllm.git
 cd nano-vllm
 
 python -m pip install -e ".[dev]"

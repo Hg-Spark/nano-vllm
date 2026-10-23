@@ -203,16 +203,12 @@ class ModelRunnerTest(unittest.TestCase):
         runner.decode_graph_buckets = {}
         runner.decode_graph_fallbacks = {"missing_bucket": 0, "layout_exceeded": 0}
         chunks = (object(),)
-        self.assertIsNone(runner._run_decode_graph(chunks, []))
+        self.assertIsNone(runner._run_decode_graph(chunks, [], layout=None))
         self.assertEqual(runner.decode_graph_fallbacks["missing_bucket"], 1)
 
         runner.decode_graph_buckets = {1: SimpleNamespace(can_run=lambda _: False)}
-        with patch("nanovllm.engine.model_runner.build_decode_batch_layout", return_value=object()):
-            self.assertIsNone(runner._run_decode_graph(chunks, []))
+        self.assertIsNone(runner._run_decode_graph(chunks, [], layout=object()))
         self.assertEqual(runner.decode_graph_fallbacks["layout_exceeded"], 1)
-        with patch("nanovllm.engine.model_runner.build_decode_batch_layout") as builder:
-            self.assertIsNone(runner._run_decode_graph(chunks, [], layout=object()))
-            builder.assert_not_called()
 
     def test_all_greedy_batch_avoids_temperature_upload(self):
         runner = object.__new__(ModelRunner)

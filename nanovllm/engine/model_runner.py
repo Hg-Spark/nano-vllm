@@ -5,6 +5,7 @@ from torch.profiler import record_function
 
 from nanovllm.config import Config
 from nanovllm.engine.batch_common import (
+    DecodeBatchLayout,
     DecodePageTableCache,
     PinnedMetadataPool,
     build_decode_batch_layout,
@@ -202,16 +203,14 @@ class ModelRunner:
         self,
         chunks: tuple[ScheduledChunk, ...],
         seqs: list[Sequence],
-        layout=None,
+        layout: DecodeBatchLayout | None,
     ) -> BatchResult | None:
         bucket = self.decode_graph_buckets.get(len(chunks))
         if bucket is None:
             self.decode_graph_fallbacks["missing_bucket"] += 1
             return None
         if layout is None:
-            layout = build_decode_batch_layout(
-                chunks, self.block_size, getattr(self, "decode_page_table_cache", None)
-            )
+            raise RuntimeError("a configured Decode Graph bucket requires a prepared layout")
         if not bucket.can_run(layout):
             self.decode_graph_fallbacks["layout_exceeded"] += 1
             return None
