@@ -139,7 +139,15 @@ def main(argv=None):
     print(
         "scenario            batch budget cap  graph       cache mode                    runs tok/s  TPOT_ms TTFT_ms  hits replays"
     )
-    for (w, v), runs in sorted(grouped.items(), key=lambda item: str(item[0])):
+    for (w, v), runs in sorted(
+        grouped.items(),
+        key=lambda item: (
+            item[1][0]["config"]["scenario"],
+            item[1][0]["config"]["max_num_seqs"],
+            item[1][0]["config"]["budget"],
+            str(item[0]),
+        ),
+    ):
         p = runs[0]["config"]
         hit = median(r["details"].get("prefix_hit_rate", 0) for r in runs)
         replay = median(r["metrics"].get("graph_replays", 0) for r in runs)

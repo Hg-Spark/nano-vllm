@@ -66,6 +66,7 @@ class Sequence:
         if self.image_state is not None:
             self.image_state.visual_features = None
             self.image_state.pixel_values = None
+            self.image_state.image_grid_thw = None
 
     def append_token(self, token_id: int) -> None:
         self.token_ids.append(token_id)

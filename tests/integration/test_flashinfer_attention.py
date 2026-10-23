@@ -14,7 +14,7 @@ from nanovllm.engine.decode_graph import DecodeGraphBucket
 from nanovllm.engine.model_runner import ModelRunner
 from nanovllm.engine.schedule import ScheduledChunk
 from nanovllm.engine.sequence import Sequence
-from nanovllm.layers.attention import Attention, store_kv_cache
+from nanovllm.layers.attention import Attention, plan_flashinfer_attention, store_kv_cache
 from nanovllm.utils.context import Context, use_context
 
 
@@ -69,7 +69,14 @@ class FlashInferPagedAttentionIntegrationTest(unittest.TestCase):
         )
         try:
             prefill = prepare_prefill((ScheduledChunk(seq, 0, 4),), 16, runner.metadata_pool)
-            prefill_ctx = runner._plan_attention(prefill)
+            prefill_ctx = plan_flashinfer_attention(
+                prefill,
+                runner.metadata_pool,
+                runner.prefill_wrapper,
+                runner.decode_wrapper,
+                runner.attention_spec,
+                runner.block_size,
+            )
             self.assertIs(prefill_ctx.paged_kv_indptr, runner.prefill_wrapper._paged_kv_indptr_buf)
             self.assertIs(
                 prefill_ctx.paged_kv_last_page_len,
@@ -87,7 +94,14 @@ class FlashInferPagedAttentionIntegrationTest(unittest.TestCase):
                 runner.metadata_pool,
                 DecodePageTableCache(),
             )
-            decode_ctx = runner._plan_attention(decode)
+            decode_ctx = plan_flashinfer_attention(
+                decode,
+                runner.metadata_pool,
+                runner.prefill_wrapper,
+                runner.decode_wrapper,
+                runner.attention_spec,
+                runner.block_size,
+            )
             self.assertIs(decode_ctx.paged_kv_indptr, runner.decode_wrapper._paged_kv_indptr_buf)
             self.assertIs(
                 decode_ctx.paged_kv_last_page_len,

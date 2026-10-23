@@ -148,7 +148,7 @@ finally:
 | `max_model_len` | `4096` | 单请求实际前向处理的 Token 上限（输入 + 最多生成 Token 数 - 1），还会被模型位置上限截断 |
 | `gpu_memory_utilization` | `0.8` | KV 容量估算使用的显存预算比例，范围 `(0,1]`；不是权重加载的硬上限 |
 | `activation_reserve_bytes` | `268435456` | 在静态 KV 定容前额外预留 256 MiB 临时激活余量；可按 GPU 峰值 Profile 调整 |
-| `kv_cache_block_size` | `16` | FlashInfer page size；当前允许 `16/32/64/128`，基线使用 16 |
+| `kv_cache_block_size` | `16` | FlashInfer page size；当前允许 `16/32/64`，基线使用 16；128-token KV 页不再支持 |
 | `max_prefix_cache_entries` | `0` | 联合前缀缓存默认关闭；设为正数后限制缓存条目数，不影响请求自身的 KV/GDN 状态 |
 | `max_prefix_cache_snapshot_bytes` | `None` | CPU GDN 快照字节上限；`0` 禁止发布快照 |
 | `max_visual_tokens_per_request` | `0` | 显式限制单请求图像视觉 Token 数；准入时检查，并按上限预留特征缓存。`None` 使用 `max_model_len`，`0` 禁用图像请求 |

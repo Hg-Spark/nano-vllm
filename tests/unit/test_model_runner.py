@@ -244,6 +244,7 @@ class ModelRunnerTest(unittest.TestCase):
         self.assertEqual(features.dtype, torch.float16)
         self.assertIs(features, state.visual_features)
         self.assertIsNone(state.pixel_values)
+        self.assertIsNone(state.image_grid_thw)
 
     def test_model_runner_exit_releases_gpu_owners(self):
         runner = object.__new__(ModelRunner)

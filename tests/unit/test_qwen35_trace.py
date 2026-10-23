@@ -1,9 +1,13 @@
 """CPU-only checks for the Qwen3.5 teacher-forced parity reporter."""
 
+import unittest
 from types import SimpleNamespace
 
-import torch
-from torch import nn
+try:
+    import torch
+    from torch import nn
+except ImportError as exc:
+    raise unittest.SkipTest("PyTorch is not installed") from exc
 
 from scripts.trace_qwen3_5 import _hf_states, _LayerCapture, _metric, compare_traces
 

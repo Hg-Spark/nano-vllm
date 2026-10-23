@@ -66,10 +66,10 @@ class BenchmarkAdditionsTest(unittest.TestCase):
             SimpleNamespace(start=127, end=128, checkpoint_positions=(128,)),
             SimpleNamespace(start=128, end=255, checkpoint_positions=()),
         )
-        stats = checkpoint_schedule_stats(chunks, block_size=128)
+        stats = checkpoint_schedule_stats(chunks, block_size=64)
         self.assertEqual(stats["checkpoint_positions"], 2)
         self.assertEqual(stats["offgrid_prefill_chunks"], 2)
-        self.assertEqual(stats["offgrid_realignments"], 1)
+        self.assertEqual(stats["offgrid_realignments"], 2)
 
     def test_workload_key_includes_prefill_and_memory_budget_controls(self):
         sample = {

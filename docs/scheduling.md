@@ -120,7 +120,7 @@ check result count
 - 边界同时是完整 KV 块边界；
 - 该精确 token 前缀尚未存在。
 
-例如 KV 块容量为 16、130-token Prompt 且启用 Prefix Cache：64 和 128 是有效候选边界。Prefill 可在一次 `[0,130)` 调用中捕获两个 GDN Checkpoint；20-token Prompt 不产生 Checkpoint。合法联合边界的步长是 `lcm(64, kv_cache_block_size)`，因此 128-token KV 页只能在 128、256、384 等边界发布快照。
+例如 KV 块容量为 16、130-token Prompt 且启用 Prefix Cache：64 和 128 是有效候选边界。Prefill 可在一次 `[0,130)` 调用中捕获两个 GDN Checkpoint；20-token Prompt 不产生 Checkpoint。合法联合边界的步长是 `lcm(64, kv_cache_block_size)`；在当前支持的 16/32/64-token KV 页配置下，联合快照都只能发布在 64、128、192 等 64-token 边界。
 
 **自适应 Chunk 对齐与恢复：** `HybridCacheManager.plan_prefill_checkpoints()` 先过滤同批次已经计划的重复前缀，再通过 `select_checkpoints()` 筛出值得保存的候选位置。通常只有 Chunk 未覆盖完整 Prompt、且舍弃预算不超过 `min(step - 1, scheduled // 4, max(16, scheduled // 8))` Token 时，才截断到有效边界；不再单独设置 16-token 的最短 Chunk 阈值。若 Chunk 起点已经失准且存在可发布的 Checkpoint，调度器会主动恢复到最深的候选联合边界，即使需要超过常规的截断预算。首次无缓存 Checkpoint 时可立即恢复；已有 Checkpoint 后，只有距离上一个缓存边界至少 `step × max_gdn_checkpoints` Token 时才强制恢复，从而避免每个 64-token 边界都出现短 Chunk。预算尚不能到达候选边界时继续正常推进，不会等待或阻塞 Decode。
 

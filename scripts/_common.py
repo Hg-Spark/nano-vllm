@@ -173,6 +173,13 @@ def validate_finite(
         parser.error(f"--{name} must be finite and {relation} {minimum:g}")
 
 
+def validate_gpu_utilization(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    value = args.gpu_memory_utilization
+    validate_finite(parser, value, "gpu-memory-utilization", minimum=0.0, inclusive=False)
+    if value > 1.0:
+        parser.error("--gpu-memory-utilization must not exceed 1")
+
+
 def normalize_paths(args: argparse.Namespace, *names: str) -> argparse.Namespace:
     for name in names:
         value = getattr(args, name, None)

@@ -22,7 +22,7 @@ KV 写入统一调用 FlashInfer `append_paged_kv_cache`；FP8 路径先用 PyTo
 ## 最小运行
 
 ```bash
-git clone --branch qwen3.5 --single-branch https://github.com/Hg-Spark/nano-vllm.git
+git clone --branch hybrid-runtime --single-branch https://github.com/Hg-Spark/nano-vllm.git
 cd nano-vllm
 python -m pip install -e ".[dev]"
 flashinfer download-kernels
@@ -39,7 +39,7 @@ python -m scripts.chat "$NANOVLLM_MODEL"
 - [调度与缓存](docs/scheduling.md)：KV/GDN 状态不变量、额度预留、提交、恢复与前缀缓存。
 - [验证与性能](docs/validation.md)：测试、数值对齐、Benchmark、Profile 和证据边界。
 - [设计取舍](docs/design-decisions.md)：vLLM / SGLang 参考与简化的理由。
-- [路线图](ROADMAP.md) 与 [验证方法](docs/validation.md)。
+- [路线图](ROADMAP.md)。
 
 ## 提交与源码导读
 

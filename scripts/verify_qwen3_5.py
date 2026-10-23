@@ -71,14 +71,17 @@ def run_hf(
     prompt: str,
     max_new_tokens: int,
     hf_experts_backend: str | None = "eager",
+    prompt_ids: list[int] | None = None,
 ) -> tuple[list[int], list]:
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
+    if prompt_ids is None:
+        tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
+        prompt_ids = tokenizer.encode(prompt)
 
     def generate(model):
-        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.cuda()
+        input_ids = torch.tensor([prompt_ids], dtype=torch.long, device="cuda")
         model.generation_config.eos_token_id = None
         with torch.inference_mode(), _capture_last_logits(model) as logits:
             output_ids = model.generate(
@@ -90,11 +93,27 @@ def run_hf(
 
 
 def run_nanovllm(
-    model_path: str, prompt: str, max_new_tokens: int, max_model_len: int, kv_options: dict
+    model_path: str,
+    prompt: str,
+    max_new_tokens: int,
+    max_model_len: int,
+    kv_options: dict,
+    input_len: int | None = None,
 ) -> tuple[list[int], list]:
     from nanovllm import LLM
 
-    llm = LLM(model_path, max_model_len=max_model_len, max_num_seqs=1, **kv_options)
+    if input_len is None:
+        from transformers import AutoTokenizer
+
+        input_len = len(AutoTokenizer.from_pretrained(model_path, use_fast=True).encode(prompt))
+    # Reference HF runs one full prefill; preserve that same mode for Nano parity.
+    llm = LLM(
+        model_path,
+        max_model_len=max_model_len,
+        max_num_seqs=1,
+        max_num_batched_tokens=max(16, input_len),
+        **kv_options,
+    )
     try:
         with _capture_last_logits(llm.model_runner.model) as logits:
             tokens = run_nano_greedy(llm, prompt, max_new_tokens)
@@ -131,7 +150,7 @@ def parse_args(argv=None):
     )
     add_result_argument(parser)
     args = parser.parse_args(argv)
-    validate_positive(parser, args, "max_new_tokens")
+    validate_positive(parser, args, "max_new_tokens", "max_model_len")
     if (args.trace_gdn_states or args.trace_verbose_layers) and not args.trace:
         parser.error("--trace-gdn-states and --trace-verbose-layers require --trace")
     validate_finite(
@@ -141,7 +160,7 @@ def parse_args(argv=None):
         minimum=0.0,
         inclusive=False,
     )
-    if args.max_new_tokens >= args.max_model_len:
+    if args.max_new_tokens > args.max_model_len:
         parser.error("--max-new-tokens must leave room for the prompt")
     return normalize_paths(args, "model", "result_file")
 
@@ -164,16 +183,24 @@ def run(args):
     is_moe = is_qwen3_5_moe(cfg)
     text_cfg = getattr(cfg, "text_config", cfg)
     effective_len = min(args.max_model_len, text_cfg.max_position_embeddings)
-    prompt_len = len(AutoTokenizer.from_pretrained(args.model, use_fast=True).encode(args.prompt))
-    if prompt_len + args.max_new_tokens > effective_len:
+    prompt_ids = AutoTokenizer.from_pretrained(args.model, use_fast=True).encode(args.prompt)
+    prompt_len = len(prompt_ids)
+    if prompt_len + args.max_new_tokens - 1 > effective_len:
         raise ValueError(
             f"prompt ({prompt_len}) + max_new_tokens ({args.max_new_tokens}) "
             f"exceeds effective max_model_len ({effective_len})"
         )
     hf_backend = args.hf_experts_backend if is_moe else None
-    hf_tokens, hf_logits = run_hf(args.model, args.prompt, args.max_new_tokens, hf_backend)
+    hf_tokens, hf_logits = run_hf(
+        args.model, args.prompt, args.max_new_tokens, hf_backend, prompt_ids
+    )
     nano_tokens, nano_logits = run_nanovllm(
-        args.model, args.prompt, args.max_new_tokens, args.max_model_len, kv_cache_kwargs(args)
+        args.model,
+        args.prompt,
+        args.max_new_tokens,
+        args.max_model_len,
+        kv_cache_kwargs(args),
+        prompt_len,
     )
     print(f"HF tokens:   {hf_tokens}\nNano tokens: {nano_tokens}")
     result = require_greedy_parity(hf_tokens, nano_tokens, args.max_new_tokens, hf_backend)

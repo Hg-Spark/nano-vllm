@@ -37,6 +37,8 @@ class Scheduler:
         token_limit = self.max_num_batched_tokens
         if decode_count and self.max_mixed_prefill_tokens is not None:
             token_limit = min(token_limit, decode_count + self.max_mixed_prefill_tokens)
+        if num_batched_tokens >= token_limit:
+            return
         active = (*self.running, *self.prefilling)
         occupied_blocks, reserved_blocks = self.cache_manager.reservation_usage(active)
         active_count = len(self.running) + len(self.prefilling)

@@ -220,6 +220,8 @@ class PinnedMetadataPool:
         # FlashInfer's plan may enqueue additional copies from pinned host metadata.
         import torch
 
+        if self._transfer_done is None:
+            self._transfer_done = torch.cuda.Event()
         self._transfer_done.record(torch.cuda.current_stream())
         self._pending = True
 

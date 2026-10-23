@@ -26,6 +26,7 @@ from scripts._common import (
     kv_cache_stats,
     normalize_paths,
     prepare_fixed_decode_batch,
+    validate_gpu_utilization,
     validate_positive,
 )
 
@@ -39,7 +40,7 @@ def parse_graph_sizes(raw: str) -> tuple[int, ...]:
     return values
 
 
-def arguments():
+def arguments(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     add_model_argument(p)
     add_kv_cache_arguments(p)
@@ -109,22 +110,23 @@ def arguments():
     p.add_argument("--late-after-decode-steps", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", required=True, help="JSON result path; must not exist")
-    a = normalize_paths(p.parse_args(), "model", "out")
+    a = normalize_paths(p.parse_args(argv), "model", "out")
     if not a.model:
         p.error("model path or NANOVLLM_MODEL must be provided")
     a.graph_sizes = parse_graph_sizes(a.graph_sizes)
-    if not 0.0 <= a.min_graph_coverage <= 1.0 or a.min_graph_coverage != a.min_graph_coverage:
+    if not 0.0 <= a.min_graph_coverage <= 1.0:
         p.error("--min-graph-coverage must be between 0 and 1")
     if a.min_graph_coverage and (a.scenario != "throughput" or not a.graph_sizes):
         p.error("--min-graph-coverage requires --scenario throughput and --graph-sizes")
-    validate_positive(p, a, "input_len", "num_requests")
+    validate_positive(p, a, "input_len", "num_requests", "max_num_seqs", "budget", "max_model_len")
+    validate_gpu_utilization(p, a)
     if a.mixed_prefill_limit < -1:
         p.error("--mixed-prefill-limit must be -1 or non-negative")
     if a.activation_reserve_mib < 0:
         p.error("--activation-reserve-mib must be non-negative")
     if a.output_len < 2:
         p.error("output-len must be at least 2")
-    if a.scenario == "throughput" and a.input_len + a.output_len > a.max_model_len:
+    if a.scenario == "throughput" and a.input_len + a.output_len - 1 > a.max_model_len:
         p.error("input-len + output-len exceeds max-model-len")
     if a.expect_evictions and (a.scenario != "prefix" or a.cache_entries < 1):
         p.error("--expect-evictions requires --scenario prefix and --cache-entries > 0")
@@ -137,7 +139,7 @@ def arguments():
             or a.suffix_len < 1
         ):
             p.error("shared-prefix-len must be zero or a multiple of 64; suffix-len >= 1")
-        if a.shared_prefix_len + a.suffix_len + a.output_len > a.max_model_len:
+        if a.shared_prefix_len + a.suffix_len + a.output_len - 1 > a.max_model_len:
             p.error("prefix-len + suffix-len + output-len exceeds max-model-len")
     if a.scenario == "decode":
         if a.warmup_steps < 0 or a.measure_steps < 2:
@@ -149,7 +151,7 @@ def arguments():
     if a.scenario == "interference":
         if a.num_requests >= a.max_num_seqs:
             p.error("reserve one max-num-seqs slot for the injected long request")
-        if a.late_input_len <= a.input_len or a.late_input_len + a.output_len > a.max_model_len:
+        if a.late_input_len <= a.input_len or a.late_input_len + a.output_len - 1 > a.max_model_len:
             p.error("late-input-len must exceed input-len and fit in max-model-len")
         if not 0 < a.late_after_decode_steps < a.output_len:
             p.error("late-after-decode-steps must be between 1 and output-len-1")

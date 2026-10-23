@@ -182,7 +182,7 @@ def parse_args(argv=None):
     add_kv_cache_arguments(parser)
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--max-model-len", type=int, default=4096)
-    parser.add_argument("--prefix-block-size", type=int, choices=(16, 32, 64, 128), default=16)
+    parser.add_argument("--prefix-block-size", type=int, choices=(16, 32, 64), default=16)
     parser.add_argument(
         "--shared-prefix-len",
         type=int,
@@ -197,10 +197,10 @@ def parse_args(argv=None):
     )
     add_result_argument(parser)
     args = parser.parse_args(argv)
-    validate_positive(parser, args, "max_new_tokens")
+    validate_positive(parser, args, "max_new_tokens", "max_model_len")
     if args.shared_prefix_len < 0 or args.prefill_budget < 0:
         parser.error("--shared-prefix-len and --prefill-budget must be non-negative")
-    if args.max_new_tokens >= args.max_model_len:
+    if args.max_new_tokens > args.max_model_len:
         parser.error("--max-new-tokens must leave room for the prefix prompt")
     return normalize_paths(args, "model", "result_file")
 

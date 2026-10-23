@@ -162,6 +162,7 @@ class ModelRunner:
                 dtype=self.model.model.embed_tokens.weight.dtype
             )
             state.pixel_values = None
+            state.image_grid_thw = None
         return state.visual_features
 
     def _sample_logits(
@@ -216,12 +217,15 @@ class ModelRunner:
         seqs = [chunk.seq for chunk in chunks]
         if not is_prefill and any(seq.pending_state_snapshot is not None for seq in seqs):
             raise RuntimeError("pending GDN prefix restore is valid only for prefill")
-        restore_pending_states(self.model, seqs, self.gdn_restore_staging)
-
-        if not is_prefill:
+        if is_prefill:
+            restore_pending_states(self.model, seqs, self.gdn_restore_staging)
+        elif self.decode_graph_buckets:
             graph_result = self._run_decode_graph(chunks, seqs)
             if graph_result is not None:
                 return graph_result
+        else:
+            # Preserve benchmark accounting for deliberately disabled CUDA Graph.
+            self.decode_graph_fallbacks["missing_bucket"] += 1
 
         batch = (
             prepare_prefill(chunks, self.block_size, self.metadata_pool)

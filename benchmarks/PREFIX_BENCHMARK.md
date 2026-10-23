@@ -38,9 +38,10 @@ Full Attention pages and GDN snapshots must be restored at the same boundary, al
 
 ```bash
 python -m scripts.verify_prefix_resume /path/to/model --prefix-block-size 16 --shared-prefix-len 128 --prefill-budget 65 --max-model-len 1024
-python -m scripts.verify_prefix_resume /path/to/model --prefix-block-size 128 --shared-prefix-len 256 --prefill-budget 129 --max-model-len 1024
+python -m scripts.verify_prefix_resume /path/to/model --prefix-block-size 32 --shared-prefix-len 256 --prefill-budget 129 --max-model-len 1024
+python -m scripts.verify_prefix_resume /path/to/model --prefix-block-size 64 --shared-prefix-len 256 --prefill-budget 129 --max-model-len 1024
 ```
 
-Both scripts compare cache-disabled and restored greedy output, verify the exact shared KV block IDs and *same* GDN snapshot at the restoration boundary, and fail if the expected checkpoint is missing. The non-grid prefill budgets are intended to exercise recovery after truncated prefill chunks. Review failures rather than automatically excluding them.
+These probes compare cache-disabled and restored greedy output, verify the exact shared KV block IDs and *same* GDN snapshot at the restoration boundary, and fail if the expected checkpoint is missing. The non-grid prefill budgets are intended to exercise recovery after truncated prefill chunks. Review failures rather than automatically excluding them.
 
 For a manual small preflight run, use `REPEATS=1`; do not publish A/B speedup figures from that run. The `prefix` stage deliberately requires more KV space for the 8K case and can fail on smaller GPU/model combinations.

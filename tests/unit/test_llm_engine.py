@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from nanovllm.engine.llm_engine import LLMEngine
+from nanovllm.engine.llm_engine import LLMEngine, _resolve_eos_token_ids
 from nanovllm.engine.schedule import BatchResult
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
@@ -42,6 +42,10 @@ class DecodeThenFailPrefillRunner:
 
 
 class LLMEngineStepTest(unittest.TestCase):
+    def test_eos_sources_keep_generation_config_authoritative(self):
+        self.assertEqual(_resolve_eos_token_ids([7, 8], 9, [10, 11]), (7, 8))
+        self.assertEqual(_resolve_eos_token_ids(None, 9, [10, 9, 11]), (9, 10, 11))
+
     def test_add_request_returns_id_used_by_scheduler(self):
         engine = make_engine_stub()
         engine.scheduler = make_engine_scheduler()

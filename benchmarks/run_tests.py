@@ -149,7 +149,8 @@ def execute(config, output):
                     # Verify joint KV/GDN restore boundaries before timing cache hits.
                     for block_size, shared, budget in (
                         (16, 128, 65),
-                        (128, 256, 129),
+                        (32, 256, 129),
+                        (64, 256, 129),
                     ):
                         python(
                             f"prefix-resume-b{block_size}",

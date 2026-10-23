@@ -177,12 +177,18 @@ class PrefixCacheTest(unittest.TestCase):
         self.assertEqual(cache._resident_lengths, [])
 
     def test_checkpoint_candidates_align_to_kv_page_and_gdn_grid(self):
-        manager = make_cache_manager(num_blocks=8, block_size=128, max_prefix_entries=4)
-        seq = Sequence(list(range(401)))
-        candidates, cached = manager.prefix_cache.candidates(seq, 0, 400)
-        self.assertEqual([position for position, _ in candidates], [128, 256, 384])
-        self.assertEqual(cached, [])
-        self.assertEqual(len(seq.prefix_block_hashes), 3)
+        for block_size, expected_hashes in ((32, 12), (64, 6)):
+            with self.subTest(block_size=block_size):
+                manager = make_cache_manager(
+                    num_blocks=16, block_size=block_size, max_prefix_entries=4
+                )
+                seq = Sequence(list(range(401)))
+                candidates, cached = manager.prefix_cache.candidates(seq, 0, 400)
+                self.assertEqual(
+                    [position for position, _ in candidates], [64, 128, 192, 256, 320, 384]
+                )
+                self.assertEqual(cached, [])
+                self.assertEqual(len(seq.prefix_block_hashes), expected_hashes)
 
     def test_candidate_scan_only_probes_new_boundaries(self):
         manager = make_cache_manager(num_blocks=8, block_size=16, max_prefix_entries=4)
@@ -498,6 +504,44 @@ class PrefixCacheTest(unittest.TestCase):
             [64],
         )
         self.assertEqual(len(manager.prefix_cache), 0)
+
+
+    def test_publish_rejects_image_region_even_if_called_directly(self):
+        manager = make_cache_manager(num_blocks=32, block_size=16, max_prefix_entries=4)
+        seq = Sequence(list(range(128)))
+        seq.image_state = SimpleNamespace(image_start=64, image_end=96)
+        manager.block_manager.ensure_capacity(seq, 128)
+        cache = manager.prefix_cache
+        with self.assertRaisesRegex(RuntimeError, "invalid GDN snapshot"):
+            cache.publish_many(seq, (GDNStateSnapshot(128, ()),))
+        self.assertEqual(len(cache), 0)
+
+    def test_single_slot_prefers_checkpoint_reusable_by_identical_prompt(self):
+        manager = make_cache_manager(num_blocks=32, block_size=16, max_prefix_entries=1)
+        original = Sequence(list(range(128)))
+        manager.block_manager.ensure_capacity(original, 128)
+        end, positions, _ = manager.plan_prefill_checkpoints(original, 0, 128, set())
+        self.assertEqual(end, 128)
+        self.assertEqual(positions, (64,))
+        manager.prefix_cache.publish_many(original, (GDNStateSnapshot(64, ()),))
+        repeated = Sequence(list(range(128)))
+        self.assertEqual(manager.find_prefix(repeated).num_tokens, 64)
+
+    def test_global_eviction_prefers_unshared_checkpoint(self):
+        manager = make_cache_manager(num_blocks=32, block_size=16, max_prefix_entries=2)
+        first, _ = publish_prefix(manager, [1] * 65, 64)
+        second, _ = publish_prefix(manager, [2] * 65, 64)
+        cache = manager.prefix_cache
+        shared = cache.find(Sequence([1] * 65), max_tokens=64)
+        consumer = Sequence([1] * 64 + [5])
+        manager.block_manager.attach_shared_prefix(consumer, shared.block_ids, shared.num_tokens)
+        cache.mark_reused(consumer, shared)
+        self.assertTrue(cache.evict())
+        self.assertIn(shared.block_hashes[-1], cache._entries)
+        self.assertIsNone(cache.find(Sequence([2] * 65), max_tokens=64))
+        manager.release(first)
+        manager.release(second)
+        manager.release(consumer)
 
     def test_shared_history_reuses_snapshots_and_preserves_shortest(self):
         manager = make_cache_manager(

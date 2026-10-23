@@ -122,7 +122,9 @@ class HybridCacheManager:
             # Intermediate FlashInfer GDN checkpoints require an aligned start.
             # Recover an off-grid chunk at a useful joint boundary, while
             # avoiding tiny chunks at every subsequent checkpoint position.
-            selected = self.prefix_cache.select_checkpoints(candidates, cached)
+            selected = self.prefix_cache.select_checkpoints(
+                candidates, cached, max_reusable_tokens=seq.num_prompt_tokens - 1
+            )
             max_trim = min(
                 step - 1,
                 scheduled // 4,
@@ -155,7 +157,9 @@ class HybridCacheManager:
             # An off-grid chunk can only publish its final live state,
             # and only when that endpoint lies on the joint grid.
             candidates = [pair for pair in candidates if pair[0] == end]
-        candidates = self.prefix_cache.select_checkpoints(candidates, cached)
+        candidates = self.prefix_cache.select_checkpoints(
+            candidates, cached, max_reusable_tokens=seq.num_prompt_tokens - 1
+        )
         positions = tuple(position for position, _ in candidates)
         planned_prefixes.update(digest for _, digest in candidates)
 

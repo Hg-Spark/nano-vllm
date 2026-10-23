@@ -74,14 +74,23 @@ def allocate_runtime_caches(
         config.max_prefix_cache_snapshot_bytes is None
         or config.max_prefix_cache_snapshot_bytes >= snapshot_size
     ):
-        selected_per_seq = min(2, config.max_prefix_cache_entries)
+        selected_per_seq = min(2, config.max_prefix_cache_entries, config.max_gdn_checkpoints)
+        if config.max_prefix_cache_snapshot_bytes is not None and snapshot_size:
+            selected_per_seq = min(
+                selected_per_seq,
+                config.max_prefix_cache_snapshot_bytes // snapshot_size,
+            )
         selected_slots = min(
             selected_per_seq * config.max_num_seqs,
             config.max_num_seqs + config.max_num_batched_tokens // GDN_CHECKPOINT_INTERVAL,
         )
         captured_bytes = 2 * selected_slots * snapshot_size
         intermediate_bytes = (config.max_num_batched_tokens // GDN_CHECKPOINT_INTERVAL) * max(
-            module.state_cache_nbytes(1) for module in state_modules
+            module.num_v_heads
+            * module.head_k_dim
+            * module.head_v_dim
+            * module.recurrent_state.element_size()
+            for module in state_modules
         )
         checkpoint_workspace_bytes = captured_bytes + intermediate_bytes
     model_param = model.model.embed_tokens.weight
@@ -167,7 +176,7 @@ def allocate_runtime_caches(
     return kv_cache, num_kv_cache_blocks
 
 
-def _validate_gdn_restore(seq: Sequence, snapshot: GDNStateSnapshot, num_layers: int) -> None:
+def _validate_gdn_restore(seq: Sequence, snapshot: GDNStateSnapshot, modules) -> None:
     if seq.state_slot < 0:
         raise RuntimeError(f"sequence {seq.seq_id} has no state slot to restore")
     if snapshot.num_tokens != seq.committed_tokens:
@@ -175,13 +184,26 @@ def _validate_gdn_restore(seq: Sequence, snapshot: GDNStateSnapshot, num_layers:
             f"sequence {seq.seq_id} restore boundary mismatch: "
             f"snapshot={snapshot.num_tokens}, logical={seq.committed_tokens}"
         )
-    if len(snapshot.layers) != num_layers:
+    if not modules or len(snapshot.layers) != len(modules):
         raise RuntimeError("GDN snapshot layer count does not match model")
-
-
-def _copy_gdn_restore_layers(modules, seq: Sequence, snapshot: GDNStateSnapshot) -> None:
-    for module, layer_snapshot in zip(modules, snapshot.layers):
-        module.restore_state_slot(seq.state_slot, layer_snapshot)
+    for layer_index, (module, (conv, recurrent)) in enumerate(zip(modules, snapshot.layers)):
+        if (
+            seq.state_slot >= module.conv_state.shape[0]
+            or seq.state_slot >= module.recurrent_state.shape[0]
+        ):
+            raise RuntimeError(
+                f"sequence {seq.seq_id} GDN layer {layer_index} state slot out of range"
+            )
+        for name, source, target in (
+            ("conv", conv, module.conv_state),
+            ("recurrent", recurrent, module.recurrent_state),
+        ):
+            if source.shape != target.shape[1:] or source.dtype != target.dtype:
+                raise RuntimeError(
+                    f"sequence {seq.seq_id} GDN layer {layer_index} {name} "
+                    f"snapshot shape/dtype {tuple(source.shape)}/{source.dtype} "
+                    f"does not match state cache {tuple(target.shape[1:])}/{target.dtype}"
+                )
 
 
 class GDNRestoreStaging:
@@ -216,10 +238,7 @@ class GDNRestoreStaging:
             return
         modules = model.state_cache_modules()
         for seq, snapshot in pending:
-            _validate_gdn_restore(seq, snapshot, len(modules))
-
-        if not modules:
-            return
+            _validate_gdn_restore(seq, snapshot, modules)
         first = pending[0][1].layers[0]
         device = modules[0].conv_state.device
         conv_shape, recurrent_shape = first[0].shape, first[1].shape
@@ -240,10 +259,16 @@ class GDNRestoreStaging:
         per_snapshot_bytes = len(modules) * (
             first[0].numel() * first[0].element_size() + first[1].numel() * first[1].element_size()
         )
-        if not homogeneous or device.type != "cuda" or per_snapshot_bytes > self.max_staging_bytes:
+        if (
+            not homogeneous
+            or device.type != "cuda"
+            or per_snapshot_bytes == 0
+            or per_snapshot_bytes > self.max_staging_bytes
+        ):
             # Preserve support for heterogeneous/custom layer layouts and CPU tests.
             for seq, snapshot in pending:
-                _copy_gdn_restore_layers(modules, seq, snapshot)
+                for module, layer_snapshot in zip(modules, snapshot.layers):
+                    module.restore_state_slot(seq.state_slot, layer_snapshot)
             return
 
         max_group_size = max(1, self.max_staging_bytes // per_snapshot_bytes)
@@ -279,18 +304,22 @@ class GDNRestoreStaging:
                     recurrent_host[offset].copy_(recurrent)
             # Only two host-to-device transfers per bounded group; scatter from
             # these temporary device tensors on the same stream before forward.
-            conv_gpu = conv_host.to(device, non_blocking=True)
-            recurrent_gpu = recurrent_host.to(device, non_blocking=True)
-            for group_index, (seq, _) in enumerate(group):
-                for layer_index, module in enumerate(modules):
-                    offset = group_index * num_layers + layer_index
-                    module.restore_state_slot(
-                        seq.state_slot, (conv_gpu[offset], recurrent_gpu[offset])
-                    )
-            if self._transfer_done is None:
-                self._transfer_done = torch.cuda.Event()
-            self._transfer_done.record(torch.cuda.current_stream(device))
-            self._pending = True
+            try:
+                conv_gpu = conv_host.to(device, non_blocking=True)
+                recurrent_gpu = recurrent_host.to(device, non_blocking=True)
+                for group_index, (seq, _) in enumerate(group):
+                    for layer_index, module in enumerate(modules):
+                        offset = group_index * num_layers + layer_index
+                        module.restore_state_slot(
+                            seq.state_slot, (conv_gpu[offset], recurrent_gpu[offset])
+                        )
+            finally:
+                # Guard pinned storage even if an H2D transfer or scatter fails
+                # after earlier asynchronous copies have been queued.
+                if self._transfer_done is None:
+                    self._transfer_done = torch.cuda.Event()
+                self._transfer_done.record(torch.cuda.current_stream(device))
+                self._pending = True
 
 
 def restore_pending_states(model, seqs: list[Sequence], staging: GDNRestoreStaging) -> None:

@@ -3,6 +3,8 @@
 import inspect
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -91,6 +93,53 @@ class FixedDtypeConfigTest(unittest.TestCase):
                     self.assertEqual(command[command.index("--kv-cache-dtype") + 1], "fp8_e4m3")
                     self.assertEqual(command[command.index("--kv-cache-k-scale") + 1], "0.25")
                     self.assertEqual(command[command.index("--kv-cache-v-scale") + 1], "0.5")
+
+    def test_kv_page_size_128_is_rejected_by_cli_and_runtime(self):
+        for block_size in (16, 32, 64):
+            args = verify_prefix_resume.parse_args(
+                ["/tmp/example-model", "--prefix-block-size", str(block_size)]
+            )
+            self.assertEqual(args.prefix_block_size, block_size)
+
+        with redirect_stderr(StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                verify_prefix_resume.parse_args(
+                    ["/tmp/example-model", "--prefix-block-size", "128"]
+                )
+        self.assertEqual(error.exception.code, 2)
+
+        with tempfile.TemporaryDirectory() as model_dir:
+            with patch(
+                "nanovllm.config._load_hf_config",
+                side_effect=AssertionError("unsupported page size should fail before model load"),
+            ) as model_load:
+                with self.assertRaisesRegex(ValueError, "kv_cache_block_size must be one of"):
+                    Config(model_dir, kv_cache_block_size=128)
+                model_load.assert_not_called()
+
+    def test_prefix_stage_covers_supported_kv_page_sizes(self):
+        config = {
+            "model": "/tmp/example-model",
+            "gpu": "0",
+            "stage": "prefix",
+            "benchmark": {"mode": "smoke", "repeats": 1},
+            "correctness": {"max_jobs": 1, "nvcc_threads": 1},
+        }
+        commands = []
+        with tempfile.TemporaryDirectory() as folder:
+            with patch(
+                "benchmarks.run_tests.run_logged",
+                side_effect=lambda name, command, output, env: commands.append((name, command)),
+            ):
+                self.assertEqual(run_tests.execute(config, Path(folder)), 0)
+
+        self.assertEqual(
+            [name for name, _ in commands],
+            ["nvidia-smi", "prefix-resume-b16", "prefix-resume-b32", "prefix-resume-b64", "prefix"],
+        )
+        for block_size in (16, 32, 64):
+            command = next(cmd for name, cmd in commands if name == f"prefix-resume-b{block_size}")
+            self.assertEqual(command[command.index("--prefix-block-size") + 1], str(block_size))
 
 
 if __name__ == "__main__":

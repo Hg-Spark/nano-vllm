@@ -123,8 +123,8 @@ def parse_args(argv=None):
     parser.add_argument("--decode-graph", action="store_true")
     add_result_argument(parser)
     args = parser.parse_args(argv)
-    validate_positive(parser, args, "max_new_tokens")
-    if args.max_new_tokens >= args.max_model_len:
+    validate_positive(parser, args, "max_new_tokens", "max_model_len", "max_num_batched_tokens")
+    if args.max_new_tokens > args.max_model_len:
         parser.error("--max-new-tokens must leave room for the image prompt")
     return normalize_paths(args, "model", "image", "result_file")
 

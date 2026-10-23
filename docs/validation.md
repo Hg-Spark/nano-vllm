@@ -186,7 +186,7 @@ python -m scripts.verify_prefix_resume "$NANOVLLM_MODEL" \
 4. 运行 B，复用共享 KV 并恢复保持原始状态精度的 GDN 快照。
 5. 比较 B 的两条生成序列，并输出快照边界和大小。
 
-第二阶段比较的是“不开启联合前缀复用”与“恢复联合前缀快照”，**两者都使用正常 Paged KV 和持久 GDN State Slot**，并不是已移除的无持久缓存 Warmup。此项不能单独当作 HF 对齐证明。若没有产生缓存条目，探针会失败。该探针在 KV Block Size 为 16/32 时仍构造至少 64 Token 的共享前缀，以匹配固定 GDN Checkpoint 网格。验证脚本已独立 Hook `restore_gdn_state()`，并检查 `restore_boundary` 与共享 KV Block，避免仅凭缓存条目推断真实命中。
+第二阶段比较的是“不开启联合前缀复用”与“恢复联合前缀快照”，**两者都使用正常 Paged KV 和持久 GDN State Slot**，并不是已移除的无持久缓存 Warmup。此项不能单独当作 HF 对齐证明。若没有产生缓存条目，探针会失败。该探针在 KV Block Size 为 16/32/64 时仍构造至少 64 Token 的共享前缀，以匹配固定 GDN Checkpoint 网格。验证脚本通过包装 `GDNRestoreStaging.restore()` 观察实际恢复调用，并检查 `restore_boundary` 与共享 KV Block，避免仅凭缓存条目推断真实命中。
 
 将误差指标记录在独立的本地实验结果中。当前 snapshot 不再主动降精度；恢复验证仍用于发现状态边界、复制或其他执行路径问题。
 
