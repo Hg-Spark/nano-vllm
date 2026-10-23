@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from nanovllm.engine.llm_engine import LLMEngine, _resolve_eos_token_ids
 from nanovllm.engine.schedule import BatchResult
@@ -86,6 +87,52 @@ class LLMEngineStepTest(unittest.TestCase):
             engine.add_request([1], SamplingParams())
         with self.assertRaisesRegex(RuntimeError, "closed"):
             engine.generate([[1]], SamplingParams(), use_tqdm=False)
+
+    def test_engine_exit_retries_failed_runner_cleanup(self):
+        engine = make_engine_stub()
+        engine.scheduler = make_engine_scheduler()
+        engine._scheduler_cleared = False
+        runner = SimpleNamespace(exit=Mock(side_effect=[ValueError("teardown"), None]))
+        engine.model_runner = runner
+        with self.assertRaisesRegex(ValueError, "teardown"):
+            engine.exit()
+        self.assertTrue(engine._closed)
+        self.assertIs(engine.model_runner, runner)
+        self.assertTrue(engine._scheduler_cleared)
+        engine.exit()
+        self.assertIsNone(engine.model_runner)
+        self.assertTrue(engine._cleanup_complete)
+        self.assertEqual(runner.exit.call_count, 2)
+
+    def test_chat_rejects_closed_engine_without_retry_advice(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from unittest.mock import patch
+
+        from scripts.chat import run_chat
+
+        class FakeChatEngine:
+            def __init__(self, closed):
+                self._closed = closed
+                self.tokenizer = SimpleNamespace(apply_chat_template=lambda *args, **kw: [1, 2])
+
+            def generate(self, *args, **kwargs):
+                raise ValueError("invalid request or execution")
+
+        for closed in (False, True):
+            with self.subTest(closed=closed):
+                engine = FakeChatEngine(closed)
+                output = StringIO()
+                with (
+                    patch("builtins.input", side_effect=["hi", "/quit"]),
+                    redirect_stdout(output),
+                ):
+                    if closed:
+                        with self.assertRaisesRegex(ValueError, "invalid request or execution"):
+                            run_chat(engine, SamplingParams())
+                    else:
+                        run_chat(engine, SamplingParams())
+                self.assertEqual("Use /clear" in output.getvalue(), not closed)
 
     def test_interrupted_step_disables_engine_before_commit(self):
         scheduler = make_engine_scheduler()

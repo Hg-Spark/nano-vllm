@@ -299,6 +299,46 @@ class ModelRunnerTest(unittest.TestCase):
         metadata_pool.clear.assert_called_once()
         self.assertIsNone(runner.model)
 
+    def test_model_runner_cleanup_retries_after_sync_and_release_failures(self):
+        runner = object.__new__(ModelRunner)
+        runner._closed = False
+        runner._cleanup_complete = False
+        runner.model = object()
+        runner.kv_cache = object()
+        runner.sampler = object()
+        bucket = Mock()
+        bucket.release.side_effect = [RuntimeError("bucket failed"), None]
+        pool = Mock()
+        runner.decode_graph_buckets = {1: bucket}
+        runner.metadata_pool = pool
+
+        with (
+            patch("nanovllm.engine.model_runner.torch.cuda.is_available", return_value=True),
+            patch(
+                "nanovllm.engine.model_runner.torch.cuda.synchronize",
+                side_effect=[RuntimeError("sync failed"), None],
+            ) as synchronize,
+            patch("nanovllm.engine.model_runner.torch.cuda.empty_cache") as empty_cache,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "sync failed"):
+                runner.exit()
+            self.assertTrue(runner._closed)
+            self.assertFalse(runner._cleanup_complete)
+            self.assertEqual(list(runner.decode_graph_buckets), [1])
+            self.assertIsNone(runner.model)
+            pool.clear.assert_called_once()
+
+            runner.exit()
+            runner.exit()
+
+        self.assertTrue(runner._cleanup_complete)
+        self.assertEqual(runner.decode_graph_buckets, {})
+        self.assertIsNone(runner.metadata_pool)
+        self.assertEqual(bucket.release.call_count, 2)
+        self.assertEqual(synchronize.call_count, 2)
+        self.assertEqual(empty_cache.call_count, 2)
+        pool.clear.assert_called_once()
+
     def test_gdn_capture_preserves_prompt_and_rolls_completion_cpu_tensor(self):
         from nanovllm.engine.state_manager import GDNStateSnapshot
 
