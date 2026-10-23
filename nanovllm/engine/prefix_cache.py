@@ -121,11 +121,82 @@ class PrefixCache:
             limit = min(limit, self.max_snapshot_bytes // self.snapshot_nbytes)
         return limit
 
+    def _plan_publication(
+        self, seq: Sequence, position: int, digest: bytes
+    ) -> tuple[bytes, ...] | None:
+        """Plan all evictions before publishing, including downstream branches.
+
+        None means that a checkpoint cannot be retained without evicting an
+        actively reused or terminal descendant checkpoint. This method never
+        changes cache ownership, statistics, or resident indexes.
+        """
+        if digest in self._entries:
+            return ()
+        limit = self._path_limit()
+        if limit < 1:
+            return None
+
+        block_count = position // self.block_size
+        hashes, _ = _sequence_block_hashes(seq, self.block_size, position)
+        own_path = tuple(hashes[:block_count])
+        descendant_paths = [
+            entry.block_hashes
+            for entry in self._entries.values()
+            if entry.num_tokens > position and entry.block_hashes[block_count - 1] == digest
+        ]
+        remaining = set(self._entries)
+        remaining.add(digest)
+        victims: list[bytes] = []
+
+        for index, full_path in enumerate((own_path, *descendant_paths)):
+            chain = [key for key in full_path if key in remaining]
+            while len(chain) > limit:
+                # A new endpoint may replace its own older ancestors.
+                # A backfill cannot destroy the root or terminal descendant
+                # of any existing branch just to insert an intermediate node.
+                removable = [*chain[1:-1], chain[0]] if index == 0 else chain[1:-1]
+                victim = next(
+                    (
+                        key
+                        for key in removable
+                        if key != digest and not self._active_reuses.get(key, 0)
+                    ),
+                    None,
+                )
+                if victim is None:
+                    return None
+                remaining.remove(victim)
+                chain.remove(victim)
+                victims.append(victim)
+
+        capacity = self.max_entries
+        if self.max_snapshot_bytes is not None and self.snapshot_nbytes:
+            capacity = min(capacity, self.max_snapshot_bytes // self.snapshot_nbytes)
+        own_ancestors = set(own_path[:-1])
+        while len(remaining) > capacity:
+            # Under global pressure, discard unrelated cold branches first.
+            # Only then consider intermediate ancestors and finally the root.
+            eligible = [
+                key
+                for key in self._entries
+                if key in remaining and not self._active_reuses.get(key, 0)
+            ]
+            if not eligible:
+                return None
+            victim = min(
+                eligible,
+                key=lambda key: (0 if key not in own_ancestors else 2 if key == own_path[0] else 1),
+            )
+            remaining.remove(victim)
+            victims.append(victim)
+        return tuple(victims)
+
     def select_checkpoints(
         self,
         candidates: list[tuple[int, bytes]],
         cached: list[int],
         max_reusable_tokens: int | None = None,
+        seq: Sequence | None = None,
     ) -> list[tuple[int, bytes]]:
         """Choose useful checkpoints within the effective global/per-path capacity."""
         if not candidates:
@@ -144,8 +215,25 @@ class PrefixCache:
         if limit == 1 and cached and cached[-1] > candidates[-1][0]:
             return []
         if limit == 1 or cached:
-            return candidates[-1:]
-        return candidates[:1] if len(candidates) == 1 else [candidates[0], candidates[-1]]
+            selected = candidates[-1:]
+        else:
+            selected = candidates[:1] if len(candidates) == 1 else [candidates[0], candidates[-1]]
+        if seq is not None:
+            selected = [
+                (position, digest)
+                for position, digest in selected
+                if self._plan_publication(seq, position, digest) is not None
+            ]
+            if not selected:
+                # The deepest candidate may conflict with a resident
+                # descendant; a shallower boundary can still be publishable.
+                # Bound validation work for long prompts (thousands of
+                # possible 64-token checkpoints) when a deeper branch is full.
+                for position, digest in reversed(candidates[-5:-1]):
+                    if self._plan_publication(seq, position, digest) is not None:
+                        selected = [(position, digest)]
+                        break
+        return selected
 
     def find(self, seq: Sequence, max_tokens: int) -> PrefixEntry | None:
         if not self.enabled or max_tokens <= 0 or not self._entries:
@@ -228,10 +316,14 @@ class PrefixCache:
         if len(block_ids) != num_blocks:
             raise RuntimeError("KV block table is shorter than cached prefix")
 
+        victims = self._plan_publication(seq, position, digest)
+        if victims is None:
+            return
+
+        # Preflight all descendant branches before touching any KV references.
         self._retain_blocks(block_ids)
         hashes, _ = _sequence_block_hashes(seq, self.block_size, position)
-        block_hashes = tuple(hashes[:num_blocks])
-        entry = PrefixEntry(block_hashes, block_ids, position, snapshot)
+        entry = PrefixEntry(tuple(hashes[:num_blocks]), block_ids, position, snapshot)
         self._entries[digest] = entry
         if position not in self._resident_length_counts:
             insort(self._resident_lengths, position)
@@ -240,57 +332,10 @@ class PrefixCache:
         self._snapshot_bytes += self.snapshot_nbytes
         self.published_count += 1
         self.peak_snapshot_bytes = max(self.peak_snapshot_bytes, self._snapshot_bytes)
-
-        path.append(digest)
-        limit = self._path_limit()
-        # Preserve checkpoints actually reused by other requests when growing a
-        # branch; prefer removing intermediate, unshared positions.
-        if len(path) > limit:
-            interior = path[1:-1]
-            victim = next((key for key in interior if self._active_reuses.get(key, 0) == 0), None)
-            if victim is None:
-                victim = interior[0] if interior else path[0]
+        for victim in victims:
             self._evict_hash(victim)
-            path.remove(victim)
-
-        # An out-of-order insertion may make existing descendants exceed their
-        # path quota. Reject the new intermediate node if no old interior can go.
-        for leaf in tuple(self._entries.values()):
-            if leaf.num_tokens <= position or leaf.block_hashes[num_blocks - 1] != digest:
-                continue
-            chain = [key for key in leaf.block_hashes if key in self._entries]
-            if len(chain) > limit:
-                interior = [key for key in chain[1:-1] if key != digest]
-                if not interior:
-                    self._evict_hash(digest)
-                    if digest in path:
-                        path.remove(digest)
-                    return
-                victim = next(
-                    (key for key in interior if self._active_reuses.get(key, 0) == 0), None
-                )
-                if victim is None:
-                    self._evict_hash(digest)
-                    if digest in path:
-                        path.remove(digest)
-                    return
-                self._evict_hash(victim)
-
-        # Replace intermediate checkpoints before evicting globally.
-        while len(self._entries) > self.max_entries or (
-            self.max_snapshot_bytes is not None and self._snapshot_bytes > self.max_snapshot_bytes
-        ):
-            if len(path) >= 3:
-                interior = path[1:-1]
-                victim = next(
-                    (key for key in interior if self._active_reuses.get(key, 0) == 0),
-                    interior[-1],
-                )
-                self._evict_hash(victim)
-                path.remove(victim)
-            else:
-                self.evict()
-        path[:] = [key for key in path if key in self._entries]
+        # publish_many() may insert more checkpoints on this request's path.
+        path[:] = [key for key in (*path, digest) if key in self._entries]
 
     def _evict_hash(self, digest: bytes) -> None:
         entry = self._entries.pop(digest)
@@ -312,9 +357,7 @@ class PrefixCache:
             return False
         # Evict cold checkpoints first. Active requests retain their own KV
         # references, but dropping a reused checkpoint hurts future hits.
-        candidates = [
-            key for key in self._entries if self._active_reuses.get(key, 0) == 0
-        ]
+        candidates = [key for key in self._entries if self._active_reuses.get(key, 0) == 0]
         if not candidates:
             candidates = list(self._entries)
         if block_refcounts is None:

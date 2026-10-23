@@ -123,7 +123,7 @@ class HybridCacheManager:
             # Recover an off-grid chunk at a useful joint boundary, while
             # avoiding tiny chunks at every subsequent checkpoint position.
             selected = self.prefix_cache.select_checkpoints(
-                candidates, cached, max_reusable_tokens=seq.num_prompt_tokens - 1
+                candidates, cached, max_reusable_tokens=seq.num_prompt_tokens - 1, seq=seq
             )
             max_trim = min(
                 step - 1,
@@ -158,7 +158,7 @@ class HybridCacheManager:
             # and only when that endpoint lies on the joint grid.
             candidates = [pair for pair in candidates if pair[0] == end]
         candidates = self.prefix_cache.select_checkpoints(
-            candidates, cached, max_reusable_tokens=seq.num_prompt_tokens - 1
+            candidates, cached, max_reusable_tokens=seq.num_prompt_tokens - 1, seq=seq
         )
         positions = tuple(position for position, _ in candidates)
         planned_prefixes.update(digest for _, digest in candidates)

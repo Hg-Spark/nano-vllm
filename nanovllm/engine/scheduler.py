@@ -72,13 +72,27 @@ class Scheduler:
                     len(seq) - seq.committed_tokens,
                     token_limit - num_batched_tokens,
                 )
-                scheduled = self.cache_manager.fit_prefill(seq, requested)
-
                 start = seq.committed_tokens
-                end = start + scheduled
-                end, positions, checkpoint_interval = self.cache_manager.plan_prefill_checkpoints(
-                    seq, start, end, planned_prefixes
+                # Checkpoint alignment may shrink the requested chunk. Do not
+                # evict cached KV pages for tokens we will not actually run.
+                proposed_prefixes = set(planned_prefixes)
+                proposed_end, positions, checkpoint_interval = (
+                    self.cache_manager.plan_prefill_checkpoints(
+                        seq, start, start + requested, proposed_prefixes
+                    )
                 )
+                scheduled = self.cache_manager.fit_prefill(seq, proposed_end - start)
+                if scheduled < proposed_end - start:
+                    # Capacity is still insufficient; replan on the true range.
+                    # Discard candidate bookkeeping from the unexecuted tail.
+                    end, positions, checkpoint_interval = (
+                        self.cache_manager.plan_prefill_checkpoints(
+                            seq, start, start + scheduled, planned_prefixes
+                        )
+                    )
+                else:
+                    end = proposed_end
+                    planned_prefixes.update(proposed_prefixes)
                 self.cache_manager.reserve_prefill(seq, end)
                 prefill_chunks.append(
                     ScheduledChunk(

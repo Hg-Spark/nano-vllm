@@ -100,6 +100,31 @@ class SchedulerCoreTest(unittest.TestCase):
         following = scheduler.schedule().prefill_chunks
         self.assertIs(following[0].seq, first)
 
+    def test_trimmed_prefill_does_not_evict_checkpoint_for_unused_kv_page(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=65,
+            max_num_seqs=1,
+            num_blocks=8,
+            block_size=16,
+            max_prefix_cache_entries=4,
+        )
+        cache = scheduler.cache_manager
+        old = Sequence([900] * 80)
+        cache.block_manager.ensure_capacity(old, 64)
+        cache.prefix_cache.publish_many(old, (GDNStateSnapshot(64, ()),))
+        cache.release(old)
+        self.assertEqual(len(cache.prefix_cache), 1)
+        self.assertEqual(len(cache.block_manager.free_block_ids), 4)
+
+        incoming = Sequence(list(range(80)), SamplingParams(max_tokens=1))
+        scheduler.add(incoming)
+        scheduled = scheduler.schedule()
+        self.assertEqual(len(scheduled.prefill_chunks), 1)
+        chunk = scheduled.prefill_chunks[0]
+        self.assertEqual((chunk.start, chunk.end), (0, 64))
+        self.assertIsNotNone(cache.prefix_cache.find(Sequence([900] * 80), 64))
+        self.assertEqual(len(cache.prefix_cache), 1)
+
     def test_fixed_64_token_checkpoint_grid(self):
         for prompt_len in (20, 100, 320, 321, 400, 1024, 2049):
             with self.subTest(prompt_len=prompt_len):

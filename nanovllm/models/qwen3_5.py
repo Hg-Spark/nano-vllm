@@ -235,14 +235,18 @@ class Qwen3_5ForCausalLM(nn.Module):
         self,
         hidden_states: torch.Tensor,
         sequence_indices: list[int] | None = None,
+        token_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         from nanovllm.utils.context import get_context
 
         context = get_context()
         if context.is_prefill:
-            last_indices = [end - 1 for end in context.prefill_q_offsets[1:]]
-            if sequence_indices is not None:
-                last_indices = [last_indices[index] for index in sequence_indices]
-            indices = torch.tensor(last_indices, device=hidden_states.device, dtype=torch.long)
-            hidden_states = hidden_states.index_select(0, indices)
+            if token_indices is None:
+                last_indices = [end - 1 for end in context.prefill_q_offsets[1:]]
+                if sequence_indices is not None:
+                    last_indices = [last_indices[index] for index in sequence_indices]
+                token_indices = torch.tensor(
+                    last_indices, device=hidden_states.device, dtype=torch.long
+                )
+            hidden_states = hidden_states.index_select(0, token_indices)
         return self.lm_head(hidden_states)

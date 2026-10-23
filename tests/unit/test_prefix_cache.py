@@ -397,6 +397,85 @@ class PrefixCacheTest(unittest.TestCase):
         self.assertEqual(len(manager.prefix_cache), 2)
         self.assertEqual(manager.prefix_cache.find(seq, 256).num_tokens, 256)
 
+    def test_future_descendant_rejects_wasted_checkpoint_capture(self):
+        manager = make_cache_manager(
+            num_blocks=48,
+            block_size=16,
+            max_prefix_entries=4,
+            max_checkpoints_per_path=2,
+        )
+        full = Sequence(list(range(321)))
+        manager.block_manager.ensure_capacity(full, 320)
+        publish_snapshot(manager, full, 64)
+        publish_snapshot(manager, full, 320)
+        cache = manager.prefix_cache
+        stats = (cache.published_count, cache.evicted_count, cache.snapshot_bytes)
+        short = Sequence(list(range(193)))
+        end, positions, interval = manager.plan_prefill_checkpoints(short, 64, 193, set())
+        self.assertEqual((end, positions, interval), (193, (), 0))
+        manager.block_manager.ensure_capacity(short, 192)
+        publish_snapshot(manager, short, 192)
+        self.assertEqual((cache.published_count, cache.evicted_count, cache.snapshot_bytes), stats)
+        self.assertEqual(cache.find(full, 320).num_tokens, 320)
+
+    def test_failed_backfill_is_atomic_across_sibling_branches(self):
+        manager = make_cache_manager(
+            num_blocks=64,
+            block_size=16,
+            max_prefix_entries=8,
+            max_checkpoints_per_path=3,
+        )
+        shared = list(range(192))
+        branch_a = Sequence(shared + list(range(1000, 1129)))
+        branch_b = Sequence(shared + list(range(2000, 2129)))
+        for seq in (branch_a, branch_b):
+            manager.block_manager.ensure_capacity(seq, 320)
+        cache = manager.prefix_cache
+        for position in (64, 256, 320):
+            publish_snapshot(manager, branch_a, position)
+        for position in (256, 320):
+            publish_snapshot(manager, branch_b, position)
+        reused = cache.find(branch_b, 256)
+        cache.mark_reused(branch_b, reused)
+        original = (
+            set(cache._entries),
+            cache.published_count,
+            cache.evicted_count,
+            tuple(cache._resident_lengths),
+        )
+        publish_snapshot(manager, branch_a, 192)
+        self.assertEqual(
+            (
+                set(cache._entries),
+                cache.published_count,
+                cache.evicted_count,
+                tuple(cache._resident_lengths),
+            ),
+            original,
+        )
+        self.assertEqual(cache.find(branch_a, 256).num_tokens, 256)
+        self.assertEqual(cache.find(branch_b, 256).num_tokens, 256)
+        cache.unmark_reused(branch_b)
+
+    def test_global_pressure_prefers_other_branch_over_own_ancestor(self):
+        manager = make_cache_manager(
+            num_blocks=24,
+            block_size=16,
+            max_prefix_entries=2,
+        )
+        branch_a = Sequence(list(range(129)))
+        branch_b = Sequence([999] * 65)
+        manager.block_manager.ensure_capacity(branch_a, 128)
+        manager.block_manager.ensure_capacity(branch_b, 64)
+        cache = manager.prefix_cache
+        publish_snapshot(manager, branch_a, 64)
+        publish_snapshot(manager, branch_b, 64)
+        publish_snapshot(manager, branch_a, 128)
+        self.assertEqual(len(cache), 2)
+        self.assertEqual(cache.find(branch_a, 64).num_tokens, 64)
+        self.assertEqual(cache.find(branch_a, 128).num_tokens, 128)
+        self.assertIsNone(cache.find(branch_b, 64))
+
     def test_batch_publish_rejects_misaligned_boundary(self):
         manager = make_cache_manager(num_blocks=10, block_size=16, max_prefix_entries=2)
         seq = Sequence(list(range(128)))
@@ -504,7 +583,6 @@ class PrefixCacheTest(unittest.TestCase):
             [64],
         )
         self.assertEqual(len(manager.prefix_cache), 0)
-
 
     def test_publish_rejects_image_region_even_if_called_directly(self):
         manager = make_cache_manager(num_blocks=32, block_size=16, max_prefix_entries=4)
