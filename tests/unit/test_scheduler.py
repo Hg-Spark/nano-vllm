@@ -140,7 +140,7 @@ class SchedulerCoreTest(unittest.TestCase):
                 self.assertEqual(len(chunks), 1)
                 self.assertEqual((chunks[0].start, chunks[0].end), (0, prompt_len))
                 candidates = list(range(64, prompt_len + 1, 64))
-                expected = candidates[:1] + candidates[-1:] if len(candidates) > 2 else candidates
+                expected = [p for p in candidates if p < prompt_len][-1:]
                 self.assertEqual(chunks[0].checkpoint_positions, tuple(expected))
 
     def test_disabled_prefix_publication_does_not_split_prefill(self):
@@ -174,13 +174,13 @@ class SchedulerCoreTest(unittest.TestCase):
         scheduler.add(seq)
 
         first = scheduler.schedule()
-        self.assertEqual(first.prefill_chunks[0].num_tokens, 448)
+        self.assertEqual(first.prefill_chunks[0].num_tokens, 511)
         scheduler.postprocess(first.decode_chunks, [7], False)
         scheduler.postprocess(first.prefill_chunks, [None], True)
 
         second = scheduler.schedule()
-        self.assertEqual(second.prefill_chunks[0].num_tokens, 448)
-        self.assertEqual(second.prefill_chunks[0].start, 448)
+        self.assertEqual(second.prefill_chunks[0].num_tokens, 511)
+        self.assertEqual(second.prefill_chunks[0].start, 511)
         self.assertIn(running, [chunk.seq for chunk in second.decode_chunks])
 
         # A 100-token prefill with 64-token pages would lose 36 tokens
@@ -203,7 +203,7 @@ class SchedulerCoreTest(unittest.TestCase):
         self.assertEqual(scheduled.prefill_chunks[0].checkpoint_positions, (64,))
         self.assertEqual(scheduled.prefill_chunks[0].checkpoint_interval, 64)
 
-    def test_off_grid_prefill_recovers_early_without_repeated_tiny_chunks(self):
+    def test_off_grid_prefill_preserves_budget_without_tiny_forwards(self):
         scheduler = make_scheduler(
             max_num_batched_tokens=64,
             max_num_seqs=2,
@@ -236,11 +236,10 @@ class SchedulerCoreTest(unittest.TestCase):
             }
             scheduler.postprocess(batch.prefill_chunks, [None], True, snapshots)
 
-        # Capture at 64, then avoid a tiny chunk at every grid boundary.
-        self.assertEqual(ends, [63, 64, 127, 190, 253, 316, 379, 384])
-        self.assertEqual(captured, [64, 384])
-        self.assertIsNotNone(scheduler.cache_manager.prefix_cache.find(seq, 384))
-        self.assertEqual(seq.committed_tokens, 384)
+        # Off-grid chunks avoid mandatory one-token checkpoint recovery.
+        self.assertEqual(ends, [63, 126, 189, 252, 315, 378, 441, 504])
+        self.assertEqual(captured, [])
+        self.assertEqual(seq.committed_tokens, 504)
 
     def test_off_grid_terminal_chunk_never_splits_for_checkpoint(self):
         scheduler = make_scheduler(

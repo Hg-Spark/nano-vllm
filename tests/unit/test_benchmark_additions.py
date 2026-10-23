@@ -10,56 +10,9 @@ from types import SimpleNamespace
 
 from benchmarks import summarize_bench
 from benchmarks.bench_experiments import checkpoint_schedule_stats
-from nanovllm.engine.sequence import Sequence
-from nanovllm.sampling_params import SamplingParams
-from tests.scheduler_helpers import make_scheduler
 
 
 class BenchmarkAdditionsTest(unittest.TestCase):
-    def test_offgrid_checkpoint_recovery_statistics_from_real_scheduler(self):
-        scheduler = make_scheduler(
-            max_num_batched_tokens=64,
-            max_num_seqs=2,
-            num_blocks=256,
-            block_size=16,
-        )
-        running = Sequence([1, 2], SamplingParams(max_tokens=100, ignore_eos=True))
-        scheduler.cache_manager.block_manager.ensure_capacity(running, len(running))
-        scheduler.cache_manager.state_manager.allocate(running)
-        running.committed_tokens = len(running) - 1
-        scheduler.running.append(running)
-        pending = Sequence(list(range(3500)), SamplingParams(max_tokens=1))
-        scheduler.add(pending)
-
-        first = scheduler.schedule()
-        self.assertEqual((first.prefill_chunks[0].start, first.prefill_chunks[0].end), (0, 63))
-        self.assertEqual(
-            checkpoint_schedule_stats(first.prefill_chunks, block_size=16),
-            {
-                "prefill_chunks": 1,
-                "checkpoint_chunks": 0,
-                "checkpoint_positions": 0,
-                "offgrid_prefill_chunks": 0,
-                "offgrid_realignments": 0,
-            },
-        )
-        scheduler.postprocess(first.decode_chunks, [7], False)
-        scheduler.postprocess(first.prefill_chunks, [None], True)
-
-        second = scheduler.schedule()
-        self.assertEqual((second.prefill_chunks[0].start, second.prefill_chunks[0].end), (63, 64))
-        self.assertEqual(second.prefill_chunks[0].checkpoint_positions, (64,))
-        self.assertEqual(
-            checkpoint_schedule_stats(second.prefill_chunks, block_size=16),
-            {
-                "prefill_chunks": 1,
-                "checkpoint_chunks": 1,
-                "checkpoint_positions": 1,
-                "offgrid_prefill_chunks": 1,
-                "offgrid_realignments": 1,
-            },
-        )
-
     def test_checkpoint_stats_require_joint_kv_and_gdn_grid(self):
         chunks = (
             SimpleNamespace(start=63, end=64, checkpoint_positions=(64,)),

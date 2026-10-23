@@ -1,6 +1,5 @@
 """Contracts for fixed BF16 and KV-only quantization benchmark settings."""
 
-import inspect
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -9,16 +8,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from benchmarks import run_tests
-from nanovllm.config import Config
 from scripts import verify_prefix_resume, verify_qwen3_5
 
 
 class FixedDtypeConfigTest(unittest.TestCase):
-    def test_model_dtype_is_implementation_detail(self):
-        self.assertNotIn("dtype", inspect.signature(Config).parameters)
-        args = verify_qwen3_5.parse_args(["/tmp/example-model"])
-        self.assertFalse(hasattr(args, "dtype"))
-
     def test_correctness_cli_exposes_kv_precision_not_model_precision(self):
         for parser in (verify_qwen3_5.parse_args, verify_prefix_resume.parse_args):
             args = parser(

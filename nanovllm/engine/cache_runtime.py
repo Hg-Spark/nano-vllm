@@ -65,7 +65,7 @@ def allocate_runtime_caches(
     state_cache_bytes = sum(
         module.state_cache_nbytes(config.max_num_seqs) for module in state_modules
     )
-    # Each request captures at most two selected checkpoints. Those states remain
+    # Each request captures at most one selected checkpoint. Those states remain
     # live across layers and are stacked once for D2H. FlashInfer's unselected
     # intermediate recurrent states are temporary to a single GDN layer.
     checkpoint_workspace_bytes = 0
@@ -74,7 +74,7 @@ def allocate_runtime_caches(
         config.max_prefix_cache_snapshot_bytes is None
         or config.max_prefix_cache_snapshot_bytes >= snapshot_size
     ):
-        selected_per_seq = min(2, config.max_prefix_cache_entries, config.max_gdn_checkpoints)
+        selected_per_seq = min(1, config.max_prefix_cache_entries)
         if config.max_prefix_cache_snapshot_bytes is not None and snapshot_size:
             selected_per_seq = min(
                 selected_per_seq,

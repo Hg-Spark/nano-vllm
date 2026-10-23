@@ -109,7 +109,7 @@ check result count
 | `num_tokens` | 给出共同的历史边界 |
 | `GDNStateSnapshot` | 保存同一边界处所有 GDN 层的卷积和循环状态 |
 
-[BlockManager](../nanovllm/engine/block_manager.py)负责 KV block 的所有权与引用计数；[PrefixCache](../nanovllm/engine/prefix_cache.py)用单一链式 Block Hash 联合索引查找 KV/GDN 共同恢复边界，并按单路径配额裁剪中间 Checkpoint；全局预算超限时先裁剪当前路径中间节点，否则 FIFO 淘汰，生产路径的 PrefixCache 由 [HybridCacheManager](../nanovllm/engine/hybrid_cache_manager.py) 独立持有；GDN snapshot 是与完整 KV 前缀绑定的附加 metadata。Scheduler 负责队列和预算决策，由 HybridCacheManager 统一执行 KV/GDN 预留、联合恢复及释放。联合前缀缓存默认关闭（`max_prefix_cache_entries=0`），用于显式验证/实验时再开启，避免默认承担 GDN 快照的 D2H 成本。
+[BlockManager](../nanovllm/engine/block_manager.py)负责 KV block 的所有权与引用计数；[PrefixCache](../nanovllm/engine/prefix_cache.py)用单一链式 Block Hash 联合索引查找 KV/GDN 共同恢复边界，全局预算超限时按冷优先 FIFO 淘汰，生产路径的 PrefixCache 由 [HybridCacheManager](../nanovllm/engine/hybrid_cache_manager.py) 独立持有；GDN snapshot 是与完整 KV 前缀绑定的附加 metadata。Scheduler 负责队列和预算决策，由 HybridCacheManager 统一执行 KV/GDN 预留、联合恢复及释放。联合前缀缓存默认关闭（`max_prefix_cache_entries=0`），用于显式验证/实验时再开启，避免默认承担 GDN 快照的 D2H 成本。
 
 ### 什么时候能发布
 
@@ -120,21 +120,21 @@ check result count
 - 边界同时是完整 KV 块边界；
 - 该精确 token 前缀尚未存在。
 
-例如 KV 块容量为 16、130-token Prompt 且启用 Prefix Cache：64 和 128 是有效候选边界。Prefill 可在一次 `[0,130)` 调用中捕获两个 GDN Checkpoint；20-token Prompt 不产生 Checkpoint。合法联合边界的步长是 `lcm(64, kv_cache_block_size)`；在当前支持的 16/32/64-token KV 页配置下，联合快照都只能发布在 64、128、192 等 64-token 边界。
+例如 KV 块容量为 16、130-token Prompt 且启用 Prefix Cache：64 和 128 是有效候选边界。Prefill 可在一次 `[0,130)` 调用中捕获最深的一个可复用 GDN Checkpoint（128）；20-token Prompt 不产生 Checkpoint。合法联合边界的步长是 `lcm(64, kv_cache_block_size)`；在当前支持的 16/32/64-token KV 页配置下，联合快照都只能发布在 64、128、192 等 64-token 边界。
 
-**自适应 Chunk 对齐与恢复：** `HybridCacheManager.plan_prefill_checkpoints()` 先过滤同批次已经计划的重复前缀，再通过 `select_checkpoints()` 筛出值得保存的候选位置。通常只有 Chunk 未覆盖完整 Prompt、且舍弃预算不超过 `min(step - 1, scheduled // 4, max(16, scheduled // 8))` Token 时，才截断到有效边界；不再单独设置 16-token 的最短 Chunk 阈值。若 Chunk 起点已经失准且存在可发布的 Checkpoint，调度器会主动恢复到最深的候选联合边界，即使需要超过常规的截断预算。首次无缓存 Checkpoint 时可立即恢复；已有 Checkpoint 后，只有距离上一个缓存边界至少 `step × max_gdn_checkpoints` Token 时才强制恢复，从而避免每个 64-token 边界都出现短 Chunk。预算尚不能到达候选边界时继续正常推进，不会等待或阻塞 Decode。
+**Checkpoint 边界选择：** 每轮最多捕获一个最深的可复用联合边界。调度首先根据 Token Budget 规划执行范围；若将 Chunk 末端截断至合法边界只损失 8 个以内的 Token，可以小幅截断，再检查 KV 容量。容量不足时仅对缩短后的实际执行范围重新规划。
 
-如果 Chunk **起点已对齐**，可通过 FlashInfer 在 Chunk 内部捕获筛选出的 Checkpoint；如果**起点失准**，则只允许在终点恰好落在合法联合边界时发布 live GDN 状态，不能将内部相对间隔当作绝对 Checkpoint。**已经可以一次完成的 Prompt 不为捕获缓存而额外拆分**。例如有 1 个 Decode Token、总预算为 64 时，长 Prefill 可先运行 `[0,63)`，再以 `[63,64)` 将 live GDN 状态恢复到 64-token 网格；之后正常推进，只有在缓存检查点间隔足够大时才再次强制对齐。这会为早期可复用前缀增加一次短 Forward，属于明确的吞吐与缓存命中权衡。
+Chunk 起点已对齐时，可捕获 FlashInfer 内部 Checkpoint；起点失准时，只允许在终点正好对齐的情况下捕获最终 Live State。当前不为 Off-grid 强制发起 1-token Forward，因此长期失准的固定预算可能降低前缀缓存命中深度。完整 Prompt 不额外拆分。
 
 缓存节点被真实请求复用时会按请求计入活跃复用引用；请求结束时由 `HybridCacheManager.release()` 解除标记，避免曾命中过的中间节点永久享有裁剪优先权。缓存条目即使在请求运行期间被淘汰，KV Block 仍由独立的物理引用计数保障安全。
 
-每条前缀链默认最多保留 4 个 Checkpoint（`max_gdn_checkpoints`），Scheduler 每轮优先选择首个有用边界与最深边界（并受全局条目/字节预算约束），路径超限时裁剪旧的中间 Checkpoint。Decode-first、FIFO 请求准入以及全生命周期 KV 页预留策略均不改变。
+前缀缓存取消单路径配额，仅保留全局条目数和 CPU Snapshot 字节限制。淘汰采用冷优先 FIFO；显存紧张时在可释放 KV 页的候选中选择回收最多的条目。
 
 整块边界还能避免共享一个将被继续写入的半满块；新请求续写时分配后续块，不会覆盖共享前缀。
 
 ### 怎样查找和恢复
 
-缓存以链式 SHA-256 Block Hash 直接定位联合 `PrefixEntry`：其中 KV Block 与 GDN Snapshot 已绑定到同一有效边界，无需维护冗余的两套索引。发布批次增量计算 Hash，并仅检查驻留长度索引中的候选边界；查找复杂度依赖驻留检查点长度数，而不需要遍历全部历史 KV 页。路径内可用旧的深层 Checkpoint 替换为新深层边界，并优先保留已被其他请求复用的检查点及公共根；其余全局条目数与 CPU 预算先裁剪当前路径的中间 Checkpoint，否则按插入顺序 FIFO 淘汰；当 GPU KV 页不足时优先淘汰确实能释放物理页的缓存条目。单路径检查点数量限制仍独立生效。
+缓存以链式 SHA-256 Block Hash 匹配联合 `PrefixEntry`，KV Block 和 GDN Snapshot 必须对应同一个有效边界。全局超限时采用冷优先 FIFO 淘汰，缓存引用和活跃请求引用各自维护；GPU KV 空间不足时优先淘汰能够实际释放物理块的条目。
 
 ```text
 新接纳的请求
