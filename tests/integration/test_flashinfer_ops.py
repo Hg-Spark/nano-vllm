@@ -118,7 +118,7 @@ class FlashInferRuntimeOpsTest(unittest.TestCase):
         from nanovllm.layers.attention import store_kv_cache
         from nanovllm.utils.context import Context
 
-        key = torch.tensor([2.0, -4.0], device="cuda", dtype=torch.float16).repeat(128)
+        key = torch.tensor([2.0, -4.0], device="cuda", dtype=torch.bfloat16).repeat(128)
         key = key.reshape(2, 1, 128)
         value = key * 1.5
         k_cache = torch.empty((2, 16, 1, 128), device="cuda", dtype=torch.float8_e4m3fn)

@@ -67,7 +67,7 @@ export NANOVLLM_DTYPE=bfloat16
 python example.py
 ```
 
-[example.py](../example.py)读取两个环境变量 `NANOVLLM_MODEL`、`NANOVLLM_DTYPE` 并应用聊天模板。`LLM()` 本身不会展开路径中的字面量 `~`，在 Python 中请使用绝对路径或 `os.path.expanduser()`。
+[example.py](../example.py)读取两个环境变量 `NANOVLLM_MODEL`、`NANOVLLM_DTYPE` 并应用聊天模板。`Config` 会对模型路径调用 `expanduser()`，因此可以使用 `~` 表示用户主目录。
 
 ## 用中文对话提示运行
 

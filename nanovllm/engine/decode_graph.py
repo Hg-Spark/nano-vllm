@@ -68,6 +68,7 @@ class DecodeGraphBucket:
         self.graph: torch.cuda.CUDAGraph | None = None
         self.logits: torch.Tensor | None = None
         self.replay_count = 0
+        self._page_table_key = None
 
     @property
     def captured(self) -> bool:
@@ -97,7 +98,12 @@ class DecodeGraphBucket:
         self._copy_layout("kv_positions", layout.kv_positions)
         self._copy_layout("state_slot_ids", layout.state_slots)
         stage_pinned(self._host_buffers["paged_kv_indptr"], layout.paged_kv_indptr)
-        self._copy_layout("paged_kv_indices", layout.paged_kv_indices)
+        # The physical page mapping remains stable across tokens in the same
+        # request rows. Only indptr/last-page-length need fresh planning.
+        key = getattr(layout, "page_table_key", None)
+        if key is None or key != getattr(self, "_page_table_key", None):
+            self._copy_layout("paged_kv_indices", layout.paged_kv_indices)
+        self._page_table_key = key
         stage_pinned(self._host_buffers["paged_kv_last_page_len"], layout.paged_kv_last_page_len)
 
     def _plan(self, num_page_indices: int) -> None:
@@ -150,6 +156,7 @@ class DecodeGraphBucket:
 
         self.attention_spec = attention_spec
         self._seed_capture_inputs()
+        self._page_table_key = None
         capture_stream = torch.cuda.Stream()
         try:
             for is_capture in (False, True):
@@ -193,5 +200,6 @@ class DecodeGraphBucket:
         if self._has_pending_host_transfer:
             self._host_transfer_done.synchronize()
         self._host_buffers = {}
+        self._page_table_key = None
         self._host_transfer_done = None
         self.graph = self.logits = self.wrapper = self.context = self.workspace = None

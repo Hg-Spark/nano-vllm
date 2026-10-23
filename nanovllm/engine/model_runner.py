@@ -6,6 +6,7 @@ from torch.profiler import record_function
 
 from nanovllm.config import Config
 from nanovllm.engine.batch_common import (
+    DecodePageTableCache,
     PinnedMetadataPool,
     PreparedBatch,
     build_decode_batch_layout,
@@ -13,6 +14,7 @@ from nanovllm.engine.batch_common import (
     prepare_prefill,
 )
 from nanovllm.engine.cache_runtime import (
+    GDNRestoreStaging,
     allocate_runtime_caches,
     restore_pending_states,
 )
@@ -42,6 +44,8 @@ class ModelRunner:
         self.kv_cache = None
         self.attention_workspace = None
         self.metadata_pool = PinnedMetadataPool()
+        self.decode_page_table_cache = DecodePageTableCache()
+        self.gdn_restore_staging = GDNRestoreStaging()
         self.prefill_wrapper = None
         self.decode_wrapper = None
         self.decode_graph_buckets: dict[int, DecodeGraphBucket] = {}
@@ -125,6 +129,10 @@ class ModelRunner:
         self.decode_graph_buckets.clear()
         self.metadata_pool.clear()
         self.metadata_pool = None
+        if hasattr(self, "decode_page_table_cache"):
+            self.decode_page_table_cache.clear()
+        if hasattr(self, "gdn_restore_staging"):
+            self.gdn_restore_staging.clear()
         self.kv_cache = None
         self.prefill_wrapper = None
         self.decode_wrapper = None
@@ -229,7 +237,9 @@ class ModelRunner:
         if bucket is None:
             self.decode_graph_fallbacks["missing_bucket"] += 1
             return None
-        layout = build_decode_batch_layout(chunks, self.block_size)
+        layout = build_decode_batch_layout(
+            chunks, self.block_size, getattr(self, "decode_page_table_cache", None)
+        )
         if not bucket.can_run(layout):
             self.decode_graph_fallbacks["layout_exceeded"] += 1
             return None
@@ -246,7 +256,7 @@ class ModelRunner:
         seqs = [chunk.seq for chunk in chunks]
         if not is_prefill and any(seq.pending_state_snapshot is not None for seq in seqs):
             raise RuntimeError("pending GDN prefix restore is valid only for prefill")
-        restore_pending_states(self.model, seqs)
+        restore_pending_states(self.model, seqs, self.gdn_restore_staging)
 
         if not is_prefill:
             graph_result = self._run_decode_graph(chunks, seqs)
@@ -256,7 +266,9 @@ class ModelRunner:
         batch = (
             prepare_prefill(chunks, self.block_size, self.metadata_pool)
             if is_prefill
-            else prepare_decode(chunks, self.block_size, self.metadata_pool)
+            else prepare_decode(
+                chunks, self.block_size, self.metadata_pool, self.decode_page_table_cache
+            )
         )
         context = self._plan_attention(batch)
         profile_range = "nanovllm::prefill_model" if is_prefill else "nanovllm::decode_model"

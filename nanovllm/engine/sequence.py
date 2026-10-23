@@ -31,6 +31,8 @@ class Sequence:
         # Hybrid history is committed atomically after a successful model step.
         self.committed_tokens = 0
         self.block_table: list[int] = []
+        # Updated by BlockManager whenever the physical page mapping changes.
+        self.block_table_version = 0
         self.state_slot = -1
         # Set only on a joint-prefix hit. ModelRunner consumes the snapshot
         # immediately before executing the resumed prefill chunk.
