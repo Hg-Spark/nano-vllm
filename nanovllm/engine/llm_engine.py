@@ -226,8 +226,7 @@ class LLMEngine:
             if is_prefill and chunk.end == prompt_boundary and seq.prompt_snapshot is None:
                 captures.append((seq, chunk.end, "prompt"))
             elif chunk.end > prompt_boundary and (
-                (not is_prefill)
-                or (chunk.end == seq.num_prompt_tokens and not request_complete)
+                (not is_prefill) or (chunk.end == seq.num_prompt_tokens and not request_complete)
             ):
                 # Capture the final Decode boundary even when this sample ends
                 # the request. The sampled token itself was not forwarded.
@@ -247,9 +246,7 @@ class LLMEngine:
                 else:
                     seq.completion_snapshot = snapshots[0]
                 cache.stage(seq, kind)
-        self._last_snapshot_capture_seconds = (
-            perf_counter() - capture_start if captures else 0.0
-        )
+        self._last_snapshot_capture_seconds = perf_counter() - capture_start if captures else 0.0
 
         publications = []
         for seq in finished:

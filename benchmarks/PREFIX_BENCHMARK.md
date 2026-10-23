@@ -26,7 +26,7 @@ The two-entry variant requires at least one actual snapshot eviction during targ
 
 - **TTFT**: measured at engine level, from admission to first generated token. Target requests are measured after warm-up; for active batch >1 this includes scheduler queueing. A/B comparisons use median-of-run mean TTFT.
 - **Recovered tokens**: per-request `restored_tokens_per_target`, arithmetic mean, and `restored_prompt_token_ratio = restored prompt tokens / total target prompt tokens`. A request hit rate alone is insufficient to establish actual prefill work saved.
-- **Snapshot footprint**: `peak_snapshot_bytes_including_setup` counts globally resident CPU GDN snapshots. Rolling per-request staging is tracked separately with `staging_snapshot_bytes` and `peak_staging_snapshot_bytes`; `peak_total_snapshot_bytes` covers their combined persistent logical footprint, excluding transient D2H batches.
+- **Snapshot footprint**: `peak_snapshot_bytes_including_setup` counts globally resident CPU GDN snapshots. Rolling request staging is measured separately by `staging_snapshot_bytes_after_target` and `peak_staging_snapshot_bytes_including_setup`; `peak_total_snapshot_bytes_including_setup` records the combined persistent logical peak, excluding transient D2H batches.
 - **Cache miss penalty**: the zero-overlap ON/OFF TTFT comparison isolates the effect of enabling the cache without reuse, including hash/snapshot work. It is not necessarily pure lookup cost.
 - **Validation**: output token hashes must match across A/B, no-hit targets must restore zero tokens, and cache-enabled hot workloads must actually restore a prefix.
 

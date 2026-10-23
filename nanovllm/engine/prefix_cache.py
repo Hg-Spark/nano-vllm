@@ -185,23 +185,6 @@ class PrefixCache:
                 return digest
         return None
 
-    def can_publish(self, seq: Sequence, position: int) -> bool:
-        """Check whether one new entry can fit without evicting an active reuse."""
-        digest = self._publish_digest(seq, position)
-        if digest is None or digest in self._entries:
-            return False
-        if len(self._entries) < self._capacity():
-            return True
-        return (
-            self._publication_victim(
-                {
-                    key: (entry.kind, self._active_reuses.get(key, 0) > 0)
-                    for key, entry in self._entries.items()
-                },
-            )
-            is not None
-        )
-
     def _virtual_plan(self, candidates: list[tuple[Sequence, int]]) -> dict:
         """Simulate the entire batch, retaining original entries if revisited.
 
@@ -214,8 +197,9 @@ class PrefixCache:
             digest: (entry.kind, self._active_reuses.get(digest, 0) > 0, None)
             for digest, entry in self._entries.items()
         }
-        # New prompt completions win ties over new conversation continuations.
-        for seq, position in sorted(candidates, key=lambda pair: self._kind(*pair) == "prompt"):
+        # Consume proposals in request lifecycle order (prompt, then
+        # completion). Under tight capacity the latest checkpoint wins.
+        for seq, position in candidates:
             digest = self._publish_digest(seq, position)
             if digest is None or digest in virtual:
                 continue
@@ -232,21 +216,6 @@ class PrefixCache:
             capture = None if digest in self._entries else (seq, position)
             virtual[digest] = (kind, False, capture)
         return virtual
-
-    def plan_captures(self, candidates: list[tuple[Sequence, int]]) -> list[tuple[Sequence, int]]:
-        """Return only new entries that survive the complete batch plan."""
-        return [
-            value[2] for value in self._virtual_plan(candidates).values() if value[2] is not None
-        ]
-
-    def publish_many(self, seq: Sequence, snapshots: tuple[GDNStateSnapshot, ...]) -> None:
-        """Compatibility entry point for explicitly provided host snapshots."""
-        if not snapshots or not self._can_capture():
-            return
-        by_position = {snapshot.num_tokens: snapshot for snapshot in snapshots}
-        if len(by_position) != len(snapshots):
-            raise RuntimeError("duplicate GDN snapshot checkpoint boundary")
-        self.publish_batch([(seq, snapshot) for _, snapshot in sorted(by_position.items())])
 
     def publish_batch(self, candidates: list[tuple[Sequence, GDNStateSnapshot]]) -> None:
         """Plan and commit one batch without independently reselecting victims."""

@@ -111,7 +111,7 @@ class SchedulerCoreTest(unittest.TestCase):
         cache = scheduler.cache_manager
         old = Sequence([900] * 80)
         cache.block_manager.ensure_capacity(old, 64)
-        cache.prefix_cache.publish_many(old, (GDNStateSnapshot(64, ()),))
+        cache.publish_batch([(old, GDNStateSnapshot(64, ()))])
         cache.release(old)
         self.assertEqual(len(cache.prefix_cache), 1)
         self.assertEqual(len(cache.block_manager.free_block_ids), 4)
@@ -353,7 +353,7 @@ class SchedulerCoreTest(unittest.TestCase):
         cache = scheduler.cache_manager
         old = Sequence([900] * 65)
         cache.block_manager.ensure_capacity(old, 64)
-        cache.prefix_cache.publish_many(old, (GDNStateSnapshot(64, ()),))
+        cache.publish_batch([(old, GDNStateSnapshot(64, ()))])
         cache.release(old)
         incoming = Sequence(list(range(80)), SamplingParams(max_tokens=1))
         scheduler.add(incoming)

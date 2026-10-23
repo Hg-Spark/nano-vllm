@@ -180,7 +180,7 @@ python -m scripts.verify_prefix_resume "$NANOVLLM_MODEL" \
 
 前缀探针按如下流程执行：
 
-1. 构造 A/B 两个输入，共享至少 64 Token 且对齐 KV 页的 token 前缀，后缀不同。
+1. 构造 A/B 两个输入，共享至少一个完整 KV Page 的 token 前缀，并按当前页大小对齐，后缀不同。
 2. 关闭前缀缓存运行 B，得到基线 token。
 3. 在启用缓存的实例中运行 A，使共享边界的 KV/GDN 状态发布到缓存。
 4. 运行 B，复用共享 KV 并恢复保持原始状态精度的 GDN 快照。
@@ -190,7 +190,7 @@ python -m scripts.verify_prefix_resume "$NANOVLLM_MODEL" \
 
 将误差指标记录在独立的本地实验结果中。当前 snapshot 不再主动降精度；恢复验证仍用于发现状态边界、复制或其他执行路径问题。
 
-Prefix Cache 在 GPU KV 静态容量中预留批量最终 GDN 状态堆叠缓冲，不再预留 FlashInfer 64-token 中间 Checkpoint。Prompt 在最后一个 Token 前的最近完整 KV Page 边界捕获固定状态，Decode 在完整 Page 边界更新一个 Completion 暂存（包括结束步）；请求结束才统一发布两种独立候选。全局条目和 `max_prefix_cache_snapshot_bytes` 限制已发布的 Resident Snapshot；活跃请求的两份暂存额外由 `2 × max_num_seqs × snapshot_nbytes` 硬性槽位上限约束，分别提供 `staging_snapshot_bytes`、`peak_staging_snapshot_bytes` 和 `peak_total_snapshot_bytes` 统计。CPU 快照保持卷积原始 dtype 与循环状态 FP32，临时 D2H 堆叠不在这些逻辑持久驻留指标内。
+Prefix Cache 在 GPU KV 静态容量中预留 GDN 状态批量捕获的临时堆叠缓冲，不再预留 FlashInfer 64-token 中间 Checkpoint。Prompt 在最后一个 Token 前的最近完整 KV Page 边界捕获固定状态，Decode 在完整 Page 边界更新一个 Completion 暂存（包括结束步）；请求结束才统一发布两种独立候选。全局条目和 `max_prefix_cache_snapshot_bytes` 限制已发布的 Resident Snapshot；活跃请求的两份暂存额外由 `2 × max_num_seqs × snapshot_nbytes` 硬性槽位上限约束，分别提供 `staging_snapshot_bytes`、`peak_staging_snapshot_bytes` 和 `peak_total_snapshot_bytes` 统计。CPU 快照保持卷积原始 dtype 与循环状态 FP32，临时 D2H 堆叠不在这些逻辑持久驻留指标内。
 
 ## 测量端到端性能
 

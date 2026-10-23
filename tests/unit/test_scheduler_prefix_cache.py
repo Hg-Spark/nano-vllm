@@ -16,7 +16,6 @@ class SchedulerPrefixCacheTest(unittest.TestCase):
         first = scheduler.schedule()
         self.assertEqual((first.prefill_chunks[0].start, first.prefill_chunks[0].end), (0, 48))
         snapshot = GDNStateSnapshot(48, ())
-        original.cache_snapshot = snapshot
         block = original.block_table[0]
         scheduler.postprocess(first.prefill_chunks, [None], True)
 
@@ -48,7 +47,6 @@ class SchedulerPrefixCacheTest(unittest.TestCase):
             step = scheduler.schedule()
             scheduler.postprocess(step.decode_chunks, [token], False)
         snapshot = GDNStateSnapshot(32, ())
-        seq.cache_snapshot = snapshot
         final = scheduler.schedule()
         scheduler.cache_manager.publish_batch([(seq, snapshot)])
         scheduler.postprocess(final.decode_chunks, [33], False)
@@ -71,8 +69,10 @@ class SchedulerPrefixCacheTest(unittest.TestCase):
         scheduler.prefilling.append(seq)
         chunk = scheduler.schedule().prefill_chunks[0]
         self.assertEqual((chunk.start, chunk.end), (1100, 4096))
-        self.assertFalse(scheduler.cache_manager.prefix_cache.can_publish(seq, 4097))
-        self.assertTrue(scheduler.cache_manager.prefix_cache.can_publish(seq, 4096))
+        with self.assertRaisesRegex(RuntimeError, "invalid GDN snapshot"):
+            scheduler.cache_manager.publish_batch([(seq, GDNStateSnapshot(4097, ()))])
+        scheduler.cache_manager.publish_batch([(seq, GDNStateSnapshot(4096, ()))])
+        self.assertEqual(scheduler.cache_manager.prefix_cache._resident_lengths, [4096])
 
 
 if __name__ == "__main__":

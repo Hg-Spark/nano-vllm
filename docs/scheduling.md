@@ -60,7 +60,7 @@ KV 只增长到容纳 `end` 所需的块数；GDN 始终沿用该请求的同一
 flowchart LR
     A[预留：KV 增量与 GDN 槽] --> B[执行：修改物理张量]
     B --> C[需要时捕获 GDN 快照]
-    C --> D[需要时发布联合前缀]
+    C --> D[仅请求完成时发布两个候选]
     D --> E[提交 committed_tokens 并追加 token]
 ```
 
@@ -70,12 +70,13 @@ Scheduler 按全生命周期 KV 页额度及 GDN 槽位准入新请求。已接�
 
 ### 执行成功：推进一个共同边界
 
-`postprocess()`检查批次结果数量与采样结果，在需要时发布联合前缀，随后提交逻辑进度并追加预测 token：
+`LLMEngine._run_batch()` 在 Forward 后捕获有效的 Prompt 或 Completion 对齐状态，仅在请求完成时统一尝试发布两个候选；之后由 `Scheduler.postprocess()` 校验采样结果、提交进度并追加预测 token：
 
 ```text
 check result count
   → sampling-result validation
-  → publish this chunk's KV/GDN prefix if needed
+  → capture prompt/rolling completion checkpoint if aligned
+  → publish both candidates only if the request completes
   → committed_tokens = ScheduledChunk.end
   → append sampled token if applicable
 ```
@@ -119,12 +120,12 @@ check result count
 
 - 本轮 Forward 已真实处理到对应的 `chunk.end`，保存发生在释放请求状态之前；
 - `chunk.end` 是完整 KV 块边界（16/32/64），且请求为纯文本；
-- 缓存条目、CPU Snapshot 字节预算允许保留新条目，且相同前缀尚未存在；
+- 请求私有捕获不受当前全局淘汰结果约束；完成时再按全局条目数、CPU Snapshot 预算和重复 Hash 决定是否发布；
 - KV Block 引用计数已建立，Snapshot 的 GDN 状态与相同长度的 KV 一一对应。
 
-生成结束时最后一次采样的 Token **尚未经过 Forward**，因此结束保存点对应的是 `chunk.end`，不是完整 `len(seq.token_ids)`。下一轮请求会重新计算该最后 Token。非对齐结尾直接跳过，不修改 GDN State 长度，也不要求额外 Decode Forward。
+生成结束时最后一次采样的 Token **尚未经过 Forward**，因此结束保存点对应的是 `chunk.end`，不是完整 `len(seq.token_ids)`。下一轮请求会重新计算该最后 Token。非对齐结束不会额外执行 Decode Forward；Completion 暂存保留最近一次有效的对齐状态。最后一次 Decode 如果恰好处理到完整 Page 边界，也允许捕获。
 
-缓存超限时优先淘汰未被活跃请求复用的旧条目；若无可替换条目，则在 GPU→CPU 复制前放弃捕获。请求仍可在原有引用保护下继续使用已缓存 KV，随后由 `release()` 解除标记。
+缓存满时优先淘汰没有其他活跃请求复用的条目。请求结束并发布之前先解除本请求的 reuse 标记，KV 页仍由请求持有，直到 `postprocess()` 释放。无法容纳的候选不会进入全局缓存，私有暂存会在请求释放时清理；捕获与发布预算判断是分离的。
 
 ### 怎样查找和恢复
 
@@ -168,7 +169,7 @@ check result count
 恢复后：卷积 = 原 dtype，循环矩阵 = FP32
 ```
 
-这样不会因 snapshot 本身引入 BF16 量化误差。代价是循环状态主机占用约为 BF16 方案的两倍；条目上限约束缓存项数，独立的 CPU 快照预算按固定快照大小计账，缓存还会持有 GPU KV 引用并产生设备到主机的快照传输。启动时会为最终 GDN 状态的批量捕获栈估算 GPU 工作区预算，避免 KV 静态容量挤占全部临时空间；这仍不是完整的 CUDA 峰值 Profile。单份快照大小由启动时的 GDN 状态池计算；如果配置的 CPU 快照预算连一份也容纳不了，调度器不会为发布前缀主动分片或捕获状态，发布时使用启动时估算的固定 `snapshot_nbytes` 计账并按全局冷优先 FIFO 的策略维护总预算，不重新逐条计算张量大小。
+这样不会因 snapshot 本身引入 BF16 量化误差。代价是循环状态主机占用约为 BF16 方案的两倍；条目上限约束缓存项数，独立的 CPU 快照预算按固定快照大小计账，缓存还会持有 GPU KV 引用并产生设备到主机的快照传输。启动时会为 GDN 状态的批量捕获栈估算 GPU 工作区预算，避免 KV 静态容量挤占全部临时空间；这仍不是完整的 CUDA 峰值 Profile。单份快照大小由启动时的 GDN 状态池计算。全局 `max_prefix_cache_snapshot_bytes` 约束已发布条目，活跃请求另最多保留两份独立的 GDN CPU 暂存（固定 Prompt、滚动 Completion），由 `2 × max_num_seqs` 槽位数约束。分别通过 `snapshot_bytes`、`staging_snapshot_bytes` 和 `peak_total_snapshot_bytes` 衡量持久 CPU 张量逻辑大小；批量 D2H 临时分配不包含在内。
 
 ## 阅读代码时应检查的约束
 

@@ -61,7 +61,7 @@ class LLMEngineStepTest(unittest.TestCase):
     def test_decode_failure_disables_engine(self):
         scheduler = make_scheduler(max_num_seqs=2, num_blocks=32, block_size=4, eos_token_ids=(99,))
         running = make_running_sequence(scheduler, list(range(65)))
-        scheduler.cache_manager.prefix_cache.publish_many(running, (GDNStateSnapshot(64, ()),))
+        scheduler.cache_manager.publish_batch([(running, GDNStateSnapshot(64, ()))])
         image = SimpleNamespace(visual_features=object(), image_start=0)
         scheduler.add(Sequence([3, 4], SamplingParams(max_tokens=2), image_state=image))
         engine = make_engine_stub()
@@ -340,7 +340,7 @@ class LLMEngineStepTest(unittest.TestCase):
         chunks = scheduler.schedule().prefill_chunks
         self.assertEqual(len(chunks), 2)
         engine._run_batch(chunks, True)
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)
         self.assertEqual(len(scheduler.cache_manager.prefix_cache), 0)
         engine._run_batch(scheduler.schedule().prefill_chunks, True)
         self.assertEqual(len(scheduler.cache_manager.prefix_cache), 1)

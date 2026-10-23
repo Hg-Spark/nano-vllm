@@ -325,13 +325,9 @@ class ModelRunner:
         for index, (seq_id, position, _) in enumerate(states):
             offset = index * layer_count
             seq = candidates[index][0]
-            prompt_boundary = (
-                (seq.num_prompt_tokens - 1) // self.block_size
-            ) * self.block_size
+            prompt_boundary = ((seq.num_prompt_tokens - 1) // self.block_size) * self.block_size
             previous = (
-                seq.prompt_snapshot
-                if position == prompt_boundary
-                else seq.completion_snapshot
+                seq.prompt_snapshot if position == prompt_boundary else seq.completion_snapshot
             )
             if previous is not None and len(previous.layers) == layer_count:
                 # Roll completion state in its private CPU tensors. Never

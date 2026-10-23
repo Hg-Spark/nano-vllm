@@ -68,7 +68,7 @@ class SchedulerAdmissionTest(unittest.TestCase):
         )
         source = Sequence(list(range(64)) + [200])
         scheduler.cache_manager.block_manager.ensure_capacity(source, 64)
-        scheduler.cache_manager.prefix_cache.publish_many(source, (GDNStateSnapshot(64, ()),))
+        scheduler.cache_manager.publish_batch([(source, GDNStateSnapshot(64, ()))])
         scheduler.cache_manager.block_manager.deallocate(source)
 
         for suffix in (list(range(64, 128)), list(range(64, 127)) + [200]):
