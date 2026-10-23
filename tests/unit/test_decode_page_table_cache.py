@@ -58,11 +58,21 @@ class DecodePageTableCacheTest(unittest.TestCase):
         source = Sequence([3] * 32)
         dest = Sequence([3] * 32)
         manager.ensure_capacity(source, 32)
+        manager.ensure_capacity(dest, 32)
         cache = DecodePageTableCache()
+
+        before = build_decode_batch_layout((decode_chunk(dest),), 16, cache)
+        original_pages = before.paged_kv_indices
+        manager.deallocate(dest)
+        version_before_attach = dest.block_table_version
         manager.attach_shared_prefix(dest, tuple(source.block_table), 32)
-        result = build_decode_batch_layout((decode_chunk(dest),), 16, cache)
-        self.assertEqual(result.paged_kv_indices, tuple(source.block_table))
-        self.assertGreater(dest.block_table_version, 0)
+        after = build_decode_batch_layout((decode_chunk(dest),), 16, cache)
+
+        self.assertEqual(dest.block_table_version, version_before_attach + 1)
+        self.assertNotEqual(before.page_table_key, after.page_table_key)
+        self.assertNotEqual(original_pages, after.paged_kv_indices)
+        self.assertEqual(after.paged_kv_indices, tuple(source.block_table))
+        self.assertEqual(after.paged_kv_indptr, (0, 2))
 
 
 if __name__ == "__main__":

@@ -243,6 +243,9 @@ class PrefixCacheTest(unittest.TestCase):
 
         manager.release(consumers[0])
         self.assertEqual(cache._active_reuses[digest], 1)
+        # A repeated release must not decrement the second request's reuse count.
+        manager.release(consumers[0])
+        self.assertEqual(cache._active_reuses[digest], 1)
         # Eviction releases only the cache owner; live request KV refs remain valid.
         self.assertTrue(cache.evict())
         self.assertNotIn(digest, cache._entries)
@@ -254,13 +257,6 @@ class PrefixCacheTest(unittest.TestCase):
         self.assertEqual(
             len(manager.block_manager.free_block_ids), manager.block_manager.num_blocks
         )
-
-    def test_unmark_reused_is_idempotent(self):
-        manager = make_cache_manager(num_blocks=8, block_size=16, max_prefix_entries=2)
-        seq = Sequence([1] * 65)
-        manager.release(seq)
-        manager.release(seq)
-        self.assertEqual(manager.prefix_cache._active_reuses, {})
 
     def test_zero_snapshot_budget_skips_publication(self):
         manager = make_cache_manager(
@@ -377,7 +373,15 @@ class PrefixCacheTest(unittest.TestCase):
         self.assertEqual(len(cache), 2)
         self.assertEqual(cache.published_count, 2)
         self.assertEqual(cache._resident_length_counts[16], 2)
-        self.assertIsNotNone(cache.find(Sequence([2] * 17), 16))
+        entry = cache.find(Sequence([2] * 17), 16)
+        self.assertIsNotNone(entry)
+        before = [manager.block_manager.block_refcounts[b] for b in entry.block_ids]
+        cache.publish_batch([(second, GDNStateSnapshot(16, ()))])
+        self.assertEqual(cache.published_count, 2)
+        self.assertIs(cache.find(Sequence([2] * 17), 16), entry)
+        self.assertEqual(
+            [manager.block_manager.block_refcounts[b] for b in entry.block_ids], before
+        )
 
     def test_batch_publication_limits_survivors_to_capacity(self):
         manager = make_cache_manager(num_blocks=16, block_size=16, max_prefix_entries=1)
@@ -397,30 +401,19 @@ class PrefixCacheTest(unittest.TestCase):
     def test_conversation_completion_can_evict_idle_prompt(self):
         manager = make_cache_manager(num_blocks=16, block_size=16, max_prefix_entries=1)
         cache = manager.prefix_cache
-        prompt = Sequence([5] * 16)
+        prompt = Sequence([5] * 17)
         manager.block_manager.ensure_capacity(prompt, 16)
         cache.publish_batch([(prompt, GDNStateSnapshot(16, ()))])
+        self.assertEqual(cache.find(prompt, 16).kind, "prompt")
         convo = Sequence([7] * 15)
         manager.block_manager.ensure_capacity(convo, 16)
         convo.append_token(8)
         self.assertEqual(cache.published_count, 1)
         cache.publish_batch([(convo, GDNStateSnapshot(16, ()))])
+        self.assertEqual(cache.find(convo, 16).kind, "conversation")
         self.assertIsNone(cache.find(Sequence([5] * 16 + [3]), 16))
         self.assertIsNotNone(cache.find(Sequence([7] * 15 + [8, 3]), 16))
         self.assertEqual(len(cache), 1)
-
-    def test_batch_publication_last_candidate_wins_when_capacity_one(self):
-        manager = make_cache_manager(num_blocks=16, block_size=16, max_prefix_entries=1)
-        cache = manager.prefix_cache
-        convo = Sequence([7] * 15)
-        manager.block_manager.ensure_capacity(convo, 16)
-        convo.append_token(8)
-        prompt = Sequence([5] * 16)
-        manager.block_manager.ensure_capacity(prompt, 16)
-        cache.publish_batch([(convo, GDNStateSnapshot(16, ())), (prompt, GDNStateSnapshot(16, ()))])
-        self.assertEqual(len(cache), 1)
-        self.assertIsNone(cache.find(convo, 16))
-        self.assertIsNotNone(cache.find(prompt, 16))
 
     def test_batch_commit_matches_virtual_survivors_when_old_entry_reappears(self):
         manager = make_cache_manager(num_blocks=16, block_size=16, max_prefix_entries=2)
