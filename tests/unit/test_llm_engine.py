@@ -236,7 +236,7 @@ class LLMEngineStepTest(unittest.TestCase):
 
         def capture(entries):
             calls.extend((item.seq_id, position) for item, position in entries)
-            return {item.seq_id: (GDNStateSnapshot(position, ()),) for item, position in entries}
+            return {item.seq_id: GDNStateSnapshot(position, ()) for item, position in entries}
 
         engine = make_engine_stub()
         engine.scheduler = scheduler
@@ -265,7 +265,7 @@ class LLMEngineStepTest(unittest.TestCase):
 
         def capture(entries):
             calls.extend((item.seq_id, position) for item, position in entries)
-            return {item.seq_id: (GDNStateSnapshot(position, ()),) for item, position in entries}
+            return {item.seq_id: GDNStateSnapshot(position, ()) for item, position in entries}
 
         samples = iter((31, 32, 33))
         engine = make_engine_stub()
@@ -300,7 +300,7 @@ class LLMEngineStepTest(unittest.TestCase):
 
         def capture(entries):
             calls.extend(entries)
-            return {item.seq_id: (GDNStateSnapshot(pos, ()),) for item, pos in entries}
+            return {item.seq_id: GDNStateSnapshot(pos, ()) for item, pos in entries}
 
         engine = make_engine_stub()
         engine.scheduler = scheduler
@@ -315,7 +315,7 @@ class LLMEngineStepTest(unittest.TestCase):
         self.assertEqual([(seq_.seq_id, pos) for seq_, pos in calls], [(seq.seq_id, 16)])
         self.assertEqual(scheduler.cache_manager.prefix_cache._resident_lengths, [16])
 
-    def test_same_batch_captures_one_snapshot_for_identical_prefix(self):
+    def test_identical_prompts_capture_twice_but_publish_once(self):
         scheduler = make_scheduler(
             max_num_seqs=2, num_blocks=32, block_size=16, max_num_batched_tokens=128
         )
@@ -329,7 +329,7 @@ class LLMEngineStepTest(unittest.TestCase):
 
         def capture(entries):
             calls.extend(entries)
-            return {seq.seq_id: (GDNStateSnapshot(position, ()),) for seq, position in entries}
+            return {seq.seq_id: GDNStateSnapshot(position, ()) for seq, position in entries}
 
         engine.model_runner = SimpleNamespace(
             run=lambda chunks, is_prefill: BatchResult(

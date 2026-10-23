@@ -239,12 +239,12 @@ class LLMEngine:
             else {}
         )
         for seq, _, kind in captures:
-            snapshots = captured.get(seq.seq_id)
-            if snapshots:
+            snapshot = captured.get(seq.seq_id)
+            if snapshot is not None:
                 if kind == "prompt":
-                    seq.prompt_snapshot = snapshots[0]
+                    seq.prompt_snapshot = snapshot
                 else:
-                    seq.completion_snapshot = snapshots[0]
+                    seq.completion_snapshot = snapshot
                 cache.stage(seq, kind)
         self._last_snapshot_capture_seconds = perf_counter() - capture_start if captures else 0.0
 

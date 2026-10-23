@@ -70,7 +70,13 @@ class BenchmarkAdditionsTest(unittest.TestCase):
                         "published_snapshots_during_target": snapshot_count,
                         "evicted_snapshots_during_target": 1 if cache_entries else 0,
                         "retained_snapshots_after_target": 1 if cache_entries else 0,
-                        "peak_snapshot_bytes_including_setup": 256 if cache_entries else 0,
+                        "peak_snapshot_bytes_including_setup": 1024**2 if cache_entries else 0,
+                        "peak_staging_snapshot_bytes_including_setup": (
+                            4 * 1024**2 if cache_entries else 0
+                        ),
+                        "peak_total_snapshot_bytes_including_setup": (
+                            5 * 1024**2 if cache_entries else 0
+                        ),
                     },
                 },
             }
@@ -92,9 +98,21 @@ class BenchmarkAdditionsTest(unittest.TestCase):
                 "hit rate: 1.00, restored/input: 20.0%",
                 rendered,
             )
-            self.assertIn("Peak CPU GDN snapshot tensor bytes:", rendered)
+            self.assertIn("Peak CPU GDN snapshot tensors:", rendered)
+            self.assertIn("Resident: 1.00 MiB", rendered)
+            self.assertIn("Staging: 4.00 MiB", rendered)
+            self.assertIn("Total: 5.00 MiB", rendered)
             self.assertIn("published_snapshots_during_target: 2", rendered)
             self.assertIn("retained_snapshots_after_target: 1", rendered)
+
+            # Old prefix JSON is intentionally unsupported: all three
+            # distinct CPU snapshot peaks must be recorded, not inferred.
+            legacy = result(32, 1024, 1.0, 2, 7.0)
+            del legacy["result"]["details"]["peak_total_snapshot_bytes_including_setup"]
+            Path(folder, "on.json").write_text(json.dumps(legacy), encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "missing required prefix snapshot metrics"):
+                with redirect_stdout(StringIO()):
+                    summarize_bench.main([folder, "--min-repeats", "1"])
 
     def test_small_interference_p99_is_not_reported(self):
         def result(mode):

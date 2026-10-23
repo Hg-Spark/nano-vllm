@@ -161,7 +161,9 @@ class PrefixCache:
 
     @staticmethod
     def _kind(seq: Sequence, position: int) -> str:
-        return "prompt" if position <= seq.num_prompt_tokens else "conversation"
+        # The full-prompt boundary belongs to the rolling completion state:
+        # only the checkpoint before the last prompt token is a prompt entry.
+        return "prompt" if position < seq.num_prompt_tokens else "conversation"
 
     def _publish_digest(self, seq: Sequence, position: int) -> bytes | None:
         if not self._can_capture() or self._capacity() == 0 or seq.image_state is not None:
@@ -189,7 +191,7 @@ class PrefixCache:
         """Simulate the entire batch, retaining original entries if revisited.
 
         Entries in the returned dictionary are the *exact* desired survivors.
-        The third value is the new capture to install, or None if already cached.
+        The third value is the supplied candidate to install, or None if already cached.
         """
         if not self._can_capture() or not self._capacity():
             return {}
@@ -212,9 +214,9 @@ class PrefixCache:
                     continue
                 del virtual[victim]
             # A prior resident may have been virtually displaced and revisited:
-            # keep the original snapshot, not a redundant new CPU capture.
-            capture = None if digest in self._entries else (seq, position)
-            virtual[digest] = (kind, False, capture)
+            # retain the original snapshot instead of replacing it.
+            candidate = None if digest in self._entries else (seq, position)
+            virtual[digest] = (kind, False, candidate)
         return virtual
 
     def publish_batch(self, candidates: list[tuple[Sequence, GDNStateSnapshot]]) -> None:
@@ -242,10 +244,10 @@ class PrefixCache:
         for digest in tuple(self._entries):
             if digest not in desired:
                 self._evict_hash(digest)
-        for digest, (_kind, _active, capture) in desired.items():
-            if capture is None:
+        for digest, (_kind, _active, candidate) in desired.items():
+            if candidate is None:
                 continue
-            seq, position = capture
+            seq, position = candidate
             if digest in self._entries:
                 continue
             if len(self._entries) >= self._capacity():

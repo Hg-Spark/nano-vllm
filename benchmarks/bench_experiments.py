@@ -300,8 +300,9 @@ def run(a):
         if vocab < 2:
             raise RuntimeError("vocabulary is unexpectedly small")
         rng = Random(a.seed)
-        # This setup request must not occupy any prefix-cache entry.
-        warmup = make_requests(engine, [[1] * 15], 1)
+        # Warm both Prefill and one Decode Forward without reaching a KV-page
+        # boundary or contaminating the prefix-cache measurement.
+        warmup = make_requests(engine, [[1] * 14], 2)
         run_benchmark(engine, warmup)
 
         if a.schedule_mode == "exclusive_decode_first":

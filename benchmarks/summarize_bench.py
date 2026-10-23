@@ -101,6 +101,18 @@ def main(argv=None):
             failed.append(path.name)
             continue
         result = r["result"]
+        if r["config"]["scenario"] == "prefix":
+            required = (
+                "peak_snapshot_bytes_including_setup",
+                "peak_staging_snapshot_bytes_including_setup",
+                "peak_total_snapshot_bytes_including_setup",
+            )
+            missing = [key for key in required if key not in result["details"]]
+            if missing:
+                raise SystemExit(
+                    f"{path.name}: missing required prefix snapshot metrics {missing}; "
+                    "rerun with the current benchmark schema"
+                )
         samples.append((path.name, {**result, "config": r["config"]}))
     if not samples:
         raise SystemExit(
@@ -248,16 +260,20 @@ def main(argv=None):
                 mean_restored = median(
                     run["details"]["mean_restored_prefix_tokens"] for run in treatment
                 )
-                snapshot_mib = median(
-                    run["details"]["peak_snapshot_bytes_including_setup"] / (1024 * 1024)
-                    for run in treatment
+                snapshot_peaks = (
+                    ("Resident", "peak_snapshot_bytes_including_setup"),
+                    ("Staging", "peak_staging_snapshot_bytes_including_setup"),
+                    ("Total", "peak_total_snapshot_bytes_including_setup"),
                 )
                 print(
                     f"  Prefix restored tokens: {restored:.0f}, "
                     f"mean/request: {mean_restored:.0f}, hit rate: {hits:.2f}, "
                     f"restored/input: {reused_fraction:.1%}"
                 )
-                print(f"  Peak CPU GDN snapshot tensor bytes: {snapshot_mib:.2f} MiB")
+                print("  Peak CPU GDN snapshot tensors:")
+                for name, field in snapshot_peaks:
+                    peak_mib = median(run["details"][field] for run in treatment) / (1024 * 1024)
+                    print(f"    {name}: {peak_mib:.2f} MiB")
                 if p["shared_prefix_len"] == 0:
                     if restored:
                         raise SystemExit("Unshared-prefix workload unexpectedly restored tokens")
@@ -267,7 +283,6 @@ def main(argv=None):
                         "published_snapshots_during_target",
                         "evicted_snapshots_during_target",
                         "retained_snapshots_after_target",
-                        "peak_snapshot_bytes_including_setup",
                     )
                     for field in fields:
                         value = median(r["details"][field] for r in treatment)

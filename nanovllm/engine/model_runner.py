@@ -306,8 +306,8 @@ class ModelRunner:
     @torch.inference_mode()
     def capture_live_states(
         self, candidates: list[tuple[Sequence, int]]
-    ) -> dict[int, tuple[GDNStateSnapshot, ...]]:
-        """Capture at most one final live state per request, before slot release."""
+    ) -> dict[int, GDNStateSnapshot]:
+        """Capture one live GDN state per request before its slot is released."""
         modules = self.model.state_cache_modules()
         if not candidates:
             return {}
@@ -341,5 +341,5 @@ class ModelRunner:
                     (conv_cpu[offset + j].clone(), recurrent_cpu[offset + j].clone())
                     for j in range(layer_count)
                 )
-            snapshots[seq_id] = (GDNStateSnapshot(position, layers),)
+            snapshots[seq_id] = GDNStateSnapshot(position, layers)
         return snapshots

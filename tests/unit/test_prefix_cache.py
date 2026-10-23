@@ -365,7 +365,7 @@ class PrefixCacheTest(unittest.TestCase):
         self.assertEqual(hit.num_tokens, 32)
         self.assertIsNone(manager.prefix_cache.find(Sequence(list(range(32)) + [99]), 31))
 
-    def test_active_cache_entry_prevents_wasted_new_capture(self):
+    def test_active_cache_entry_blocks_eviction_during_publication(self):
         manager = make_cache_manager(num_blocks=16, block_size=16, max_prefix_entries=1)
         original, _ = publish_prefix(manager, [1] * 65, 64)
         cache = manager.prefix_cache

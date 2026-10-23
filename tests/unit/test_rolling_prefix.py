@@ -14,19 +14,15 @@ from nanovllm.sampling_params import SamplingParams
 class FakeRunner:
     def __init__(self):
         self.captures = []
-        self.staging_during_run = []
-        self.cache = None
 
     def run(self, chunks, is_prefill):
-        if self.cache is not None:
-            self.staging_during_run.append(self.cache.staging_snapshot_bytes)
         return BatchResult(
             [None if is_prefill and chunk.end < len(chunk.seq) else 999 for chunk in chunks]
         )
 
     def capture_live_states(self, candidates):
         self.captures.extend(pos for _, pos in candidates)
-        return {seq.seq_id: (GDNStateSnapshot(pos, ()),) for seq, pos in candidates}
+        return {seq.seq_id: GDNStateSnapshot(pos, ()) for seq, pos in candidates}
 
 
 class RollingPrefixTest(unittest.TestCase):
@@ -43,7 +39,6 @@ class RollingPrefixTest(unittest.TestCase):
         )
         scheduler = Scheduler(config, num_kv_cache_blocks=64, snapshot_nbytes=snapshot_bytes)
         runner = FakeRunner()
-        runner.cache = scheduler.cache_manager.prefix_cache
         engine = LLMEngine.__new__(LLMEngine)
         engine.scheduler = scheduler
         engine.model_runner = runner
@@ -82,16 +77,24 @@ class RollingPrefixTest(unittest.TestCase):
         self.assertEqual(entry.num_tokens, 48)
         self.assertEqual(cache._resident_lengths, [48])
 
-    def test_prompt_and_completion_are_distinct_global_entries(self):
-        engine, scheduler, runner = self._engine()
-        seq = Sequence(list(range(64)), SamplingParams(max_tokens=2))
-        cache = self._complete(engine, scheduler, seq)
+    def test_prompt_checkpoint_survives_followup_completion_eviction(self):
+        engine, scheduler, runner = self._engine(entries=2)
+        prompt = list(range(64))
+        cache = self._complete(engine, scheduler, Sequence(prompt, SamplingParams(max_tokens=2)))
         self.assertEqual(runner.captures, [48, 64])
         self.assertEqual(cache._resident_lengths, [48, 64])
-        self.assertEqual(cache.published_count, 2)
         self.assertEqual(
-            scheduler.cache_manager.find_prefix(Sequence(list(range(64)))).num_tokens, 48
+            [entry.kind for entry in cache._entries.values()], ["prompt", "conversation"]
         )
+
+        # Reuse S48, extend the answer and evict S64, not the only prompt
+        # checkpoint eligible for the next identical 64-token request.
+        cache = self._complete(engine, scheduler, Sequence(prompt, SamplingParams(max_tokens=20)))
+        self.assertEqual(cache._resident_lengths, [48, 80])
+        self.assertEqual(
+            [entry.kind for entry in cache._entries.values()], ["prompt", "conversation"]
+        )
+        self.assertEqual(scheduler.cache_manager.find_prefix(Sequence(prompt)).num_tokens, 48)
 
     def test_final_decode_aligned_boundary_is_captured(self):
         for prompt_len, outputs, expected in (
