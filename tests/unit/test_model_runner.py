@@ -93,6 +93,16 @@ class ModelRunnerTest(unittest.TestCase):
         self.assertEqual(bucket._host_transfer_done.synchronize.call_count, 1)
         self.assertEqual(bucket._host_transfer_done.record.call_count, 2)
 
+        # Release must wait for the final transfer and be safe to repeat.
+        transfer_done = bucket._host_transfer_done
+        bucket.graph = Mock()
+        graph = bucket.graph
+        bucket.release()
+        bucket.release()
+        self.assertEqual(transfer_done.synchronize.call_count, 2)
+        graph.reset.assert_called_once()
+        self.assertFalse(bucket._has_pending_host_transfer)
+
     def test_decode_graph_reuses_unchanged_page_index_buffer(self):
         bucket = object.__new__(DecodeGraphBucket)
         bucket.batch_size = 1

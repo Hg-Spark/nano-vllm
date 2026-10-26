@@ -19,7 +19,7 @@ class LogitsSelectionTest(unittest.TestCase):
             lm_head = staticmethod(lambda hidden: hidden)
 
         hidden = torch.arange(20, dtype=torch.float32).reshape(5, 4)
-        context = Context(is_prefill=True, prefill_q_offsets=(0, 3, 5))
+        context = Context(is_prefill=True)
         with use_context(context):
             selected = Qwen3_5ForCausalLM.compute_logits(
                 FakeHead(), hidden, token_indices=torch.tensor([2, 4], dtype=torch.int64)

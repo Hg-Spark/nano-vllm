@@ -143,6 +143,10 @@ class SchedulerCoreTest(unittest.TestCase):
                     [(c.start, c.end) for c in chunks],
                     [(0, 20)],
                 )
+                self.assertFalse(scheduler.cache_manager.prefix_cache.enabled)
+                occupied, reserved = scheduler.cache_manager.reservation_usage([chunks[0].seq])
+                self.assertEqual(occupied, set())
+                self.assertEqual(reserved, scheduler.cache_manager.required_blocks(chunks[0].seq))
 
     def test_chunked_prefill_allocates_only_scheduled_kv_range(self):
         scheduler = make_scheduler(

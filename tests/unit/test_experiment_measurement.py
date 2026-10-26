@@ -28,7 +28,7 @@ class MeasurementTest(unittest.TestCase):
                 decode_tokens=0 if prefill else 2,
                 prefill_seconds=1.0 if prefill else 0.0,
                 decode_seconds=0.0 if prefill else 1.0,
-                snapshot_capture_seconds=0.0,
+                snapshot_capture_seconds=0.125 if prefill else 0.25,
             )
 
         engine = SimpleNamespace(
@@ -53,7 +53,7 @@ class MeasurementTest(unittest.TestCase):
         self.assertEqual(result["tpot_seconds"]["mean"], 0.5)
         self.assertEqual(result["prefill_host_call_tok_s"], 2)
         self.assertEqual(result["decode_host_call_tok_s"], 2)
-        self.assertEqual(result["snapshot_capture_seconds"], 0.0)
+        self.assertAlmostEqual(result["snapshot_capture_seconds"], 0.375)
         self.assertEqual(result["decode_forward_calls"], 1)
         self.assertEqual(result["ttft_samples"], 1)
         self.assertIsNone(result["ttft_seconds"]["p99"])
