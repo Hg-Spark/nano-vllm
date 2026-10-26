@@ -3,7 +3,6 @@ from contextlib import contextmanager
 
 from scripts._common import (
     ValidationFailure,
-    add_dtype_argument,
     add_hf_experts_backend_argument,
     add_model_argument,
     add_result_argument,
@@ -69,7 +68,6 @@ def run_hf(
     model_path: str,
     prompt: str,
     max_new_tokens: int,
-    dtype: str,
     hf_experts_backend: str | None = "eager",
 ) -> tuple[list[int], list]:
     import torch
@@ -86,15 +84,15 @@ def run_hf(
             )
         return output_ids[0, input_ids.size(1) :].tolist(), logits
 
-    return run_hf_reference(AutoModelForCausalLM, model_path, dtype, hf_experts_backend, generate)
+    return run_hf_reference(AutoModelForCausalLM, model_path, hf_experts_backend, generate)
 
 
 def run_nanovllm(
-    model_path: str, prompt: str, max_new_tokens: int, max_model_len: int, dtype: str
+    model_path: str, prompt: str, max_new_tokens: int, max_model_len: int
 ) -> tuple[list[int], list]:
     from nanovllm import LLM
 
-    llm = LLM(model_path, dtype=dtype, max_model_len=max_model_len, max_num_seqs=1)
+    llm = LLM(model_path, max_model_len=max_model_len, max_num_seqs=1)
     try:
         with _capture_last_logits(llm.model_runner.model) as logits:
             tokens = run_nano_greedy(llm, prompt, max_new_tokens)
@@ -106,7 +104,6 @@ def run_nanovllm(
 def parse_args(argv=None):
     parser = argparse.ArgumentParser()
     add_model_argument(parser, required=True)
-    add_dtype_argument(parser)
     add_hf_experts_backend_argument(parser)
     parser.add_argument(
         "--prompt", default="Explain why KV cache is useful in autoregressive inference."
@@ -172,10 +169,10 @@ def run(args):
         )
     hf_backend = args.hf_experts_backend if is_moe else None
     hf_tokens, hf_logits = run_hf(
-        args.model, args.prompt, args.max_new_tokens, args.dtype, hf_backend
+        args.model, args.prompt, args.max_new_tokens, hf_backend
     )
     nano_tokens, nano_logits = run_nanovllm(
-        args.model, args.prompt, args.max_new_tokens, args.max_model_len, args.dtype
+        args.model, args.prompt, args.max_new_tokens, args.max_model_len
     )
     print(f"HF tokens:   {hf_tokens}\nNano tokens: {nano_tokens}")
     result = require_greedy_parity(hf_tokens, nano_tokens, args.max_new_tokens, hf_backend)

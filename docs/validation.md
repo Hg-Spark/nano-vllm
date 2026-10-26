@@ -367,7 +367,7 @@ REPEATS=5 bash benchmarks/run.sh long
 ```bash
 python -m benchmarks.capacity_search "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
   --input-len 1024 --output-len 128 --max-batch 32 --budget 512 \
-  --out-dir results/capacity_fp16
+  --out-dir results/capacity_bf16
 ```
 
 脚本按 Batch Size 二分搜索，要求请求完成、实际最大 Decode Batch 达到目标。每次独立进程执行，保留原始 JSON 和日志。搜索假设固定负载下容量随 Batch Size 单调；`max_verified_batch` 只代表所设上界内的验证结果，达到 `--max-batch` 仍需提高搜索上限才能判断极值。OOM 或已知 KV 容量不足会被视为本轮批次不通过并继续二分搜索；其他未知运行错误会保留日志并中止。FP8 KV 对比还需独立完成数值校验。

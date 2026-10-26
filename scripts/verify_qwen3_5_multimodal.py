@@ -7,7 +7,6 @@ if TYPE_CHECKING:
     from nanovllm import ImagePrompt
 
 from scripts._common import (
-    add_dtype_argument,
     add_hf_experts_backend_argument,
     add_model_argument,
     add_result_argument,
@@ -36,7 +35,6 @@ def run_hf(
     image,
     prompt,
     max_new_tokens,
-    dtype: str,
     hf_experts_backend: str | None = "eager",
 ) -> list[int]:
     import torch
@@ -58,7 +56,7 @@ def run_hf(
         return output_ids[0, input_len:].tolist()
 
     return run_hf_reference(
-        AutoModelForImageTextToText, model_path, dtype, hf_experts_backend, generate
+        AutoModelForImageTextToText, model_path, hf_experts_backend, generate
     )
 
 
@@ -91,7 +89,6 @@ def run_nanovllm(
 
     llm = LLM(
         model_path,
-        dtype=dtype,
         max_model_len=max_model_len,
         max_num_batched_tokens=max_num_batched_tokens,
         max_visual_tokens_per_request=max_visual_tokens_per_request,
@@ -114,7 +111,6 @@ def run_nanovllm(
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Compare one-image Qwen3.5 greedy generation.")
     add_model_argument(parser, required=True)
-    add_dtype_argument(parser)
     add_hf_experts_backend_argument(parser)
     parser.add_argument("image")
     parser.add_argument("--prompt", default="Describe this image briefly.")
@@ -142,7 +138,7 @@ def run(args):
         image = source.convert("RGB")
     try:
         hf_tokens = run_hf(
-            args.model, processor, image, args.prompt, args.max_new_tokens, args.dtype, hf_backend
+            args.model, processor, image, args.prompt, args.max_new_tokens, hf_backend
         )
         nano_tokens = run_nanovllm(
             args.model,
@@ -154,7 +150,6 @@ def run(args):
             args.max_num_batched_tokens,
             args.max_visual_tokens_per_request,
             args.decode_graph,
-            args.dtype,
         )
     finally:
         image.close()

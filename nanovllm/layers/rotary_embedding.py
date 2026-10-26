@@ -12,7 +12,6 @@ class RotaryEmbedding(nn.Module):
     ) -> None:
         super().__init__()
         assert 0 < rotary_dim <= head_size and rotary_dim % 2 == 0
-        self.head_size = head_size
         self.mrope_section = mrope_section
         inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)

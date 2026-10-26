@@ -1,7 +1,7 @@
 """Teacher-forced, step-by-step Qwen3.5 HF/Nano parity diagnostics.
 
 Run with:
-  python -m scripts.trace_qwen3_5 /path/to/model --dtype bfloat16 \
+  python -m scripts.trace_qwen3_5 /path/to/model \
       --max-new-tokens 8 --result-file trace.json
 
 The HF greedy token at every step is *forced* into Nano's sampler so that
@@ -13,7 +13,6 @@ import argparse
 
 from scripts._common import (
     ValidationFailure,
-    add_dtype_argument,
     add_hf_experts_backend_argument,
     add_model_argument,
     add_result_argument,
@@ -143,7 +142,7 @@ def _nano_states(text_model, slot):
     return states
 
 
-def trace_hf(model_path, prompt_ids, steps, dtype, experts_backend, trace_states):
+def trace_hf(model_path, prompt_ids, steps, experts_backend, trace_states):
     import torch
     from transformers import AutoModelForCausalLM
 
@@ -175,17 +174,16 @@ def trace_hf(model_path, prompt_ids, steps, dtype, experts_backend, trace_states
             capture.close()
         return generated, traces
 
-    return run_hf_reference(AutoModelForCausalLM, model_path, dtype, experts_backend, evaluate)
+    return run_hf_reference(AutoModelForCausalLM, model_path, experts_backend, evaluate)
 
 
-def trace_nano(model_path, prompt_ids, forced_tokens, dtype, max_model_len, trace_states):
+def trace_nano(model_path, prompt_ids, forced_tokens, max_model_len, trace_states):
     from nanovllm import LLM, SamplingParams
 
     # A single full prompt prefill, no prefix reuse, and eager decode ensure
     # one unambiguous logits/hidden-state capture for each generated token.
     llm = LLM(
         model_path,
-        dtype=dtype,
         max_model_len=max_model_len,
         max_num_seqs=1,
         max_num_batched_tokens=max(len(prompt_ids), 16),
@@ -294,7 +292,6 @@ def compare_traces(hf_tokens, hf_traces, nano_traces, threshold, top_k):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     add_model_argument(parser, required=True)
-    add_dtype_argument(parser)
     add_hf_experts_backend_argument(parser)
     parser.add_argument(
         "--prompt", default="Explain why KV cache is useful in autoregressive inference."
@@ -338,7 +335,6 @@ def run(args):
         args.model,
         prompt_ids,
         args.max_new_tokens,
-        args.dtype,
         backend,
         args.trace_gdn_states,
     )
