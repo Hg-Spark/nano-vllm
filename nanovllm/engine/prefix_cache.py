@@ -75,10 +75,15 @@ class PrefixCache:
         self.snapshot_nbytes = snapshot_nbytes
         self.max_checkpoints_per_path = max_checkpoints_per_path
         self._snapshot_bytes = 0
+        self.published_count = 0
+        self.evicted_count = 0
+        self.peak_snapshot_bytes = 0
         self._retain_blocks = retain_blocks
         self._release_blocks = release_blocks
         self._entries: dict[bytes, PrefixEntry] = {}
-        self._reused: set[bytes] = set()
+        # Active request references, not permanent "ever-hit" flags.
+        self._active_reuses: dict[bytes, int] = {}
+        self._seq_reuses: dict[int, bytes] = {}
 
     @property
     def enabled(self) -> bool:
@@ -108,16 +113,22 @@ class PrefixCache:
         if seq.image_state is not None:
             end = min(end, seq.image_state.image_start)
         candidates = []
-        cached = []
         hashes, _ = _sequence_block_hashes(seq, self.block_size, end)
         # A joint GDN/KV checkpoint must align to both the 64-token state grid
-        # and the KV page boundary; do not inspect non-checkpoint blocks.
+        # and the KV page boundary. Revisit resident entries (bounded by
+        # max_entries) instead of rescanning every old checkpoint each chunk.
         step = lcm(GDN_CHECKPOINT_INTERVAL, self.block_size)
-        for position in range(step, end + 1, step):
+        cached = sorted(
+            entry.num_tokens
+            for digest, entry in self._entries.items()
+            if 0 < entry.num_tokens <= end
+            and entry.num_tokens % step == 0
+            and hashes[entry.num_tokens // self.block_size - 1] == digest
+        )
+        first_new = (start // step + 1) * step
+        for position in range(first_new, end + 1, step):
             digest = hashes[position // self.block_size - 1]
-            if digest in self._entries:
-                cached.append(position)
-            elif position > start:
+            if digest not in self._entries:
                 candidates.append((position, digest))
         return candidates, cached
 
@@ -157,8 +168,23 @@ class PrefixCache:
         return None
 
     def mark_reused(self, seq: Sequence, entry: PrefixEntry) -> None:
-        """Protect only prefixes actually attached to an admitted request."""
-        self._reused.add(entry.block_hashes[-1])
+        """Protect a checkpoint while a request uses its cached prefix."""
+        if seq.seq_id in self._seq_reuses:
+            raise RuntimeError("prefix reuse already registered for request")
+        digest = entry.block_hashes[-1]
+        self._seq_reuses[seq.seq_id] = digest
+        self._active_reuses[digest] = self._active_reuses.get(digest, 0) + 1
+
+    def unmark_reused(self, seq: Sequence) -> None:
+        """Release request-local reuse protection, including after cache eviction."""
+        digest = self._seq_reuses.pop(seq.seq_id, None)
+        if digest is None:
+            return
+        remaining = self._active_reuses[digest] - 1
+        if remaining:
+            self._active_reuses[digest] = remaining
+        else:
+            del self._active_reuses[digest]
 
     def publish_many(self, seq: Sequence, snapshots: tuple[GDNStateSnapshot, ...]) -> None:
         if not snapshots or not self._can_capture():
@@ -204,6 +230,8 @@ class PrefixCache:
         entry = PrefixEntry(block_hashes, block_ids, position, snapshot)
         self._entries[digest] = entry
         self._snapshot_bytes += self.snapshot_nbytes
+        self.published_count += 1
+        self.peak_snapshot_bytes = max(self.peak_snapshot_bytes, self._snapshot_bytes)
 
         path.append(digest)
         limit = self._path_limit()
@@ -211,7 +239,7 @@ class PrefixCache:
         # branch; prefer removing intermediate, unshared positions.
         if len(path) > limit:
             interior = path[1:-1]
-            victim = next((key for key in interior if key not in self._reused), None)
+            victim = next((key for key in interior if self._active_reuses.get(key, 0) == 0), None)
             if victim is None:
                 victim = interior[0] if interior else path[0]
             self._evict_hash(victim)
@@ -230,7 +258,9 @@ class PrefixCache:
                     if digest in path:
                         path.remove(digest)
                     return
-                victim = next((key for key in interior if key not in self._reused), None)
+                victim = next(
+                    (key for key in interior if self._active_reuses.get(key, 0) == 0), None
+                )
                 if victim is None:
                     self._evict_hash(digest)
                     if digest in path:
@@ -244,7 +274,10 @@ class PrefixCache:
         ):
             if len(path) >= 3:
                 interior = path[1:-1]
-                victim = next((key for key in interior if key not in self._reused), interior[-1])
+                victim = next(
+                    (key for key in interior if self._active_reuses.get(key, 0) == 0),
+                    interior[-1],
+                )
                 self._evict_hash(victim)
                 path.remove(victim)
             else:
@@ -253,8 +286,10 @@ class PrefixCache:
 
     def _evict_hash(self, digest: bytes) -> None:
         entry = self._entries.pop(digest)
+        self.evicted_count += 1
         self._snapshot_bytes -= self.snapshot_nbytes
-        self._reused.discard(digest)
+        # A request may still be using this prefix after its cache entry is evicted.
+        # Its reuse reference is released by BlockManager.deallocate(), not here.
         self._release_blocks(entry.block_ids)
 
     def evict(self, block_refcounts: list[int] | None = None) -> bool:

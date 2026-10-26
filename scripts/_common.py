@@ -25,7 +25,7 @@ def add_model_argument(parser: argparse.ArgumentParser, *, required: bool = Fals
 def add_dtype_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--dtype",
-        choices=("float16", "bfloat16"),
+        choices=("bfloat16",),
         required=True,
         help="model compute dtype (must be selected explicitly)",
     )
