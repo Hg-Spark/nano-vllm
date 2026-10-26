@@ -14,21 +14,21 @@ from nanovllm.utils.context import Context, use_context
 
 
 class LogitsSelectionTest(unittest.TestCase):
-    def test_prefill_staged_indices_match_sequence_selection(self):
+    def test_prefill_uses_runtime_token_indices(self):
         class FakeHead:
             lm_head = staticmethod(lambda hidden: hidden)
 
         hidden = torch.arange(20, dtype=torch.float32).reshape(5, 4)
         context = Context(is_prefill=True, prefill_q_offsets=(0, 3, 5))
         with use_context(context):
-            reference = Qwen3_5ForCausalLM.compute_logits(FakeHead(), hidden, sequence_indices=[1])
-            staged = Qwen3_5ForCausalLM.compute_logits(
-                FakeHead(), hidden, token_indices=torch.tensor([4], dtype=torch.int64)
+            selected = Qwen3_5ForCausalLM.compute_logits(
+                FakeHead(), hidden, token_indices=torch.tensor([2, 4], dtype=torch.int64)
             )
-            torch.testing.assert_close(staged, reference)
-            torch.testing.assert_close(staged, hidden[4:5])
+            torch.testing.assert_close(selected, hidden[[2, 4]])
+            with self.assertRaisesRegex(ValueError, "require ModelRunner token_indices"):
+                Qwen3_5ForCausalLM.compute_logits(FakeHead(), hidden)
 
-    def test_sampler_accepts_staged_positions_without_allocating_indices(self):
+    def test_mixed_sampler_keeps_greedy_rows_and_uses_tensor_positions(self):
         sampler = Sampler()
         logits = torch.tensor([[9.0, 0.0], [8.0, 1.0], [1.0, 9.0]])
         temperatures = torch.ones(3, dtype=torch.float32)

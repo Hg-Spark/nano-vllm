@@ -28,6 +28,7 @@ class MeasurementTest(unittest.TestCase):
                 decode_tokens=0 if prefill else 2,
                 prefill_seconds=1.0 if prefill else 0.0,
                 decode_seconds=0.0 if prefill else 1.0,
+                snapshot_capture_seconds=0.0,
             )
 
         engine = SimpleNamespace(
@@ -71,19 +72,31 @@ class MeasurementTest(unittest.TestCase):
             if short.num_completion_tokens == 0:
                 short.num_completion_tokens = 1
                 return [], SimpleNamespace(
-                    prefill_tokens=8, decode_tokens=0, prefill_seconds=1, decode_seconds=0
+                    prefill_tokens=8,
+                    decode_tokens=0,
+                    prefill_seconds=1,
+                    decode_seconds=0,
+                    snapshot_capture_seconds=0.0,
                 )
             if short.num_completion_tokens < 4:
                 short.num_completion_tokens += 1
                 short.is_finished = short.num_completion_tokens == 4
                 return [], SimpleNamespace(
-                    prefill_tokens=0, decode_tokens=1, prefill_seconds=0, decode_seconds=1
+                    prefill_tokens=0,
+                    decode_tokens=1,
+                    prefill_seconds=0,
+                    decode_seconds=1,
+                    snapshot_capture_seconds=0.0,
                 )
             if long in queued and not long.is_finished:
                 long.num_completion_tokens = 1
                 long.is_finished = True
                 return [], SimpleNamespace(
-                    prefill_tokens=128, decode_tokens=0, prefill_seconds=1, decode_seconds=0
+                    prefill_tokens=128,
+                    decode_tokens=0,
+                    prefill_seconds=1,
+                    decode_seconds=0,
+                    snapshot_capture_seconds=0.0,
                 )
             raise AssertionError("benchmark called step without work")
 

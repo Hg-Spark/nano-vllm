@@ -54,14 +54,27 @@ class HybridCacheManagerTest(unittest.TestCase):
         cache.block_manager.deallocate(one)
         cache.block_manager.deallocate(two)
 
-    def test_disabled_prefix_uses_request_reservations(self):
-        scheduler = make_scheduler(num_blocks=16, block_size=16, max_prefix_cache_entries=0)
-        cache = scheduler.cache_manager
-        one = Sequence([1] * 65, SamplingParams(max_tokens=1))
-        two = Sequence([2] * 33, SamplingParams(max_tokens=1))
-        occupied, reserved = cache.reservation_usage((one, two))
-        self.assertEqual(occupied, set())
-        self.assertEqual(reserved, 8)
+    def test_disabled_or_underfunded_prefix_uses_request_reservations(self):
+        # Disabled cache settings should avoid scanning block tables even if
+        # requests already own physical KV pages.
+        for entries, budget, snapshot_size in ((0, None, 0), (4, 0, 64), (4, 63, 64)):
+            with self.subTest(entries=entries, budget=budget):
+                scheduler = make_scheduler(
+                    num_blocks=16,
+                    block_size=16,
+                    max_prefix_cache_entries=entries,
+                    max_prefix_cache_snapshot_bytes=budget,
+                    snapshot_nbytes=snapshot_size,
+                )
+                cache = scheduler.cache_manager
+                one = Sequence([1] * 65, SamplingParams(max_tokens=1))
+                two = Sequence([2] * 33, SamplingParams(max_tokens=1))
+                cache.block_manager.ensure_capacity(one, 16)
+                self.assertFalse(cache.prefix_cache.enabled)
+                occupied, reserved = cache.reservation_usage((one, two))
+                self.assertEqual(occupied, set())
+                self.assertEqual(reserved, 8)
+                cache.block_manager.deallocate(one)
 
     def test_failed_gdn_slot_admission_releases_shared_kv_refs(self):
         scheduler = make_scheduler(max_num_seqs=1, num_blocks=16, block_size=16)

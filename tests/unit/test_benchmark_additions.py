@@ -23,10 +23,18 @@ class BenchmarkAdditionsTest(unittest.TestCase):
                 "schedule_mode": "mixed",
                 "mixed_prefill_limit": 128,
                 "activation_reserve_mib": 256,
+                "kv_cache_dtype": "fp8",
+                "kv_cache_k_scale": 1.0,
+                "kv_cache_v_scale": 1.0,
             },
         }
         original = summarize_bench.workload_key(sample)
-        for option, changed in (("mixed_prefill_limit", 0), ("activation_reserve_mib", 512)):
+        for option, changed in (
+            ("mixed_prefill_limit", 0),
+            ("activation_reserve_mib", 512),
+            ("kv_cache_k_scale", 0.5),
+            ("kv_cache_v_scale", 2.0),
+        ):
             with self.subTest(option=option):
                 different = json.loads(json.dumps(sample))
                 different["config"][option] = changed

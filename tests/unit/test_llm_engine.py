@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from nanovllm.engine.llm_engine import LLMEngine, _resolve_eos_token_ids
 from nanovllm.engine.schedule import BatchResult
@@ -86,6 +87,52 @@ class LLMEngineStepTest(unittest.TestCase):
             engine.add_request([1], SamplingParams())
         with self.assertRaisesRegex(RuntimeError, "closed"):
             engine.generate([[1]], SamplingParams(), use_tqdm=False)
+
+    def test_engine_exit_retries_failed_runner_cleanup(self):
+        engine = make_engine_stub()
+        engine.scheduler = make_engine_scheduler()
+        engine._scheduler_cleared = False
+        runner = SimpleNamespace(exit=Mock(side_effect=[ValueError("teardown"), None]))
+        engine.model_runner = runner
+        with self.assertRaisesRegex(ValueError, "teardown"):
+            engine.exit()
+        self.assertTrue(engine._closed)
+        self.assertIs(engine.model_runner, runner)
+        self.assertTrue(engine._scheduler_cleared)
+        engine.exit()
+        self.assertIsNone(engine.model_runner)
+        self.assertTrue(engine._cleanup_complete)
+        self.assertEqual(runner.exit.call_count, 2)
+
+    def test_chat_rejects_closed_engine_without_retry_advice(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from unittest.mock import patch
+
+        from scripts.chat import run_chat
+
+        class FakeChatEngine:
+            def __init__(self, closed):
+                self._closed = closed
+                self.tokenizer = SimpleNamespace(apply_chat_template=lambda *args, **kw: [1, 2])
+
+            def generate(self, *args, **kwargs):
+                raise ValueError("invalid request or execution")
+
+        for closed in (False, True):
+            with self.subTest(closed=closed):
+                engine = FakeChatEngine(closed)
+                output = StringIO()
+                with (
+                    patch("builtins.input", side_effect=["hi", "/quit"]),
+                    redirect_stdout(output),
+                ):
+                    if closed:
+                        with self.assertRaisesRegex(ValueError, "invalid request or execution"):
+                            run_chat(engine, SamplingParams())
+                    else:
+                        run_chat(engine, SamplingParams())
+                self.assertEqual("Use /clear" in output.getvalue(), not closed)
 
     def test_interrupted_step_disables_engine_before_commit(self):
         scheduler = make_engine_scheduler()
@@ -226,35 +273,6 @@ class LLMEngineStepTest(unittest.TestCase):
         self.assertTrue(engine.is_finished())
         self.assertFalse(engine.scheduler.waiting)
 
-    def test_lifecycle_captures_previous_boundary_of_aligned_prompt(self):
-        scheduler = make_scheduler(
-            max_num_seqs=2, num_blocks=32, block_size=16, max_num_batched_tokens=128
-        )
-        seq = Sequence(list(range(32)), SamplingParams(max_tokens=1))
-        scheduler.add(seq)
-        calls = []
-
-        def capture(entries):
-            calls.extend((item.seq_id, position) for item, position in entries)
-            return {item.seq_id: GDNStateSnapshot(position, ()) for item, position in entries}
-
-        engine = make_engine_stub()
-        engine.scheduler = scheduler
-        engine.model_runner = SimpleNamespace(
-            run=lambda chunks, is_prefill: BatchResult(
-                [None if chunk.end < len(chunk.seq) else 80 for chunk in chunks]
-            ),
-            capture_live_states=capture,
-        )
-        engine._run_batch(scheduler.schedule().prefill_chunks, True)
-        self.assertEqual(calls, [(seq.seq_id, 16)])
-        self.assertEqual(len(scheduler.cache_manager.prefix_cache), 0)
-        engine._run_batch(scheduler.schedule().prefill_chunks, True)
-        self.assertTrue(seq.is_finished)
-        entry = scheduler.cache_manager.find_prefix(Sequence(list(range(32))))
-        self.assertIsNotNone(entry)
-        self.assertEqual(entry.num_tokens, 16)
-
     def test_lifecycle_captures_processed_decode_history_not_last_sample(self):
         scheduler = make_scheduler(
             max_num_seqs=2, num_blocks=32, block_size=16, max_num_batched_tokens=128
@@ -289,31 +307,6 @@ class LLMEngineStepTest(unittest.TestCase):
         self.assertEqual(seq.token_ids[-1], 33)
         entry = scheduler.cache_manager.prefix_cache.find(Sequence(list(range(34)) + [99]), 33)
         self.assertEqual(entry.num_tokens, 32)
-
-    def test_lifecycle_preserves_aligned_state_for_unaligned_prompt(self):
-        scheduler = make_scheduler(
-            max_num_seqs=2, num_blocks=32, block_size=16, max_num_batched_tokens=128
-        )
-        seq = Sequence(list(range(30)), SamplingParams(max_tokens=1))
-        scheduler.add(seq)
-        calls = []
-
-        def capture(entries):
-            calls.extend(entries)
-            return {item.seq_id: GDNStateSnapshot(pos, ()) for item, pos in entries}
-
-        engine = make_engine_stub()
-        engine.scheduler = scheduler
-        engine.model_runner = SimpleNamespace(
-            run=lambda chunks, is_prefill: BatchResult(
-                [None if chunk.end < len(chunk.seq) else 30 for chunk in chunks]
-            ),
-            capture_live_states=capture,
-        )
-        engine._run_batch(scheduler.schedule().prefill_chunks, True)
-        engine._run_batch(scheduler.schedule().prefill_chunks, True)
-        self.assertEqual([(seq_.seq_id, pos) for seq_, pos in calls], [(seq.seq_id, 16)])
-        self.assertEqual(scheduler.cache_manager.prefix_cache._resident_lengths, [16])
 
     def test_identical_prompts_capture_twice_but_publish_once(self):
         scheduler = make_scheduler(

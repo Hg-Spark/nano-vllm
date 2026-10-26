@@ -43,7 +43,7 @@ python -m scripts.chat "$NANOVLLM_MODEL"
 
 ## 提交与源码导读
 
-相对 `main` 的重构历史按职责整理为主题提交（后续修改也继续按主题提交）：`feat(model/cache/runtime)` 构成模型与执行主链；`feat(cli/validation)` 提供实验入口；`test(model/kernels/scheduler/engine/cli)` 验证模块契约；`docs` 收录设计与证据。可在 [qwen3.5 提交历史](https://github.com/Hg-Spark/nano-vllm/commits/qwen3.5/)查看最新顺序；若本地也已获取 `main` 引用，可运行 `git log --oneline main..qwen3.5`。旧版 Warmup、参考后端与重复实现均未作为独立路径保留。
+相对 `main` 的重构历史按职责整理为主题提交（后续修改也继续按主题提交）：`feat(model/cache/runtime)` 构成模型与执行主链；`feat(cli/validation)` 提供实验入口；`test(model/kernels/scheduler/engine/cli)` 验证模块契约；`docs` 收录设计与证据。可在 [hybrid-runtime 提交历史](https://github.com/Hg-Spark/nano-vllm/commits/hybrid-runtime/) 查看最新顺序；若本地也已获取 `main` 引用，可运行 `git log --oneline main..hybrid-runtime`。旧版 Warmup、参考后端与重复实现均未作为独立路径保留。
 
 建议依次阅读 [模型与运行时](docs/runtime.md) → [调度与缓存](docs/scheduling.md) → [设计取舍](docs/design-decisions.md) → [验证与性能](docs/validation.md)，避免把未运行的 GPU 验证当作功能已经通过实测。
 
