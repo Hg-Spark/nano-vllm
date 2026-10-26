@@ -35,7 +35,7 @@ class DecodeThenFailPrefillRunner:
     def run(self, chunks, is_prefill):
         if is_prefill:
             raise RuntimeError("injected prefill failure")
-        return BatchResult([99 for _ in chunks], {})
+        return BatchResult([99 for _ in chunks])
 
     def exit(self):
         pass
@@ -61,7 +61,7 @@ class LLMEngineStepTest(unittest.TestCase):
     def test_decode_failure_disables_engine(self):
         scheduler = make_scheduler(max_num_seqs=2, num_blocks=32, block_size=4, eos_token_ids=(99,))
         running = make_running_sequence(scheduler, list(range(65)))
-        scheduler.cache_manager.prefix_cache.publish_many(running, (GDNStateSnapshot(64, ()),))
+        scheduler.cache_manager.publish_batch([(running, GDNStateSnapshot(64, ()))])
         image = SimpleNamespace(visual_features=object(), image_start=0)
         scheduler.add(Sequence([3, 4], SamplingParams(max_tokens=2), image_state=image))
         engine = make_engine_stub()
@@ -225,6 +225,125 @@ class LLMEngineStepTest(unittest.TestCase):
             )
         self.assertTrue(engine.is_finished())
         self.assertFalse(engine.scheduler.waiting)
+
+    def test_lifecycle_captures_previous_boundary_of_aligned_prompt(self):
+        scheduler = make_scheduler(
+            max_num_seqs=2, num_blocks=32, block_size=16, max_num_batched_tokens=128
+        )
+        seq = Sequence(list(range(32)), SamplingParams(max_tokens=1))
+        scheduler.add(seq)
+        calls = []
+
+        def capture(entries):
+            calls.extend((item.seq_id, position) for item, position in entries)
+            return {item.seq_id: GDNStateSnapshot(position, ()) for item, position in entries}
+
+        engine = make_engine_stub()
+        engine.scheduler = scheduler
+        engine.model_runner = SimpleNamespace(
+            run=lambda chunks, is_prefill: BatchResult(
+                [None if chunk.end < len(chunk.seq) else 80 for chunk in chunks]
+            ),
+            capture_live_states=capture,
+        )
+        engine._run_batch(scheduler.schedule().prefill_chunks, True)
+        self.assertEqual(calls, [(seq.seq_id, 16)])
+        self.assertEqual(len(scheduler.cache_manager.prefix_cache), 0)
+        engine._run_batch(scheduler.schedule().prefill_chunks, True)
+        self.assertTrue(seq.is_finished)
+        entry = scheduler.cache_manager.find_prefix(Sequence(list(range(32))))
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.num_tokens, 16)
+
+    def test_lifecycle_captures_processed_decode_history_not_last_sample(self):
+        scheduler = make_scheduler(
+            max_num_seqs=2, num_blocks=32, block_size=16, max_num_batched_tokens=128
+        )
+        seq = Sequence(list(range(31)), SamplingParams(max_tokens=3, ignore_eos=True))
+        scheduler.add(seq)
+        calls = []
+
+        def capture(entries):
+            calls.extend((item.seq_id, position) for item, position in entries)
+            return {item.seq_id: GDNStateSnapshot(position, ()) for item, position in entries}
+
+        samples = iter((31, 32, 33))
+        engine = make_engine_stub()
+        engine.scheduler = scheduler
+        engine.model_runner = SimpleNamespace(
+            run=lambda chunks, is_prefill: BatchResult(
+                [
+                    None if is_prefill and chunk.end < len(chunk.seq) else next(samples)
+                    for chunk in chunks
+                ]
+            ),
+            capture_live_states=capture,
+        )
+        engine._run_batch(scheduler.schedule().prefill_chunks, True)
+        self.assertEqual(calls, [(seq.seq_id, 16)])
+        engine._run_batch(scheduler.schedule().prefill_chunks, True)
+        engine._run_batch(scheduler.schedule().decode_chunks, False)
+        self.assertEqual(calls, [(seq.seq_id, 16), (seq.seq_id, 32)])
+        engine._run_batch(scheduler.schedule().decode_chunks, False)
+        self.assertTrue(seq.is_finished)
+        self.assertEqual(seq.token_ids[-1], 33)
+        entry = scheduler.cache_manager.prefix_cache.find(Sequence(list(range(34)) + [99]), 33)
+        self.assertEqual(entry.num_tokens, 32)
+
+    def test_lifecycle_preserves_aligned_state_for_unaligned_prompt(self):
+        scheduler = make_scheduler(
+            max_num_seqs=2, num_blocks=32, block_size=16, max_num_batched_tokens=128
+        )
+        seq = Sequence(list(range(30)), SamplingParams(max_tokens=1))
+        scheduler.add(seq)
+        calls = []
+
+        def capture(entries):
+            calls.extend(entries)
+            return {item.seq_id: GDNStateSnapshot(pos, ()) for item, pos in entries}
+
+        engine = make_engine_stub()
+        engine.scheduler = scheduler
+        engine.model_runner = SimpleNamespace(
+            run=lambda chunks, is_prefill: BatchResult(
+                [None if chunk.end < len(chunk.seq) else 30 for chunk in chunks]
+            ),
+            capture_live_states=capture,
+        )
+        engine._run_batch(scheduler.schedule().prefill_chunks, True)
+        engine._run_batch(scheduler.schedule().prefill_chunks, True)
+        self.assertEqual([(seq_.seq_id, pos) for seq_, pos in calls], [(seq.seq_id, 16)])
+        self.assertEqual(scheduler.cache_manager.prefix_cache._resident_lengths, [16])
+
+    def test_identical_prompts_capture_twice_but_publish_once(self):
+        scheduler = make_scheduler(
+            max_num_seqs=2, num_blocks=32, block_size=16, max_num_batched_tokens=128
+        )
+        first = Sequence([42] * 17, SamplingParams(max_tokens=1))
+        second = Sequence([42] * 17, SamplingParams(max_tokens=1))
+        scheduler.add(first)
+        scheduler.add(second)
+        calls = []
+        engine = make_engine_stub()
+        engine.scheduler = scheduler
+
+        def capture(entries):
+            calls.extend(entries)
+            return {seq.seq_id: GDNStateSnapshot(position, ()) for seq, position in entries}
+
+        engine.model_runner = SimpleNamespace(
+            run=lambda chunks, is_prefill: BatchResult(
+                [None if chunk.end < len(chunk.seq) else 80 for chunk in chunks]
+            ),
+            capture_live_states=capture,
+        )
+        chunks = scheduler.schedule().prefill_chunks
+        self.assertEqual(len(chunks), 2)
+        engine._run_batch(chunks, True)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(scheduler.cache_manager.prefix_cache), 0)
+        engine._run_batch(scheduler.schedule().prefill_chunks, True)
+        self.assertEqual(len(scheduler.cache_manager.prefix_cache), 1)
 
 
 if __name__ == "__main__":

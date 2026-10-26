@@ -52,6 +52,7 @@ class MeasurementTest(unittest.TestCase):
         self.assertEqual(result["tpot_seconds"]["mean"], 0.5)
         self.assertEqual(result["prefill_host_call_tok_s"], 2)
         self.assertEqual(result["decode_host_call_tok_s"], 2)
+        self.assertEqual(result["snapshot_capture_seconds"], 0.0)
         self.assertEqual(result["decode_forward_calls"], 1)
         self.assertEqual(result["ttft_samples"], 1)
         self.assertIsNone(result["ttft_seconds"]["p99"])

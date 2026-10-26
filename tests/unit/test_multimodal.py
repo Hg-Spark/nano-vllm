@@ -11,7 +11,6 @@ from nanovllm.engine.batch_common import build_decode_batch_layout, build_prefil
 from nanovllm.engine.llm_engine import LLMEngine
 from nanovllm.engine.schedule import ScheduledChunk
 from nanovllm.engine.sequence import Sequence
-from nanovllm.engine.state_manager import GDNStateSnapshot
 from nanovllm.multimodal.request import (
     ImagePrompt,
     ImageState,
@@ -105,18 +104,7 @@ class MultimodalRequestTest(unittest.TestCase):
             chunks = scheduler.schedule().prefill_chunks
             self.assertEqual(len(chunks), 1)
             chunk = chunks[0]
-            scheduler.postprocess(
-                chunks,
-                [99 if chunk.end == len(seq) else None],
-                True,
-                {
-                    chunk.seq.seq_id: tuple(
-                        GDNStateSnapshot(position, ()) for position in chunk.checkpoint_positions
-                    )
-                    for chunk in chunks
-                    if chunk.checkpoint_positions
-                },
-            )
+            scheduler.postprocess(chunks, [99 if chunk.end == len(seq) else None], True)
             if chunk.end >= state.image_end:
                 self.assertIsNone(state.visual_features)
             if seq.is_finished:

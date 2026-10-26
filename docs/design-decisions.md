@@ -61,7 +61,7 @@ SGLang RadixAttention 适合大量请求反复共享前缀的场景；HiCache �
 
 例如，块容量为 16，请求 A 已处理 20 个 token，GDN 状态在位置 20；即便 KV 的第一个完整块对应前 16 个 token，也不能直接把位置 20 的 GDN 状态当作位置 16 的 Snapshot。必须在位置 16 **实际捕获过**循环状态，才能发布对应的联合前缀条目。
 
-因此先使用 **64 Token 网格上的整块边界、链式 Block Hash 查找、全局冷优先 FIFO 淘汰、独立快照**。Block Hash 只索引有效的联合条目，不再维持没有独立缓存所有权的冗余 Full KV 索引；只有 KV 与 GDN 在同一边界均有效时才恢复。局限是快照主机内存与 D2H/H2D 数据移动；只有实测证明必要，再评估 radix、分层缓存或更稀疏的状态 checkpoint。
+因此使用 **KV Page 完整对齐边界、链式 Block Hash 查找、全局冷优先 FIFO 淘汰、每轮回答前后各一份独立快照**。Block Hash 只索引有效的联合条目，不再维持没有独立缓存所有权的冗余 Full KV 索引；只有 KV 与 GDN 在同一边界均有效时才恢复。局限是快照主机内存与 D2H/H2D 数据移动；只有实测证明必要，再评估 radix、分层缓存或更稀疏的状态 checkpoint。
 
 ### 3. 为什么 Prefill / Decode 不合并成一次 Forward？
 

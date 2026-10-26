@@ -133,17 +133,20 @@ def execute(config, output):
                         str(output / "hf-parity.json"),
                     ],
                 )
-                python(
-                    "prefix-parity",
-                    "scripts.verify_prefix_resume",
-                    [
-                        *common,
-                        "--prefix-block-size",
-                        str(check["prefix_block_size"]),
-                        "--result-file",
-                        str(output / "prefix-parity.json"),
-                    ],
-                )
+                for source in ("prompt", "decode"):
+                    python(
+                        f"prefix-{source}-parity",
+                        "scripts.verify_prefix_resume",
+                        [
+                            *common,
+                            "--prefix-block-size",
+                            str(check["prefix_block_size"]),
+                            "--snapshot-source",
+                            source,
+                            "--result-file",
+                            str(output / f"prefix-{source}-parity.json"),
+                        ],
+                    )
             elif stage in ("bench", "tail", "long", "prefix"):
                 if stage == "prefix":
                     # Verify joint KV/GDN restore boundaries before timing cache hits.
