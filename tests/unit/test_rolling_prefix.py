@@ -78,6 +78,14 @@ class RollingPrefixTest(unittest.TestCase):
                 self.assertEqual(cache._resident_lengths, [boundary])
                 self.assertIsNone(seq.prompt_snapshot)
                 self.assertIsNone(seq.completion_snapshot)
+                continuation = Sequence(list(range(prompt_len)) + [80])
+                entry = scheduler.cache_manager.find_prefix(continuation)
+                self.assertIsNotNone(entry)
+                self.assertEqual(entry.num_tokens, boundary)
+                scheduler.cache_manager.admit(continuation, entry)
+                self.assertIs(continuation.pending_state_snapshot, entry.state_snapshot)
+                self.assertEqual(continuation.block_table[0], entry.block_ids[0])
+                scheduler.cache_manager.release(continuation)
 
     def test_prompt_checkpoint_survives_followup_completion_eviction(self):
         engine, scheduler, runner = self._engine(entries=2)
@@ -97,6 +105,19 @@ class RollingPrefixTest(unittest.TestCase):
             [entry.kind for entry in cache._entries.values()], ["prompt", "conversation"]
         )
         self.assertEqual(scheduler.cache_manager.find_prefix(Sequence(prompt)).num_tokens, 48)
+
+    def test_same_batch_identical_prompts_capture_twice_but_publish_once(self):
+        engine, scheduler, runner = self._engine()
+        for _ in range(2):
+            scheduler.add(Sequence([42] * 17, SamplingParams(max_tokens=1)))
+        chunks = scheduler.schedule().prefill_chunks
+        self.assertEqual(len(chunks), 2)
+        engine._run_batch(chunks, True)
+        self.assertEqual(runner.captures, [16, 16])
+        self.assertEqual(len(scheduler.cache_manager.prefix_cache), 0)
+        engine._run_batch(scheduler.schedule().prefill_chunks, True)
+        self.assertEqual(len(scheduler.cache_manager.prefix_cache), 1)
+        self.assertEqual(scheduler.cache_manager.prefix_cache.published_count, 1)
 
     def test_final_decode_aligned_boundary_is_captured(self):
         for prompt_len, outputs, expected in (

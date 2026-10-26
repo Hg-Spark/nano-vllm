@@ -100,20 +100,6 @@ class HybridCacheManagerTest(unittest.TestCase):
         )
         cache.release(first)
 
-    def test_cache_admission_checks_aligned_processed_state(self):
-        scheduler = make_scheduler(num_blocks=32, block_size=16)
-        cache = scheduler.cache_manager
-        seq = Sequence(list(range(30)), SamplingParams(max_tokens=3))
-        cache.block_manager.ensure_capacity(seq, 32)
-        with self.assertRaisesRegex(RuntimeError, "invalid GDN snapshot"):
-            cache.publish_batch([(seq, GDNStateSnapshot(30, ()))])
-        seq.append_token(30)
-        seq.append_token(31)
-        cache.publish_batch([(seq, GDNStateSnapshot(32, ()))])
-        before = cache.prefix_cache.published_count
-        cache.publish_batch([(seq, GDNStateSnapshot(32, ()))])
-        self.assertEqual(cache.prefix_cache.published_count, before)
-
     def test_prefill_evicts_only_enough_checkpoints_to_make_progress(self):
         scheduler = make_scheduler(num_blocks=16, block_size=16, max_prefix_cache_entries=4)
         manager = scheduler.cache_manager

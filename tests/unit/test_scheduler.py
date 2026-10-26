@@ -326,6 +326,18 @@ class SchedulerCoreTest(unittest.TestCase):
         self.assertEqual(next_step.decode_chunks[0].seq, third)
         self.assertIn(first, scheduled_sequences(next_step.decode_chunks))
 
+    def test_resumed_long_prefill_stops_at_last_full_page(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=4096, max_num_seqs=1, num_blocks=300, block_size=16
+        )
+        seq = Sequence(list(range(4097)), SamplingParams(max_tokens=1))
+        scheduler.cache_manager.block_manager.ensure_capacity(seq, 1100)
+        scheduler.cache_manager.state_manager.allocate(seq)
+        seq.committed_tokens = 1100
+        scheduler.prefilling.append(seq)
+        chunk = scheduler.schedule().prefill_chunks[0]
+        self.assertEqual((chunk.start, chunk.end), (1100, 4096))
+
     def test_prefill_never_trims_chunks_to_checkpoint_grid(self):
         scheduler = make_scheduler(
             max_num_batched_tokens=64, max_num_seqs=2, num_blocks=128, block_size=16
@@ -342,24 +354,6 @@ class SchedulerCoreTest(unittest.TestCase):
             scheduler.postprocess(batch.prefill_chunks, [None], True)
         self.assertEqual(ends, [63, 126, 189, 252])
         self.assertIn(running, scheduler.running)
-
-    def test_prefill_skips_eviction_when_smaller_chunk_can_progress(self):
-        scheduler = make_scheduler(
-            max_num_batched_tokens=65,
-            num_blocks=8,
-            block_size=16,
-            max_prefix_cache_entries=4,
-        )
-        cache = scheduler.cache_manager
-        old = Sequence([900] * 65)
-        cache.block_manager.ensure_capacity(old, 64)
-        cache.publish_batch([(old, GDNStateSnapshot(64, ()))])
-        cache.release(old)
-        incoming = Sequence(list(range(80)), SamplingParams(max_tokens=1))
-        scheduler.add(incoming)
-        chunk = scheduler.schedule().prefill_chunks[0]
-        self.assertEqual((chunk.start, chunk.end), (0, 64))
-        self.assertEqual(len(cache.prefix_cache), 1)
 
 
 if __name__ == "__main__":

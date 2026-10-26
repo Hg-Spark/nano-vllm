@@ -73,65 +73,39 @@ class CacheRuntimeTest(unittest.TestCase):
             kv_cache_v_scale=1.0,
         )
         with (
-            patch(
-                "nanovllm.engine.cache_runtime.torch.cuda.mem_get_info",
-                return_value=(4096, 8192),
-            ),
-            patch(
-                "nanovllm.engine.cache_runtime.torch.empty",
-                return_value=MagicMock(),
-            ) as allocation,
-        ):
-            _, num_blocks = allocate_runtime_caches(model, config)
-
-        # 8192 * .75 - (8192 - 4096) - 128 = 1920; each block takes 512.
-        self.assertEqual(num_blocks, 3)
-        allocation.assert_called_once_with(2, 1, 3, 16, 1, 8, device="cuda", dtype=torch.float16)
-        state.allocate_state_cache.assert_called_once_with(2)
-
-        # Final-state snapshot stacking reserves temporary GPU memory only.
-        config.max_prefix_cache_entries = 2
-        config.max_num_batched_tokens = 64
-        with (
-            patch(
-                "nanovllm.engine.cache_runtime.torch.cuda.mem_get_info",
-                return_value=(4736, 8192),
-            ),
-            patch(
-                "nanovllm.engine.cache_runtime.torch.empty",
-                return_value=MagicMock(),
-            ) as allocation,
-        ):
-            _, num_blocks = allocate_runtime_caches(model, config)
-        self.assertEqual(num_blocks, 4)
-        self.assertEqual(allocation.call_args.args[2], 4)
-
-        # Graph memory is deducted from KV capacity before graph capture.
-        config.max_prefix_cache_entries = 0
-        config.decode_graph_batch_sizes = (1,)
-        with (
             patch("nanovllm.engine.cache_runtime.DECODE_GRAPH_RESERVE_BYTES_PER_BUCKET", 512),
+            patch("nanovllm.engine.cache_runtime.torch.cuda.mem_get_info") as memory,
             patch(
-                "nanovllm.engine.cache_runtime.torch.cuda.mem_get_info",
-                return_value=(4096, 8192),
-            ),
-            patch("nanovllm.engine.cache_runtime.torch.empty", return_value=MagicMock()),
+                "nanovllm.engine.cache_runtime.torch.empty", return_value=MagicMock()
+            ) as allocation,
         ):
+            memory.return_value = (4096, 8192)
             _, num_blocks = allocate_runtime_caches(model, config)
-        self.assertEqual(num_blocks, 2)
+            self.assertEqual(num_blocks, 3)
+            allocation.assert_called_once_with(
+                2, 1, 3, 16, 1, 8, device="cuda", dtype=torch.float16
+            )
+            state.allocate_state_cache.assert_called_once_with(2)
 
-        # A reserved peak-activation budget reduces KV capacity before allocation.
-        config.decode_graph_batch_sizes = ()
-        config.activation_reserve_bytes = 1024
-        with (
-            patch(
-                "nanovllm.engine.cache_runtime.torch.cuda.mem_get_info",
-                return_value=(4096, 8192),
-            ),
-            patch("nanovllm.engine.cache_runtime.torch.empty", return_value=MagicMock()),
-        ):
+            # A temporary snapshot workspace uses available memory, not resident KV capacity.
+            config.max_prefix_cache_entries = 2
+            config.max_num_batched_tokens = 64
+            memory.return_value = (4736, 8192)
             _, num_blocks = allocate_runtime_caches(model, config)
-        self.assertEqual(num_blocks, 1)
+            self.assertEqual(num_blocks, 4)
+            self.assertEqual(allocation.call_args.args[2], 4)
+
+            # Graph and activation reservations reduce the KV budget.
+            config.max_prefix_cache_entries = 0
+            config.decode_graph_batch_sizes = (1,)
+            memory.return_value = (4096, 8192)
+            _, num_blocks = allocate_runtime_caches(model, config)
+            self.assertEqual(num_blocks, 2)
+
+            config.decode_graph_batch_sizes = ()
+            config.activation_reserve_bytes = 1024
+            _, num_blocks = allocate_runtime_caches(model, config)
+            self.assertEqual(num_blocks, 1)
 
 
 if __name__ == "__main__":
