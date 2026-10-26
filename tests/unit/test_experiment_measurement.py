@@ -122,42 +122,16 @@ class MeasurementTest(unittest.TestCase):
         self.assertEqual(compare_tokens([1], [1, 2])["first_mismatch"], 1)
 
     def test_prefix_resume_rejects_matched_empty_outputs(self):
-        try:
-            import torch  # noqa: F401
-        except ImportError:
-            self.skipTest("requires torch")
+        from scripts.verify_prefix_resume import validate_prefix_resume_result
 
-        from nanovllm.engine import cache_runtime
-        from scripts.verify_prefix_resume import run_prefix_resume_probe
+        with self.assertRaisesRegex(ValidationFailure, "expected 16 greedy tokens"):
+            validate_prefix_resume_result([], [], 16, {"num_tokens": 64}, 64)
 
-        entry = SimpleNamespace(num_tokens=64, block_ids=(0, 1, 2, 3), state_snapshot=object())
-        cache = SimpleNamespace(snapshot_nbytes=16, find=lambda *args, **kwargs: entry)
-        tokenizer = SimpleNamespace(encode=lambda *args, **kwargs: [1, 2, 3])
+    def test_prefix_resume_rejects_mismatched_tokens(self):
+        from scripts.verify_prefix_resume import validate_prefix_resume_result
 
-        class StubEngine:
-            def __init__(self, *args, max_prefix_cache_entries=0, **kwargs):
-                self.cached = max_prefix_cache_entries > 0
-                self.calls = 0
-                self.scheduler = SimpleNamespace(block_manager=SimpleNamespace(prefix_cache=cache))
-
-            def generate(self, *args, **kwargs):
-                self.calls += 1
-                if self.cached and self.calls == 2:
-                    seq = SimpleNamespace(committed_tokens=64, block_table=list(entry.block_ids))
-                    cache_runtime.restore_gdn_state(None, seq, entry.state_snapshot)
-                return [{"token_ids": []}]
-
-            def exit(self):
-                pass
-
-        with (
-            patch("nanovllm.LLM", StubEngine),
-            patch("transformers.AutoTokenizer.from_pretrained", return_value=tokenizer),
-            patch.object(cache_runtime, "restore_gdn_state"),
-            patch("torch.cuda.empty_cache"),
-            self.assertRaisesRegex(ValidationFailure, "expected 16 greedy tokens"),
-        ):
-            run_prefix_resume_probe("stub-model", 16, 1024, 16, "float16")
+        with self.assertRaisesRegex(ValidationFailure, "token 1"):
+            validate_prefix_resume_result([10, 20], [10, 30], 2, {"num_tokens": 64}, 64)
 
     def test_logits_comparison_detects_numeric_divergence(self):
         try:

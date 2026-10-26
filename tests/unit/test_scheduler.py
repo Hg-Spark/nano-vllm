@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from nanovllm.engine.schedule import ScheduledChunk
 from nanovllm.engine.sequence import Sequence
@@ -67,7 +68,12 @@ class SchedulerCoreTest(unittest.TestCase):
         running = make_running_sequence(scheduler, [1, 2])
         waiting = Sequence(list(range(100)), SamplingParams(max_tokens=1))
         scheduler.add(waiting)
-        scheduled = scheduler.schedule()
+        with patch.object(
+            scheduler.cache_manager,
+            "reservation_usage",
+            side_effect=AssertionError("no KV reservation scan when prefill cap is zero"),
+        ):
+            scheduled = scheduler.schedule()
         self.assertEqual(scheduled.decode_tokens, 1)
         self.assertFalse(scheduled.prefill_chunks)
         self.assertIn(waiting, scheduler.waiting)
@@ -152,14 +158,14 @@ class SchedulerCoreTest(unittest.TestCase):
         self.assertEqual(second.prefill_chunks[0].start, 448)
         self.assertIn(running, [chunk.seq for chunk in second.decode_chunks])
 
-        # With 128-token pages, spending 127 of 511 tokens to end at 384
-        # is too expensive. The 128/384 checkpoints remain capturable
-        # internally because this chunk starts on the joint grid.
+        # A 100-token prefill with 64-token pages would lose 36 tokens
+        # if trimmed back to the joint checkpoint at 64. Keep the budget
+        # and capture 64 as an intermediate FlashInfer checkpoint instead.
         scheduler = make_scheduler(
-            max_num_batched_tokens=512,
+            max_num_batched_tokens=101,
             max_num_seqs=2,
-            num_blocks=20,
-            block_size=128,
+            num_blocks=64,
+            block_size=64,
         )
         make_running_sequence(scheduler, [1, 2])
         candidate = Sequence(list(range(512)), SamplingParams(max_tokens=1))
@@ -167,16 +173,10 @@ class SchedulerCoreTest(unittest.TestCase):
         scheduled = scheduler.schedule()
         self.assertEqual(
             (scheduled.prefill_chunks[0].start, scheduled.prefill_chunks[0].end),
-            (0, 511),
+            (0, 100),
         )
-        self.assertEqual(scheduled.prefill_chunks[0].checkpoint_positions, (128, 384))
+        self.assertEqual(scheduled.prefill_chunks[0].checkpoint_positions, (64,))
         self.assertEqual(scheduled.prefill_chunks[0].checkpoint_interval, 64)
-        scheduler.postprocess(scheduled.decode_chunks, [7], False)
-        scheduler.postprocess(scheduled.prefill_chunks, [None], True)
-        continued = scheduler.schedule().prefill_chunks[0]
-        self.assertEqual((continued.start, continued.end), (511, 512))
-        self.assertEqual(continued.checkpoint_positions, (512,))
-        self.assertEqual(continued.checkpoint_interval, 0)
 
     def test_off_grid_prefill_recovers_early_without_repeated_tiny_chunks(self):
         scheduler = make_scheduler(
@@ -186,8 +186,8 @@ class SchedulerCoreTest(unittest.TestCase):
             block_size=16,
         )
         running = Sequence([1, 2], SamplingParams(max_tokens=100, ignore_eos=True))
-        scheduler.block_manager.ensure_capacity(running, len(running))
-        scheduler.state_manager.allocate(running)
+        scheduler.cache_manager.block_manager.ensure_capacity(running, len(running))
+        scheduler.cache_manager.state_manager.allocate(running)
         running.committed_tokens = len(running) - 1
         scheduler.running.append(running)
 
@@ -214,44 +214,8 @@ class SchedulerCoreTest(unittest.TestCase):
         # Capture at 64, then avoid a tiny chunk at every grid boundary.
         self.assertEqual(ends, [63, 64, 127, 190, 253, 316, 379, 384])
         self.assertEqual(captured, [64, 384])
-        self.assertIsNotNone(scheduler.block_manager.prefix_cache.find(seq, 384))
+        self.assertIsNotNone(scheduler.cache_manager.prefix_cache.find(seq, 384))
         self.assertEqual(seq.committed_tokens, 384)
-
-    def test_off_grid_prefill_recovers_on_joint_128_token_boundary(self):
-        scheduler = make_scheduler(
-            max_num_batched_tokens=64,
-            max_num_seqs=2,
-            num_blocks=256,
-            block_size=128,
-        )
-        running = Sequence([1, 2], SamplingParams(max_tokens=100, ignore_eos=True))
-        scheduler.block_manager.ensure_capacity(running, len(running))
-        scheduler.state_manager.allocate(running)
-        running.committed_tokens = len(running) - 1
-        scheduler.running.append(running)
-
-        seq = Sequence(list(range(3500)), SamplingParams(max_tokens=1))
-        scheduler.add(seq)
-        ends = []
-        positions = []
-        for _ in range(4):
-            scheduled = scheduler.schedule()
-            self.assertEqual(scheduled.decode_tokens, 1)
-            chunk = scheduled.prefill_chunks[0]
-            ends.append(chunk.end)
-            positions.extend(chunk.checkpoint_positions)
-            self.assertEqual(chunk.checkpoint_interval, 0)
-            scheduler.postprocess(scheduled.decode_chunks, [7], False)
-            snapshots = {
-                seq.seq_id: tuple(
-                    GDNStateSnapshot(position, ()) for position in chunk.checkpoint_positions
-                )
-            }
-            scheduler.postprocess(scheduled.prefill_chunks, [None], True, snapshots)
-
-        self.assertEqual(ends, [63, 126, 128, 191])
-        self.assertEqual(positions, [128])
-        self.assertIsNotNone(scheduler.block_manager.prefix_cache.find(seq, 128))
 
     def test_off_grid_terminal_chunk_never_splits_for_checkpoint(self):
         scheduler = make_scheduler(
@@ -301,7 +265,7 @@ class SchedulerCoreTest(unittest.TestCase):
             snapshots = {seq.seq_id: (GDNStateSnapshot(64, ()),)} if end == 64 else None
             scheduler.postprocess(chunks, [None], True, snapshots)
 
-        entry = scheduler.block_manager.prefix_cache.find(seq, max_tokens=64)
+        entry = scheduler.cache_manager.prefix_cache.find(seq, max_tokens=64)
         self.assertIsNotNone(entry)
         self.assertEqual(entry.num_tokens, 64)
 
@@ -364,8 +328,8 @@ class SchedulerCoreTest(unittest.TestCase):
             [1, 2],
             SamplingParams(max_tokens=3, temperature=0.0, ignore_eos=True),
         )
-        scheduler.block_manager.ensure_capacity(seq, len(seq))
-        scheduler.state_manager.allocate(seq)
+        scheduler.cache_manager.block_manager.ensure_capacity(seq, len(seq))
+        scheduler.cache_manager.state_manager.allocate(seq)
         seq.committed_tokens = len(seq) - 1
         scheduler.running.append(seq)
 

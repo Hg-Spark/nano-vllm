@@ -24,8 +24,8 @@ class BenchmarkAdditionsTest(unittest.TestCase):
             block_size=16,
         )
         running = Sequence([1, 2], SamplingParams(max_tokens=100, ignore_eos=True))
-        scheduler.block_manager.ensure_capacity(running, len(running))
-        scheduler.state_manager.allocate(running)
+        scheduler.cache_manager.block_manager.ensure_capacity(running, len(running))
+        scheduler.cache_manager.state_manager.allocate(running)
         running.committed_tokens = len(running) - 1
         scheduler.running.append(running)
         pending = Sequence(list(range(3500)), SamplingParams(max_tokens=1))
@@ -66,10 +66,10 @@ class BenchmarkAdditionsTest(unittest.TestCase):
             SimpleNamespace(start=127, end=128, checkpoint_positions=(128,)),
             SimpleNamespace(start=128, end=255, checkpoint_positions=()),
         )
-        stats = checkpoint_schedule_stats(chunks, block_size=128)
+        stats = checkpoint_schedule_stats(chunks, block_size=64)
         self.assertEqual(stats["checkpoint_positions"], 2)
         self.assertEqual(stats["offgrid_prefill_chunks"], 2)
-        self.assertEqual(stats["offgrid_realignments"], 1)
+        self.assertEqual(stats["offgrid_realignments"], 2)
 
     def test_workload_key_includes_prefill_and_memory_budget_controls(self):
         sample = {
@@ -102,6 +102,7 @@ class BenchmarkAdditionsTest(unittest.TestCase):
             "max_num_seqs": 4,
             "budget": 512,
             "seed": 0,
+            "shared_prefix_len": 512,
         }
 
         def result(cache_entries, restored, hit_rate, checkpoint_count, memory):
@@ -122,6 +123,8 @@ class BenchmarkAdditionsTest(unittest.TestCase):
                     "details": {
                         "token_hash": "identical",
                         "total_restored_prefix_tokens": restored,
+                        "mean_restored_prefix_tokens": restored / 4,
+                        "restored_prompt_token_ratio": restored / (4 * 1280),
                         "prefix_hit_rate": hit_rate,
                         "published_checkpoints_during_target": checkpoint_count,
                         "evicted_checkpoints_during_target": 1 if cache_entries else 0,
@@ -146,7 +149,12 @@ class BenchmarkAdditionsTest(unittest.TestCase):
                 summarize_bench.main([folder, "--min-repeats", "1"])
             rendered = out.getvalue()
             self.assertIn("Peak CUDA allocated: 8.000 -> 7.000 GiB", rendered)
-            self.assertIn("Prefix restored tokens: 1024, hit rate: 1.00", rendered)
+            self.assertIn(
+                "Prefix restored tokens: 1024, mean/request: 256, "
+                "hit rate: 1.00, restored/input: 20.0%",
+                rendered,
+            )
+            self.assertIn("Peak CPU GDN snapshot tensor bytes:", rendered)
             self.assertIn("Target scheduled checkpoints", rendered)
             self.assertIn("published_checkpoints_during_target: 2", rendered)
             self.assertIn("retained_checkpoints_after_target: 1", rendered)

@@ -139,7 +139,15 @@ def main(argv=None):
     print(
         "scenario            batch budget cap  graph       cache mode                    runs tok/s  TPOT_ms TTFT_ms  hits replays"
     )
-    for (w, v), runs in sorted(grouped.items(), key=lambda item: str(item[0])):
+    for (w, v), runs in sorted(
+        grouped.items(),
+        key=lambda item: (
+            item[1][0]["config"]["scenario"],
+            item[1][0]["config"]["max_num_seqs"],
+            item[1][0]["config"]["budget"],
+            str(item[0]),
+        ),
+    ):
         p = runs[0]["config"]
         hit = median(r["details"].get("prefix_hit_rate", 0) for r in runs)
         replay = median(r["metrics"].get("graph_replays", 0) for r in runs)
@@ -234,7 +242,26 @@ def main(argv=None):
                     run["details"]["total_restored_prefix_tokens"] for run in treatment
                 )
                 hits = median(run["details"]["prefix_hit_rate"] for run in treatment)
-                print(f"  Prefix restored tokens: {restored:.0f}, hit rate: {hits:.2f}")
+                reused_fraction = median(
+                    run["details"]["restored_prompt_token_ratio"] for run in treatment
+                )
+                mean_restored = median(
+                    run["details"]["mean_restored_prefix_tokens"] for run in treatment
+                )
+                snapshot_mib = median(
+                    run["details"]["peak_snapshot_bytes_including_setup"] / (1024 * 1024)
+                    for run in treatment
+                )
+                print(
+                    f"  Prefix restored tokens: {restored:.0f}, "
+                    f"mean/request: {mean_restored:.0f}, hit rate: {hits:.2f}, "
+                    f"restored/input: {reused_fraction:.1%}"
+                )
+                print(f"  Peak CPU GDN snapshot tensor bytes: {snapshot_mib:.2f} MiB")
+                if p["shared_prefix_len"] == 0:
+                    if restored:
+                        raise SystemExit("Unshared-prefix workload unexpectedly restored tokens")
+                    print("  Zero-overlap workload: TTFT reduction below zero is cache overhead")
                 if all(
                     "target_scheduled_checkpoint_stats" in run["details"]
                     for run in [*baseline, *treatment]

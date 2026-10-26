@@ -9,14 +9,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+from scripts._common import add_kv_cache_arguments
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model")
-    parser.add_argument("--dtype", choices=("bfloat16",), required=True)
-    parser.add_argument("--kv-cache-dtype", choices=("auto", "fp8_e4m3"), default="auto")
+    add_kv_cache_arguments(parser)
     parser.add_argument("--max-batch", type=int, default=32)
     parser.add_argument("--budget", type=int, default=512)
     parser.add_argument("--input-len", type=int, default=1024)
@@ -46,10 +47,12 @@ def probe(args, batch: int) -> bool:
         args.model,
         "--scenario",
         "decode",
-        "--dtype",
-        args.dtype,
         "--kv-cache-dtype",
         args.kv_cache_dtype,
+        "--kv-cache-k-scale",
+        str(args.kv_cache_k_scale),
+        "--kv-cache-v-scale",
+        str(args.kv_cache_v_scale),
         "--warmup-steps",
         "0",
         "--measure-steps",

@@ -27,8 +27,11 @@ def _capture_hooks(layers, sink, *, fused_residual=False):
 
     def make_hook(index):
         def hook(_module, _inputs, output):
-            hidden = output[0] + output[1] if fused_residual else output
-            sink[index] = hidden.detach().float().cpu()
+            if fused_residual:
+                hidden = output[0].detach().float() + output[1].detach().float()
+            else:
+                hidden = output.detach().float()
+            sink[index] = hidden.cpu()
 
         return hook
 
@@ -185,7 +188,7 @@ def parse_args(argv=None):
     parser.add_argument("--relative-rms-threshold", type=float, default=2e-2)
     add_result_argument(parser)
     args = parser.parse_args(argv)
-    validate_positive(parser, args, "max_probe_tokens")
+    validate_positive(parser, args, "max_probe_tokens", "max_model_len")
     validate_finite(parser, args.relative_rms_threshold, "relative-rms-threshold", inclusive=False)
     return normalize_paths(args, "model", "result_file")
 

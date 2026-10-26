@@ -124,6 +124,7 @@ class MultimodalRequestTest(unittest.TestCase):
 
         self.assertTrue(seq.is_finished)
         self.assertIsNone(state.visual_features)
+        self.assertIsNone(state.image_grid_thw)
         self.assertEqual(seq.committed_tokens, 0)
 
     def test_prefill_image_span_is_clipped_to_chunk(self):

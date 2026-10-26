@@ -17,14 +17,16 @@ from time import perf_counter
 
 from nanovllm.engine.schedule import GDN_CHECKPOINT_INTERVAL
 from scripts._common import (
-    add_dtype_argument,
+    add_kv_cache_arguments,
     add_model_argument,
     cuda_memory_stats,
     execute,
     execute_fixed_decode_step,
+    kv_cache_kwargs,
     kv_cache_stats,
     normalize_paths,
     prepare_fixed_decode_batch,
+    validate_gpu_utilization,
     validate_positive,
 )
 
@@ -38,10 +40,10 @@ def parse_graph_sizes(raw: str) -> tuple[int, ...]:
     return values
 
 
-def arguments():
+def arguments(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     add_model_argument(p)
-    add_dtype_argument(p)
+    add_kv_cache_arguments(p)
     p.add_argument(
         "--scenario",
         choices=("throughput", "prefix", "interference", "decode"),
@@ -71,7 +73,6 @@ def arguments():
     )
     p.add_argument("--max-model-len", type=int, default=4096)
     p.add_argument("--gpu-memory-utilization", type=float, default=0.8)
-    p.add_argument("--kv-cache-dtype", choices=("auto", "fp8_e4m3"), default="auto")
     p.add_argument(
         "--graph-sizes", default="", help="comma separated Graph buckets, e.g. 1,2,4; empty=Eager"
     )
@@ -82,10 +83,20 @@ def arguments():
         help="fail a Graph throughput run if fewer than this fraction of decode forwards replay",
     )
     p.add_argument("--cache-entries", type=int, default=0, help="0 disables prefix cache")
-    p.add_argument("--shared-prefix-len", type=int, default=1024, help="prefix scenario")
+    p.add_argument(
+        "--shared-prefix-len",
+        type=int,
+        default=1024,
+        help="prefix scenario; 0 measures cache overhead on unrelated prompts",
+    )
     p.add_argument("--suffix-len", type=int, default=256, help="prefix scenario")
     p.add_argument(
         "--target-requests", type=int, default=8, help="prefix: number of target requests"
+    )
+    p.add_argument(
+        "--expect-evictions",
+        action="store_true",
+        help="prefix: fail if the target workload does not evict any joint checkpoint",
     )
     p.add_argument("--warmup-steps", type=int, default=8, help="fixed decode warmup steps")
     p.add_argument("--measure-steps", type=int, default=128, help="fixed decode measured steps")
@@ -99,33 +110,36 @@ def arguments():
     p.add_argument("--late-after-decode-steps", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", required=True, help="JSON result path; must not exist")
-    a = normalize_paths(p.parse_args(), "model", "out")
+    a = normalize_paths(p.parse_args(argv), "model", "out")
     if not a.model:
         p.error("model path or NANOVLLM_MODEL must be provided")
     a.graph_sizes = parse_graph_sizes(a.graph_sizes)
-    if not 0.0 <= a.min_graph_coverage <= 1.0 or a.min_graph_coverage != a.min_graph_coverage:
+    if not 0.0 <= a.min_graph_coverage <= 1.0:
         p.error("--min-graph-coverage must be between 0 and 1")
     if a.min_graph_coverage and (a.scenario != "throughput" or not a.graph_sizes):
         p.error("--min-graph-coverage requires --scenario throughput and --graph-sizes")
-    validate_positive(p, a, "input_len", "num_requests")
+    validate_positive(p, a, "input_len", "num_requests", "max_num_seqs", "budget", "max_model_len")
+    validate_gpu_utilization(p, a)
     if a.mixed_prefill_limit < -1:
         p.error("--mixed-prefill-limit must be -1 or non-negative")
     if a.activation_reserve_mib < 0:
         p.error("--activation-reserve-mib must be non-negative")
     if a.output_len < 2:
         p.error("output-len must be at least 2")
-    if a.scenario == "throughput" and a.input_len + a.output_len > a.max_model_len:
+    if a.scenario == "throughput" and a.input_len + a.output_len - 1 > a.max_model_len:
         p.error("input-len + output-len exceeds max-model-len")
+    if a.expect_evictions and (a.scenario != "prefix" or a.cache_entries < 1):
+        p.error("--expect-evictions requires --scenario prefix and --cache-entries > 0")
     if a.scenario == "prefix":
         if a.target_requests < 1:
             p.error("target-requests must be positive")
         if (
-            a.shared_prefix_len < GDN_CHECKPOINT_INTERVAL
+            a.shared_prefix_len < 0
             or a.shared_prefix_len % GDN_CHECKPOINT_INTERVAL
             or a.suffix_len < 1
         ):
-            p.error("shared-prefix-len must be a positive multiple of 64; suffix-len >= 1")
-        if a.shared_prefix_len + a.suffix_len + a.output_len > a.max_model_len:
+            p.error("shared-prefix-len must be zero or a multiple of 64; suffix-len >= 1")
+        if a.shared_prefix_len + a.suffix_len + a.output_len - 1 > a.max_model_len:
             p.error("prefix-len + suffix-len + output-len exceeds max-model-len")
     if a.scenario == "decode":
         if a.warmup_steps < 0 or a.measure_steps < 2:
@@ -137,7 +151,7 @@ def arguments():
     if a.scenario == "interference":
         if a.num_requests >= a.max_num_seqs:
             p.error("reserve one max-num-seqs slot for the injected long request")
-        if a.late_input_len <= a.input_len or a.late_input_len + a.output_len > a.max_model_len:
+        if a.late_input_len <= a.input_len or a.late_input_len + a.output_len - 1 > a.max_model_len:
             p.error("late-input-len must exceed input-len and fit in max-model-len")
         if not 0 < a.late_after_decode_steps < a.output_len:
             p.error("late-after-decode-steps must be between 1 and output-len-1")
@@ -290,14 +304,13 @@ def run(a):
 
     engine = LLM(
         a.model,
-        dtype=a.dtype,
         max_num_batched_tokens=a.budget,
         max_num_seqs=a.max_num_seqs,
         max_model_len=a.max_model_len,
         gpu_memory_utilization=a.gpu_memory_utilization,
         activation_reserve_bytes=a.activation_reserve_mib * 1024**2,
         max_mixed_prefill_tokens=(None if a.mixed_prefill_limit == -1 else a.mixed_prefill_limit),
-        kv_cache_dtype=a.kv_cache_dtype,
+        **kv_cache_kwargs(a),
         max_prefix_cache_entries=a.cache_entries,
         decode_graph_batch_sizes=a.graph_sizes,
     )
@@ -336,7 +349,8 @@ def run(a):
                 sched_prefill_tokens += outcome.prefill_tokens
                 if a.cache_entries and outcome.prefill_chunks:
                     observed = checkpoint_schedule_stats(
-                        outcome.prefill_chunks, engine.scheduler.block_manager.block_size
+                        outcome.prefill_chunks,
+                        engine.scheduler.cache_manager.block_manager.block_size,
                     )
                     for name, count in observed.items():
                         checkpoint_stats[name] += count
@@ -386,7 +400,7 @@ def run(a):
             warm = make_requests(engine, [shared + warm_tail[:1]], 1)
             run_benchmark(engine, warm)  # Build exactly the same history in both A/B runs.
             graph_before = graph_counters(engine.model_runner)
-            cache = engine.scheduler.block_manager.prefix_cache
+            cache = engine.scheduler.cache_manager.prefix_cache
             entries_before = len(cache)
             bytes_before = cache.snapshot_bytes
             published_before = cache.published_count
@@ -397,10 +411,16 @@ def run(a):
             restored = [first_prefill_start.get(seq.seq_id, -1) for seq in target]
             if any(start < 0 for start in restored):
                 raise RuntimeError("some target requests never executed Prefill")
-            if a.cache_entries and not any(start > 0 for start in restored):
+            if a.cache_entries and a.shared_prefix_len and not any(start > 0 for start in restored):
                 raise RuntimeError("enabled cache never restored a shared prefix")
-            if not a.cache_entries and any(start != 0 for start in restored):
-                raise RuntimeError("disabled cache unexpectedly restored a prefix")
+            if (not a.cache_entries or not a.shared_prefix_len) and any(
+                start != 0 for start in restored
+            ):
+                raise RuntimeError(
+                    "unexpected prefix restore in cache-disabled or unshared workload"
+                )
+            if a.expect_evictions and cache.evicted_count == evicted_before:
+                raise RuntimeError("eviction workload did not evict a joint checkpoint")
             details = {
                 "warm_prompt_tokens": warm[0].num_prompt_tokens,
                 "target_requests": len(target),
@@ -415,6 +435,12 @@ def run(a):
                 "restored_tokens_per_target": restored,
                 "prefix_hit_rate": sum(start > 0 for start in restored) / len(restored),
                 "total_restored_prefix_tokens": sum(max(start, 0) for start in restored),
+                "mean_restored_prefix_tokens": sum(max(start, 0) for start in restored)
+                / len(restored),
+                "restored_prompt_token_ratio": sum(max(start, 0) for start in restored)
+                / sum(seq.num_prompt_tokens for seq in target),
+                "shared_prefix_fraction": a.shared_prefix_len
+                / (a.shared_prefix_len + a.suffix_len),
                 "target_scheduled_checkpoint_stats": {
                     name: count - checkpoint_before_target[name]
                     for name, count in checkpoint_stats.items()
