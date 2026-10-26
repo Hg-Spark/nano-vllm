@@ -44,7 +44,6 @@ class PrefixCache:
         release_blocks: Callable[[Iterable[int]], None],
         max_snapshot_bytes: int | None = None,
         snapshot_nbytes: int = 0,
-        max_checkpoints_per_path: int = 4,
     ) -> None:
         if max_snapshot_bytes is not None and max_snapshot_bytes < 0:
             raise ValueError("max_snapshot_bytes must be non-negative")
@@ -52,7 +51,6 @@ class PrefixCache:
         self.max_entries = max_entries
         self.max_snapshot_bytes = max_snapshot_bytes
         self.snapshot_nbytes = snapshot_nbytes
-        self.max_checkpoints_per_path = max_checkpoints_per_path
         self._snapshot_bytes = 0
         self.published_count = 0
         self.evicted_count = 0
@@ -86,66 +84,33 @@ class PrefixCache:
             and (self.max_snapshot_bytes is None or self.snapshot_nbytes <= self.max_snapshot_bytes)
         )
 
-    def candidates(
-        self, seq: Sequence, start: int, end: int
-    ) -> tuple[list[tuple[int, bytes]], list[int]]:
-        """Find new and cached 64-token boundaries in one block-hash pass."""
+    def candidates(self, seq: Sequence, start: int, end: int) -> list[tuple[int, bytes]]:
+        """Probe new aligned boundaries; resident length lookups belong to find()."""
         if not self._can_capture():
-            return [], []
+            return []
         end = min(end, seq.num_prompt_tokens)
         if seq.image_state is not None:
             end = min(end, seq.image_state.image_start)
-        candidates = []
         hashes, _ = _sequence_block_hashes(seq, self.block_size, end)
-        # A joint GDN/KV checkpoint must align to both the 64-token state grid
-        # and the KV page boundary. Revisit resident entries (bounded by
-        # max_entries) instead of rescanning every old checkpoint each chunk.
         step = lcm(GDN_CHECKPOINT_INTERVAL, self.block_size)
-        cached = []
-        for position in self._resident_lengths[: bisect_right(self._resident_lengths, end)]:
-            if position % step:
-                continue
-            digest = hashes[position // self.block_size - 1]
-            if digest in self._entries:
-                cached.append(position)
         first_new = (start // step + 1) * step
-        for position in range(first_new, end + 1, step):
-            digest = hashes[position // self.block_size - 1]
-            if digest not in self._entries:
-                candidates.append((position, digest))
-        return candidates, cached
+        return [
+            (position, hashes[position // self.block_size - 1])
+            for position in range(first_new, end + 1, step)
+            if hashes[position // self.block_size - 1] not in self._entries
+        ]
 
-    def _path_limit(self) -> int:
-        limit = min(self.max_entries, self.max_checkpoints_per_path)
-        if self.max_snapshot_bytes is not None and self.snapshot_nbytes:
-            limit = min(limit, self.max_snapshot_bytes // self.snapshot_nbytes)
-        return limit
+    def _capacity(self) -> int:
+        """Effective global capacity across entry count and CPU snapshot bytes."""
+        if self.max_snapshot_bytes is None or not self.snapshot_nbytes:
+            return self.max_entries
+        return min(self.max_entries, self.max_snapshot_bytes // self.snapshot_nbytes)
 
-    def select_checkpoints(
-        self,
-        candidates: list[tuple[int, bytes]],
-        cached: list[int],
-        max_reusable_tokens: int | None = None,
-    ) -> list[tuple[int, bytes]]:
-        """Choose useful checkpoints within the effective global/per-path capacity."""
-        if not candidates:
+    def select_checkpoints(self, candidates: list[tuple[int, bytes]]) -> list[tuple[int, bytes]]:
+        """Capture at most one deepest reusable checkpoint per chunk."""
+        if self._capacity() == 0:
             return []
-        limit = self._path_limit()
-        if limit <= 0:
-            return []
-        if max_reusable_tokens is not None and (limit == 1 or cached):
-            # A checkpoint at the full prompt length cannot resume another
-            # identical prompt, since its last token still needs a forward pass.
-            reusable = [pair for pair in candidates if pair[0] <= max_reusable_tokens]
-            if reusable:
-                candidates = reusable
-            elif cached and cached[-1] <= max_reusable_tokens:
-                return []
-        if limit == 1 and cached and cached[-1] > candidates[-1][0]:
-            return []
-        if limit == 1 or cached:
-            return candidates[-1:]
-        return candidates[:1] if len(candidates) == 1 else [candidates[0], candidates[-1]]
+        return candidates[-1:]
 
     def find(self, seq: Sequence, max_tokens: int) -> PrefixEntry | None:
         if not self.enabled or max_tokens <= 0 or not self._entries:
@@ -198,20 +163,10 @@ class PrefixCache:
             for position in by_position
         ):
             raise RuntimeError("invalid GDN snapshot checkpoint boundary")
-        path = []
-        stop = max(by_position)
-        hashes, _ = _sequence_block_hashes(seq, self.block_size, stop)
-        # Only resident ancestors and new checkpoints can change the path.
-        # Scanning every KV page repeats work for long prompts.
-        end = bisect_right(self._resident_lengths, stop)
-        positions = sorted(set(self._resident_lengths[:end]) | by_position.keys())
-        for position in positions:
+        hashes, _ = _sequence_block_hashes(seq, self.block_size, max(by_position))
+        for position, snapshot in sorted(by_position.items()):
             digest = hashes[position // self.block_size - 1]
-            if digest in self._entries:
-                path.append(digest)
-            snapshot = by_position.get(position)
-            if snapshot is not None:
-                self._publish(seq, snapshot, position, digest, path)
+            self._publish(seq, snapshot, position, digest)
 
     def _publish(
         self,
@@ -219,20 +174,20 @@ class PrefixCache:
         snapshot: GDNStateSnapshot,
         position: int,
         digest: bytes,
-        path: list[bytes],
     ) -> None:
-        if digest in self._entries:
+        if digest in self._entries or self._capacity() == 0:
             return
         num_blocks = position // self.block_size
         block_ids = tuple(seq.block_table[:num_blocks])
         if len(block_ids) != num_blocks:
             raise RuntimeError("KV block table is shorter than cached prefix")
 
+        # Retain before eviction: an old checkpoint may share the new KV pages.
         self._retain_blocks(block_ids)
         hashes, _ = _sequence_block_hashes(seq, self.block_size, position)
-        block_hashes = tuple(hashes[:num_blocks])
-        entry = PrefixEntry(block_hashes, block_ids, position, snapshot)
-        self._entries[digest] = entry
+        self._entries[digest] = PrefixEntry(
+            tuple(hashes[:num_blocks]), block_ids, position, snapshot
+        )
         if position not in self._resident_length_counts:
             insort(self._resident_lengths, position)
             self._resident_length_counts[position] = 0
@@ -240,57 +195,8 @@ class PrefixCache:
         self._snapshot_bytes += self.snapshot_nbytes
         self.published_count += 1
         self.peak_snapshot_bytes = max(self.peak_snapshot_bytes, self._snapshot_bytes)
-
-        path.append(digest)
-        limit = self._path_limit()
-        # Preserve checkpoints actually reused by other requests when growing a
-        # branch; prefer removing intermediate, unshared positions.
-        if len(path) > limit:
-            interior = path[1:-1]
-            victim = next((key for key in interior if self._active_reuses.get(key, 0) == 0), None)
-            if victim is None:
-                victim = interior[0] if interior else path[0]
-            self._evict_hash(victim)
-            path.remove(victim)
-
-        # An out-of-order insertion may make existing descendants exceed their
-        # path quota. Reject the new intermediate node if no old interior can go.
-        for leaf in tuple(self._entries.values()):
-            if leaf.num_tokens <= position or leaf.block_hashes[num_blocks - 1] != digest:
-                continue
-            chain = [key for key in leaf.block_hashes if key in self._entries]
-            if len(chain) > limit:
-                interior = [key for key in chain[1:-1] if key != digest]
-                if not interior:
-                    self._evict_hash(digest)
-                    if digest in path:
-                        path.remove(digest)
-                    return
-                victim = next(
-                    (key for key in interior if self._active_reuses.get(key, 0) == 0), None
-                )
-                if victim is None:
-                    self._evict_hash(digest)
-                    if digest in path:
-                        path.remove(digest)
-                    return
-                self._evict_hash(victim)
-
-        # Replace intermediate checkpoints before evicting globally.
-        while len(self._entries) > self.max_entries or (
-            self.max_snapshot_bytes is not None and self._snapshot_bytes > self.max_snapshot_bytes
-        ):
-            if len(path) >= 3:
-                interior = path[1:-1]
-                victim = next(
-                    (key for key in interior if self._active_reuses.get(key, 0) == 0),
-                    interior[-1],
-                )
-                self._evict_hash(victim)
-                path.remove(victim)
-            else:
-                self.evict()
-        path[:] = [key for key in path if key in self._entries]
+        while len(self._entries) > self._capacity():
+            self._evict_hash(self._choose_victim())
 
     def _evict_hash(self, digest: bytes) -> None:
         entry = self._entries.pop(digest)
@@ -307,28 +213,24 @@ class PrefixCache:
         # Its reuse reference is released by BlockManager.deallocate(), not here.
         self._release_blocks(entry.block_ids)
 
+    def _choose_victim(self, block_refcounts: list[int] | None = None) -> bytes | None:
+        """Cold-first FIFO, with a reclaimable-page filter under GPU pressure."""
+
+        def freed_pages(key: bytes) -> int:
+            return sum(block_refcounts[block_id] == 1 for block_id in self._entries[key].block_ids)
+
+        keys = list(self._entries)
+        if block_refcounts is not None:
+            keys = [key for key in keys if freed_pages(key)]
+        if not keys:
+            return None
+        cold = [key for key in keys if not self._active_reuses.get(key, 0)]
+        keys = cold or keys
+        return keys[0] if block_refcounts is None else max(keys, key=freed_pages)
+
     def evict(self, block_refcounts: list[int] | None = None) -> bool:
-        if not self._entries:
+        victim = self._choose_victim(block_refcounts)
+        if victim is None:
             return False
-        # Evict cold checkpoints first. Active requests retain their own KV
-        # references, but dropping a reused checkpoint hurts future hits.
-        candidates = [
-            key for key in self._entries if self._active_reuses.get(key, 0) == 0
-        ]
-        if not candidates:
-            candidates = list(self._entries)
-        if block_refcounts is None:
-            victim = candidates[0]
-        else:
-            victim = max(
-                candidates,
-                key=lambda key: sum(
-                    block_refcounts[block_id] == 1 for block_id in self._entries[key].block_ids
-                ),
-            )
-            if not any(
-                block_refcounts[block_id] == 1 for block_id in self._entries[victim].block_ids
-            ):
-                return False
         self._evict_hash(victim)
         return True

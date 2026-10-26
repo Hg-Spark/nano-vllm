@@ -1,6 +1,7 @@
 """ModelRunner CUDA Graph lifecycle and context contracts."""
 
 import unittest
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -209,6 +210,9 @@ class ModelRunnerTest(unittest.TestCase):
         with patch("nanovllm.engine.model_runner.build_decode_batch_layout", return_value=object()):
             self.assertIsNone(runner._run_decode_graph(chunks, []))
         self.assertEqual(runner.decode_graph_fallbacks["layout_exceeded"], 1)
+        with patch("nanovllm.engine.model_runner.build_decode_batch_layout") as builder:
+            self.assertIsNone(runner._run_decode_graph(chunks, [], layout=object()))
+            builder.assert_not_called()
 
     def test_all_greedy_batch_avoids_temperature_upload(self):
         runner = object.__new__(ModelRunner)
@@ -223,6 +227,34 @@ class ModelRunnerTest(unittest.TestCase):
         self.assertEqual(result, [1, 0])
         runner.sampler.assert_not_called()
         runner.metadata_pool.to_cuda.assert_not_called()
+
+    def test_mixed_sampling_uses_pinned_metadata_indices(self):
+        runner = object.__new__(ModelRunner)
+        runner.sampler = Mock(return_value=torch.tensor([0, 1], dtype=torch.long))
+        uploads = []
+
+        @contextmanager
+        def fake_batch():
+            def upload(name, values, dtype):
+                uploads.append((name, tuple(values)))
+                return torch.tensor(
+                    values, dtype=torch.float32 if dtype == "float32" else torch.int64
+                )
+
+            yield upload
+
+        runner.metadata_pool = SimpleNamespace(batch=fake_batch)
+        seqs = [
+            Sequence([1], SamplingParams(temperature=0.0)),
+            Sequence([2], SamplingParams(temperature=0.8)),
+        ]
+        result = runner._sample_logits(torch.tensor([[3.0, 2.0], [1.0, 3.0]]), seqs, [0, 1])
+        self.assertEqual(result, [0, 1])
+        self.assertEqual(
+            uploads,
+            [("sample_temperatures", (0.0, 0.8)), ("sample_positions", (1,))],
+        )
+        self.assertEqual(runner.sampler.call_args.kwargs["sample_positions"].tolist(), [1])
 
     def test_visual_feature_cache_uses_text_dtype(self):
         runner = object.__new__(ModelRunner)

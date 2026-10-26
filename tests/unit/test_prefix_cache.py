@@ -18,7 +18,6 @@ def make_cache_manager(
     max_prefix_entries: int,
     max_prefix_cache_snapshot_bytes: int | None = None,
     snapshot_nbytes: int = 0,
-    max_checkpoints_per_path: int = 4,
 ) -> HybridCacheManager:
     """Exercise the production cache owner instead of the removed legacy mode."""
     config = SimpleNamespace(
@@ -26,7 +25,6 @@ def make_cache_manager(
         max_num_seqs=8,
         max_prefix_cache_entries=max_prefix_entries,
         max_prefix_cache_snapshot_bytes=max_prefix_cache_snapshot_bytes,
-        max_gdn_checkpoints=max_checkpoints_per_path,
     )
     return HybridCacheManager(config, num_blocks, snapshot_nbytes)
 
@@ -55,13 +53,10 @@ def publish_snapshot(
         cache.publish_many(seq, (snapshot,))
         return
     # Small-block eviction fixtures exercise the private policy below the GDN grid.
-    path = []
-    for position, digest in _block_hashes(seq.token_ids, cache.block_size, prefix_tokens):
-        if digest in cache._entries:
-            path.append(digest)
+    position, digest = list(_block_hashes(seq.token_ids, cache.block_size, prefix_tokens))[-1]
     if position != prefix_tokens:
         raise ValueError("test prefix must end on a KV block boundary")
-    cache._publish(seq, snapshot, prefix_tokens, digest, path)
+    cache._publish(seq, snapshot, prefix_tokens, digest)
 
 
 def publish_prefix(
@@ -117,9 +112,8 @@ class PrefixCacheTest(unittest.TestCase):
             self.assertIsNone(cache.find(seq, max_tokens=128))
             self.assertEqual(hash_fn.call_count, 0)
 
-            candidates, cached = cache.candidates(seq, 64, 160)
+            candidates = cache.candidates(seq, 64, 160)
             self.assertEqual([position for position, _ in candidates], [128])
-            self.assertEqual(cached, [])
             self.assertEqual(hash_fn.call_count, 10)
 
             # Previously calculated blocks are never hashed again.
@@ -183,11 +177,10 @@ class PrefixCacheTest(unittest.TestCase):
                     num_blocks=16, block_size=block_size, max_prefix_entries=4
                 )
                 seq = Sequence(list(range(401)))
-                candidates, cached = manager.prefix_cache.candidates(seq, 0, 400)
+                candidates = manager.prefix_cache.candidates(seq, 0, 400)
                 self.assertEqual(
                     [position for position, _ in candidates], [64, 128, 192, 256, 320, 384]
                 )
-                self.assertEqual(cached, [])
                 self.assertEqual(len(seq.prefix_block_hashes), expected_hashes)
 
     def test_candidate_scan_only_probes_new_boundaries(self):
@@ -206,9 +199,8 @@ class PrefixCacheTest(unittest.TestCase):
                 return super().__contains__(digest)
 
         cache._entries = CountingEntries(cache._entries)
-        candidates, cached = cache.candidates(seq, 8128, 8192)
+        candidates = cache.candidates(seq, 8128, 8192)
         self.assertEqual([position for position, _ in candidates], [8192])
-        self.assertEqual(cached, [])
         self.assertEqual(cache._entries.probes, 1)
 
     def test_publish_probes_resident_ancestors_not_every_historical_page(self):
@@ -232,7 +224,7 @@ class PrefixCacheTest(unittest.TestCase):
         self.assertEqual(cache.find(seq, 8192).num_tokens, 8192)
         self.assertLessEqual(cache._entries.probes, 8)
 
-    def test_cached_checkpoints_include_ancestors_and_exclude_other_branches(self):
+    def test_candidate_probe_skips_resident_ancestors_and_sibling_paths(self):
         manager = make_cache_manager(num_blocks=16, block_size=16, max_prefix_entries=4)
         seq = Sequence(list(range(257)))
         manager.block_manager.ensure_capacity(seq, 192)
@@ -242,13 +234,11 @@ class PrefixCacheTest(unittest.TestCase):
             (GDNStateSnapshot(64, ()), GDNStateSnapshot(192, ())),
         )
 
-        candidates, cached = cache.candidates(seq, 128, 256)
-        self.assertEqual(cached, [64, 192])
+        candidates = cache.candidates(seq, 128, 256)
         self.assertEqual([position for position, _ in candidates], [256])
 
         diverged = Sequence(seq.token_ids[:80] + [999] + seq.token_ids[81:])
-        candidates, cached = cache.candidates(diverged, 128, 256)
-        self.assertEqual(cached, [64])
+        candidates = cache.candidates(diverged, 128, 256)
         self.assertEqual([position for position, _ in candidates], [192, 256])
 
     def test_longest_exact_prefix_and_max_tokens_cap(self):
@@ -343,12 +333,9 @@ class PrefixCacheTest(unittest.TestCase):
     def test_global_one_entry_captures_only_deepest_checkpoint(self):
         manager = make_cache_manager(num_blocks=20, block_size=16, max_prefix_entries=1)
         seq = Sequence(list(range(256)))
-        candidates, cached = manager.prefix_cache.candidates(seq, 0, 256)
+        candidates = manager.prefix_cache.candidates(seq, 0, 256)
         self.assertEqual(
-            [
-                position
-                for position, _ in manager.prefix_cache.select_checkpoints(candidates, cached)
-            ],
+            [position for position, _ in manager.prefix_cache.select_checkpoints(candidates)],
             [256],
         )
 
@@ -356,9 +343,9 @@ class PrefixCacheTest(unittest.TestCase):
         seq = Sequence(list(range(1024)) + [9])
         manager.block_manager.ensure_capacity(seq, 1024)
         publish_snapshot(manager, seq, 512)
-        candidates, cached = manager.prefix_cache.candidates(seq, 512, 1024)
+        candidates = manager.prefix_cache.candidates(seq, 512, 1024)
         self.assertEqual(
-            [p for p, _ in manager.prefix_cache.select_checkpoints(candidates, cached)],
+            [p for p, _ in manager.prefix_cache.select_checkpoints(candidates)],
             [1024],
         )
         publish_snapshot(manager, seq, 1024)
@@ -370,32 +357,11 @@ class PrefixCacheTest(unittest.TestCase):
         shorter.block_manager.ensure_capacity(original, 128)
         publish_snapshot(shorter, original, 128)
         other = Sequence(list(range(1, 193)) + [9])
-        candidates, cached = shorter.prefix_cache.candidates(other, 0, 192)
+        candidates = shorter.prefix_cache.candidates(other, 0, 192)
         self.assertEqual(
-            [p for p, _ in shorter.prefix_cache.select_checkpoints(candidates, cached)],
+            [p for p, _ in shorter.prefix_cache.select_checkpoints(candidates)],
             [192],
         )
-
-    def test_backfilled_shorter_checkpoint_does_not_delete_longer(self):
-        manager = make_cache_manager(
-            num_blocks=16, block_size=16, max_prefix_entries=2, max_checkpoints_per_path=1
-        )
-        seq = Sequence(list(range(128)) + [9])
-        manager.block_manager.ensure_capacity(seq, 128)
-        publish_snapshot(manager, seq, 128)
-        publish_snapshot(manager, seq, 64)
-        self.assertEqual(len(manager.prefix_cache), 1)
-        self.assertEqual(manager.prefix_cache.find(seq, 128).num_tokens, 128)
-
-        manager = make_cache_manager(
-            num_blocks=32, block_size=16, max_prefix_entries=4, max_checkpoints_per_path=2
-        )
-        seq = Sequence(list(range(256)) + [9])
-        manager.block_manager.ensure_capacity(seq, 256)
-        for position in (64, 256, 128):
-            publish_snapshot(manager, seq, position)
-        self.assertEqual(len(manager.prefix_cache), 2)
-        self.assertEqual(manager.prefix_cache.find(seq, 256).num_tokens, 256)
 
     def test_batch_publish_rejects_misaligned_boundary(self):
         manager = make_cache_manager(num_blocks=10, block_size=16, max_prefix_entries=2)
@@ -409,15 +375,16 @@ class PrefixCacheTest(unittest.TestCase):
         manager.block_manager.ensure_capacity(seq, 192)
         cache = manager.prefix_cache
         cache.publish_many(seq, (GDNStateSnapshot(64, ()), GDNStateSnapshot(128, ())))
-        candidates, cached = cache.candidates(seq, 128, 192)
+        candidates = cache.candidates(seq, 128, 192)
         self.assertEqual(
-            [p for p, _ in cache.select_checkpoints(candidates, cached)],
+            [p for p, _ in cache.select_checkpoints(candidates)],
             [192],
         )
         cache.publish_many(seq, (GDNStateSnapshot(192, ()),))
         self.assertEqual(len(cache), 2)
         self.assertEqual(cache.find(seq, 192).num_tokens, 192)
-        self.assertEqual(cache.find(seq, 64).num_tokens, 64)
+        self.assertIsNone(cache.find(seq, 64))
+        self.assertEqual(cache.find(seq, 128).num_tokens, 128)
 
     def test_cache_maintenance_does_not_evict_active_shared_blocks(self):
         manager = make_cache_manager(num_blocks=16, block_size=16, max_prefix_entries=2)
@@ -490,7 +457,7 @@ class PrefixCacheTest(unittest.TestCase):
         self.assertEqual(len(manager.prefix_cache), 0)
         self.assertEqual(manager.prefix_cache.snapshot_bytes, 0)
         self.assertEqual(manager.block_manager.block_refcounts[block_id], 1)
-        self.assertFalse(manager.prefix_cache.candidates(seq, 0, 4)[0])
+        self.assertFalse(manager.prefix_cache.candidates(seq, 0, 4))
 
     def test_prefix_cache_only_caches_text_before_image_span(self):
         manager = make_cache_manager(num_blocks=32, block_size=4, max_prefix_entries=4)
@@ -500,11 +467,10 @@ class PrefixCacheTest(unittest.TestCase):
         manager.block_manager.ensure_capacity(seq, 72)
 
         self.assertEqual(
-            [position for position, _ in manager.prefix_cache.candidates(seq, 0, 80)[0]],
+            [position for position, _ in manager.prefix_cache.candidates(seq, 0, 80)],
             [64],
         )
         self.assertEqual(len(manager.prefix_cache), 0)
-
 
     def test_publish_rejects_image_region_even_if_called_directly(self):
         manager = make_cache_manager(num_blocks=32, block_size=16, max_prefix_entries=4)
@@ -543,40 +509,39 @@ class PrefixCacheTest(unittest.TestCase):
         manager.release(second)
         manager.release(consumer)
 
-    def test_shared_history_reuses_snapshots_and_preserves_shortest(self):
-        manager = make_cache_manager(
-            num_blocks=64,
-            block_size=16,
-            max_prefix_entries=8,
-            max_checkpoints_per_path=4,
-        )
-        original = Sequence(list(range(320)))
-        # Both requests share 256 tokens, then diverge on separate branches.
-        longer = Sequence(list(range(256)) + list(range(1000, 1272)))
-        manager.block_manager.ensure_capacity(original, 256)
-        manager.block_manager.ensure_capacity(longer, 512)
-
-        history = {}
+    def test_global_capacity_not_per_path_quota(self):
+        manager = make_cache_manager(num_blocks=32, block_size=16, max_prefix_entries=4)
+        seq = Sequence(list(range(257)))
+        manager.block_manager.ensure_capacity(seq, 256)
         for position in (64, 128, 192, 256):
-            snapshot = GDNStateSnapshot(position, ())
-            history[position] = snapshot
-            publish_snapshot(manager, original, position, snapshot)
+            publish_snapshot(manager, seq, position)
+        cache = manager.prefix_cache
+        self.assertEqual(len(cache), 4)
+        self.assertEqual(cache._resident_lengths, [64, 128, 192, 256])
+        self.assertEqual(cache.find(seq, 64).num_tokens, 64)
+        self.assertEqual(cache.find(seq, 256).num_tokens, 256)
 
-        for position in (128, 256):
-            publish_snapshot(manager, longer, position)
-        self.assertEqual(len(manager.prefix_cache), 4)
-        reused = manager.prefix_cache.find(longer, max_tokens=256)
-        self.assertIs(reused.state_snapshot, history[256])
-        # An admitted prefix hit protects the reused checkpoint on this path.
-        manager.prefix_cache.mark_reused(longer, reused)
+    def test_out_of_order_batch_publication_preserves_resident_index(self):
+        manager = make_cache_manager(num_blocks=32, block_size=16, max_prefix_entries=4)
+        seq = Sequence(list(range(257)))
+        manager.block_manager.ensure_capacity(seq, 256)
+        snapshots = (
+            GDNStateSnapshot(256, ()),
+            GDNStateSnapshot(64, ()),
+            GDNStateSnapshot(128, ()),
+        )
+        manager.prefix_cache.publish_many(seq, snapshots)
+        cache = manager.prefix_cache
+        self.assertEqual(cache._resident_lengths, [64, 128, 256])
+        self.assertIs(cache.find(seq, 256).state_snapshot, snapshots[0])
+        self.assertIs(cache.find(seq, 64).state_snapshot, snapshots[1])
 
-        for position in (384, 448, 512):
-            publish_snapshot(manager, longer, position)
-        self.assertEqual(len(manager.prefix_cache), 4)
-        self.assertEqual(manager.prefix_cache.find(longer, max_tokens=527).num_tokens, 512)
-        self.assertEqual(manager.prefix_cache.find(original, max_tokens=319).num_tokens, 256)
-        self.assertEqual(manager.prefix_cache.find(original, max_tokens=80).num_tokens, 64)
-        self.assertEqual(manager.block_manager.block_refcounts[original.block_table[0]], 3)
+    def test_select_deepest_checkpoint(self):
+        manager = make_cache_manager(num_blocks=24, block_size=16, max_prefix_entries=4)
+        seq = Sequence(list(range(128)))
+        candidates = manager.prefix_cache.candidates(seq, 0, 128)
+        selected = manager.prefix_cache.select_checkpoints(candidates)
+        self.assertEqual([position for position, _ in selected], [128])
 
 
 if __name__ == "__main__":

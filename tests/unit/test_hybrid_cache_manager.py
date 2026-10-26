@@ -87,13 +87,16 @@ class HybridCacheManagerTest(unittest.TestCase):
         )
         cache.release(first)
 
-    def test_checkpoint_planning_recovers_off_grid_endpoint(self):
+    def test_checkpoint_planning_requires_real_off_grid_endpoint(self):
         scheduler = make_scheduler(num_blocks=32, block_size=16)
         cache = scheduler.cache_manager
         seq = Sequence(list(range(256)), SamplingParams(max_tokens=1))
         planned: set[bytes] = set()
         end, positions, interval = cache.plan_prefill_checkpoints(seq, 63, 126, planned)
         self.assertEqual((end, positions, interval), (64, (64,), 0))
+        planned.clear()
+        end, positions, interval = cache.plan_prefill_checkpoints(seq, 63, 128, planned)
+        self.assertEqual((end, positions, interval), (128, (128,), 0))
         self.assertEqual(len(planned), 1)
 
 

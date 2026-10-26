@@ -16,7 +16,6 @@ class ConfigStrictTest(unittest.TestCase):
             ("max_model_len", False),
             ("kv_cache_block_size", 16.0),
             ("max_prefix_cache_entries", True),
-            ("max_gdn_checkpoints", 2.5),
             ("max_prefix_cache_snapshot_bytes", 1.5),
             ("max_visual_tokens_per_request", True),
             ("decode_graph_batch_sizes", (2.5,)),

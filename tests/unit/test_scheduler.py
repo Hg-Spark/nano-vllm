@@ -100,6 +100,31 @@ class SchedulerCoreTest(unittest.TestCase):
         following = scheduler.schedule().prefill_chunks
         self.assertIs(following[0].seq, first)
 
+    def test_trimmed_prefill_does_not_evict_checkpoint_for_unused_kv_page(self):
+        scheduler = make_scheduler(
+            max_num_batched_tokens=65,
+            max_num_seqs=1,
+            num_blocks=8,
+            block_size=16,
+            max_prefix_cache_entries=4,
+        )
+        cache = scheduler.cache_manager
+        old = Sequence([900] * 80)
+        cache.block_manager.ensure_capacity(old, 64)
+        cache.prefix_cache.publish_many(old, (GDNStateSnapshot(64, ()),))
+        cache.release(old)
+        self.assertEqual(len(cache.prefix_cache), 1)
+        self.assertEqual(len(cache.block_manager.free_block_ids), 4)
+
+        incoming = Sequence(list(range(80)), SamplingParams(max_tokens=1))
+        scheduler.add(incoming)
+        scheduled = scheduler.schedule()
+        self.assertEqual(len(scheduled.prefill_chunks), 1)
+        chunk = scheduled.prefill_chunks[0]
+        self.assertEqual((chunk.start, chunk.end), (0, 64))
+        self.assertIsNotNone(cache.prefix_cache.find(Sequence([900] * 80), 64))
+        self.assertEqual(len(cache.prefix_cache), 1)
+
     def test_fixed_64_token_checkpoint_grid(self):
         for prompt_len in (20, 100, 320, 321, 400, 1024, 2049):
             with self.subTest(prompt_len=prompt_len):
@@ -115,7 +140,7 @@ class SchedulerCoreTest(unittest.TestCase):
                 self.assertEqual(len(chunks), 1)
                 self.assertEqual((chunks[0].start, chunks[0].end), (0, prompt_len))
                 candidates = list(range(64, prompt_len + 1, 64))
-                expected = candidates[:1] + candidates[-1:] if len(candidates) > 2 else candidates
+                expected = [p for p in candidates if p < prompt_len][-1:]
                 self.assertEqual(chunks[0].checkpoint_positions, tuple(expected))
 
     def test_disabled_prefix_publication_does_not_split_prefill(self):
@@ -149,13 +174,13 @@ class SchedulerCoreTest(unittest.TestCase):
         scheduler.add(seq)
 
         first = scheduler.schedule()
-        self.assertEqual(first.prefill_chunks[0].num_tokens, 448)
+        self.assertEqual(first.prefill_chunks[0].num_tokens, 511)
         scheduler.postprocess(first.decode_chunks, [7], False)
         scheduler.postprocess(first.prefill_chunks, [None], True)
 
         second = scheduler.schedule()
-        self.assertEqual(second.prefill_chunks[0].num_tokens, 448)
-        self.assertEqual(second.prefill_chunks[0].start, 448)
+        self.assertEqual(second.prefill_chunks[0].num_tokens, 511)
+        self.assertEqual(second.prefill_chunks[0].start, 511)
         self.assertIn(running, [chunk.seq for chunk in second.decode_chunks])
 
         # A 100-token prefill with 64-token pages would lose 36 tokens
@@ -178,7 +203,7 @@ class SchedulerCoreTest(unittest.TestCase):
         self.assertEqual(scheduled.prefill_chunks[0].checkpoint_positions, (64,))
         self.assertEqual(scheduled.prefill_chunks[0].checkpoint_interval, 64)
 
-    def test_off_grid_prefill_recovers_early_without_repeated_tiny_chunks(self):
+    def test_off_grid_prefill_uses_sparse_deterministic_recovery(self):
         scheduler = make_scheduler(
             max_num_batched_tokens=64,
             max_num_seqs=2,
@@ -211,11 +236,10 @@ class SchedulerCoreTest(unittest.TestCase):
             }
             scheduler.postprocess(batch.prefill_chunks, [None], True, snapshots)
 
-        # Capture at 64, then avoid a tiny chunk at every grid boundary.
-        self.assertEqual(ends, [63, 64, 127, 190, 253, 316, 379, 384])
-        self.assertEqual(captured, [64, 384])
-        self.assertIsNotNone(scheduler.cache_manager.prefix_cache.find(seq, 384))
-        self.assertEqual(seq.committed_tokens, 384)
+        # A fixed grid captures early and sparse deep checkpoints without path history.
+        self.assertEqual(ends, [63, 64, 127, 190, 253, 256, 319, 382])
+        self.assertEqual(captured, [64, 256])
+        self.assertEqual(seq.committed_tokens, 382)
 
     def test_off_grid_terminal_chunk_never_splits_for_checkpoint(self):
         scheduler = make_scheduler(

@@ -45,20 +45,20 @@ class SchedulerPrefixCacheTest(unittest.TestCase):
         scheduler = make_scheduler(
             max_num_batched_tokens=129, max_num_seqs=2, num_blocks=100, block_size=4
         )
-        tokens = list(range(128))
+        tokens = list(range(129))
         original = Sequence(tokens, SamplingParams(max_tokens=1))
         scheduler.add(original)
 
         first = scheduler.schedule()
-        self.assertEqual(first.prefill_chunks[0].checkpoint_positions, (64, 128))
-        snapshots = (GDNStateSnapshot(64, ()), GDNStateSnapshot(128, ()))
+        self.assertEqual(first.prefill_chunks[0].checkpoint_positions, (128,))
+        snapshots = (GDNStateSnapshot(128, ()),)
         scheduler.postprocess(first.prefill_chunks, [99], True, {original.seq_id: snapshots})
 
-        newcomer = Sequence(tokens + [129], SamplingParams(max_tokens=1))
+        newcomer = Sequence(tokens + [130], SamplingParams(max_tokens=1))
         scheduler.add(newcomer)
         scheduler.schedule()
         self.assertEqual(newcomer.committed_tokens, 128)
-        self.assertIs(newcomer.pending_state_snapshot, snapshots[1])
+        self.assertIs(newcomer.pending_state_snapshot, snapshots[0])
 
     def test_identical_prefills_capture_only_one_snapshot(self):
         scheduler = make_scheduler(

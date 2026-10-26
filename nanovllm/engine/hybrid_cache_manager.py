@@ -30,7 +30,6 @@ class HybridCacheManager:
             self.block_manager.release_blocks,
             max_snapshot_bytes=config.max_prefix_cache_snapshot_bytes,
             snapshot_nbytes=snapshot_nbytes,
-            max_checkpoints_per_path=config.max_gdn_checkpoints,
         )
 
     @property
@@ -108,62 +107,68 @@ class HybridCacheManager:
         end: int,
         planned_prefixes: set[bytes],
     ) -> tuple[int, tuple[int, ...], int]:
-        """Choose valid joint KV/GDN checkpoint boundaries for a prefill chunk."""
-        step = lcm(GDN_CHECKPOINT_INTERVAL, self.block_manager.block_size)
+        """Select at most one checkpoint without depending on cache ancestry."""
         if not self.prefix_cache.enabled:
             return end, (), 0
 
-        interval = GDN_CHECKPOINT_INTERVAL
-        candidates, cached = self.prefix_cache.candidates(seq, start, end)
-        candidates = [pair for pair in candidates if pair[1] not in planned_prefixes]
-        scheduled = end - start
-
+        step = lcm(GDN_CHECKPOINT_INTERVAL, self.block_manager.block_size)
+        candidates = self.prefix_cache.candidates(seq, start, end)
+        candidates = [
+            pair
+            for pair in candidates
+            if pair[1] not in planned_prefixes and pair[0] < seq.num_prompt_tokens
+        ]
         if end < len(seq):
-            # Intermediate FlashInfer GDN checkpoints require an aligned start.
-            # Recover an off-grid chunk at a useful joint boundary, while
-            # avoiding tiny chunks at every subsequent checkpoint position.
-            selected = self.prefix_cache.select_checkpoints(
-                candidates, cached, max_reusable_tokens=seq.num_prompt_tokens - 1
-            )
-            max_trim = min(
-                step - 1,
-                scheduled // 4,
-                max(16, scheduled // 8),
-            )
-            target = None
-            if (
-                start % step
-                and selected
-                and (
-                    not cached
-                    or start - cached[-1] >= step * self.prefix_cache.max_checkpoints_per_path
-                )
-            ):
-                target = selected[-1][0]
+            if start % step:
+                # Deterministic sparse recovery: an early boundary, then every
+                # fourth joint grid boundary. No dependency on resident paths.
+                boundary = (start // step + 1) * step
+                if (
+                    end % step
+                    and end - start <= 2 * step
+                    and boundary < end
+                    and (boundary == step or boundary % (4 * step) == 0)
+                    and any(position == boundary for position, _ in candidates)
+                ):
+                    end = boundary
             else:
-                target = next(
-                    (
-                        position
-                        for position, _ in reversed(selected)
-                        if position < end and end - position <= max_trim
-                    ),
-                    None,
-                )
-            if target is not None and target < end:
-                end = target
+                # Aligned chunks may cheaply stop on a usable boundary.
+                aligned_end = end - end % step
+                if (
+                    start < aligned_end < end
+                    and end - aligned_end <= 8
+                    and any(position == aligned_end for position, _ in candidates)
+                ):
+                    end = aligned_end
 
         candidates = [pair for pair in candidates if pair[0] <= end]
         if start % step:
-            # An off-grid chunk can only publish its final live state,
-            # and only when that endpoint lies on the joint grid.
+            # Internal FlashInfer checkpoints use a chunk-relative grid.
+            # Only an aligned final live state is valid for off-grid chunks.
             candidates = [pair for pair in candidates if pair[0] == end]
-        candidates = self.prefix_cache.select_checkpoints(
-            candidates, cached, max_reusable_tokens=seq.num_prompt_tokens - 1
-        )
-        positions = tuple(position for position, _ in candidates)
-        planned_prefixes.update(digest for _, digest in candidates)
+        selected = self.prefix_cache.select_checkpoints(candidates)
+        planned_prefixes.update(digest for _, digest in selected)
+        positions = tuple(position for position, _ in selected)
+        interval = GDN_CHECKPOINT_INTERVAL if any(p < end for p in positions) else 0
+        return end, positions, interval
 
-        return end, positions, interval if any(position < end for position in positions) else 0
+    def prepare_prefill(
+        self, seq: Sequence, start: int, requested: int, planned_prefixes: set[bytes]
+    ) -> tuple[int, tuple[int, ...], int]:
+        """Commit a runnable range; replan only after an actual KV capacity trim."""
+        proposal = set(planned_prefixes)
+        end, positions, interval = self.plan_prefill_checkpoints(
+            seq, start, start + requested, proposal
+        )
+        fitted = self.fit_prefill(seq, end - start)
+        if fitted < end - start:
+            end, positions, interval = self.plan_prefill_checkpoints(
+                seq, start, start + fitted, planned_prefixes
+            )
+        else:
+            planned_prefixes.update(proposal)
+        self.reserve_prefill(seq, end)
+        return end, positions, interval
 
     def reserve_prefill(self, seq: Sequence, end: int) -> None:
         self.block_manager.ensure_capacity(seq, end)

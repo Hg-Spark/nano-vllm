@@ -4,7 +4,7 @@
 
 ## 顺序测试脚本
 
-本地模型和 CUDA 环境准备好后，先准备 Python 环境，再通过 [TOML 配置](../configs/tests.toml) 调用 [run_tests.sh](../benchmarks/run_tests.sh)。先修改配置中的 `model` 路径。以下以系统 Python 3.12 为例：
+本地模型和 CUDA 环境准备好后，先准备 Python 环境，再通过 [TOML 配置](../configs/tests.toml) 调用 [run_tests.py](../benchmarks/run_tests.py)。先修改配置中的 `model` 路径。以下以系统 Python 3.12 为例：
 
 ```bash
 uv pip install --system --python 3.12 --break-system-packages -r pyproject.toml --extra dev
@@ -15,7 +15,7 @@ flashinfer download-kernels
 ```
 
 ```bash
-bash benchmarks/run_tests.sh configs/tests.toml
+python -m benchmarks.run_tests --config configs/tests.toml
 ```
 
 测试启动器复用已安装依赖的 `python3`（也可通过 `PYTHON` 指定解释器），不重复安装依赖。[pyproject.toml](../pyproject.toml) 指定依赖和 Linux x86_64 的 PyTorch CUDA 13.0 包源；`--break-system-packages` 仅用于上面的系统 Python 安装示例。模型和匹配的 NVIDIA 驱动需预先准备。
@@ -29,23 +29,23 @@ bash benchmarks/run_tests.sh configs/tests.toml
 分阶段执行；单独 bench/tail 不会自动重新进行正确性检查：
 
 ```bash
-bash benchmarks/run_tests.sh configs/tests.toml check
+python -m benchmarks.run_tests --config configs/tests.toml --stage check
 ```
 
 ```bash
-bash benchmarks/run_tests.sh configs/tests.toml bench
+python -m benchmarks.run_tests --config configs/tests.toml --stage bench
 ```
 
 ```bash
-bash benchmarks/run_tests.sh configs/tests.toml tail
+python -m benchmarks.run_tests --config configs/tests.toml --stage tail
 ```
 
 ```bash
-bash benchmarks/run_tests.sh configs/tests.toml long
+python -m benchmarks.run_tests --config configs/tests.toml --stage long
 ```
 
 ```bash
-bash benchmarks/run_tests.sh configs/tests.toml capacity
+python -m benchmarks.run_tests --config configs/tests.toml --stage capacity
 ```
 
 依赖已安装后，也可以直接使用同一个系统 Python：
@@ -55,7 +55,7 @@ bash benchmarks/run_tests.sh configs/tests.toml capacity
 ```
 
 ```bash
-bash benchmarks/run_tests.sh --help
+python -m benchmarks.run_tests --help
 ```
 
 模型路径、KV Cache 精度与 Scale、GPU、Benchmark 重复次数及各阶段参数统一在 TOML 中修改。路径支持 `~` 和环境变量，相对路径以项目根目录为基准。
@@ -85,7 +85,7 @@ python -m scripts.profile_decode "$NANOVLLM_MODEL"
 | 真实权重贪心对齐 | `verify_qwen3_5.py` | 给定输入上的 HF 与本实现输出 token 一致 | 所有输入和配置都一致 |
 | 联合前缀恢复 | `verify_prefix_resume.py`（独立入口） | 本实现关闭联合前缀复用的基线路径与恢复联合前缀的路径生成一致 | 所有输入和设备执行路径都一致 |
 | 单图 + Decode Graph | `verify_qwen3_5_multimodal.py` | 视觉展开、mRoPE、Chunk 回填、贪心 token 与 HF 一致，并在启用 Graph 时检查实际 Replay 计数 | 多图/视频或其他 batch size 都正确 |
-| 逐层诊断 | `diagnose_qwen3_5.py` | 定位所测输入中最早超过误差阈值的 decoder 层 | 自动确定层内哪一个算子有错 |
+| 逐层诊断 | `trace_qwen3_5.py` | 逐 Token 比较 HF/Nano 的层输出和 GDN 状态 | 自动确定异常算子 |
 | 基准与 profile | `bench_experiments.py`、`profile_decode.py` | 给定设备和负载下的性能、热点 | 模型数值正确、所有负载都同样快 |
 
 仓库不再提交历史测试结果。每次改动应重新验证真实模型的 HF 对齐、GDN 状态恢复、三轴 mRoPE、Decode Graph 和性能；命令存在、测试覆盖存在、实测通过是三件不同的事。
@@ -127,7 +127,7 @@ MoE 计算后端。HF `eager` 用于独立数值对照，和 FlashInfer 的舍�
 因此必须记录实际 HF 专家后端。稠密 Qwen3.5 不启用专家后端。
 MoE 仅支持 FlashInfer CUTLASS 覆盖的 GPU 架构；不支持 SM75。
 
-token 对齐成功输出 `PASS: greedy token sequences match exactly`，logits 对齐成功输出 `PASS: logits relative RMS`。token 不一致报告首个不同索引，logits 超阈值报告首个异常步骤、相对 RMS 和最大绝对误差；阈值是浮点误差验收标准，并不要求逐元素完全相等。需要定位逐层 Hidden States 误差时，单独运行 `python -m scripts.diagnose_qwen3_5`。该脚本直接使用所给 prompt，不会自动套聊天模板。
+token 对齐成功输出 `PASS: greedy token sequences match exactly`，logits 对齐成功输出 `PASS: logits relative RMS`。token 不一致报告首个不同索引，logits 超阈值报告首个异常步骤、相对 RMS 和最大绝对误差；阈值是浮点误差验收标准，并不要求逐元素完全相等。需要定位逐层 Hidden States 误差时，单独运行 `python -m scripts.trace_qwen3_5`。脚本使用原始 prompt 的 teacher-forced 序列，不自动套聊天模板。
 
 默认只比较 16 个新 token。正式记录应覆盖多个中文/英文提示、不同输入长度和更长的 continuation，并保留检查点版本和完整输出。不能用一次短提示通过替代全部验证。
 
@@ -144,19 +144,19 @@ python -m scripts.verify_qwen3_5_multimodal "$NANOVLLM_MODEL" /path/to/image.jpg
 ## 不一致时做逐层诊断
 
 ```bash
-python -m scripts.diagnose_qwen3_5 "$NANOVLLM_MODEL" \
+python -m scripts.trace_qwen3_5 "$NANOVLLM_MODEL" \
   --prompt "请解释自回归推理为什么需要 KV cache。" \
-  --max-probe-tokens 64 \
-  --relative-rms-threshold 0.02
+  --max-new-tokens 8 \
+  --relative-rmse-threshold 0.02 --verbose-layers
 ```
 
-诊断脚本捕获两侧 decoder 层的 hidden states，输出最大绝对误差、平均绝对误差、RMS 误差和相对 RMS：
+Trace 逐 Token 比较两侧层输出与 logits，输出最大绝对误差与相对 RMSE：
 
 ```text
 relative_rms = RMS(nano - HF) / max(RMS(HF), 1e-12)
 ```
 
-默认阈值为 `0.02`，是排查起点，不是所有输入通用的精度标准。空捕获、缺层及 NaN/Inf 都不能通过；两侧形状不同也判为异常。这里诊断的是截断到 `--max-probe-tokens` 的 prompt 前向；如果偏差只在多步 decode 或快照恢复后出现，还需要针对对应路径增加检查。
+默认阈值为 `0.05`，示例使用 `0.02`；这只是诊断阈值。Trace 通过 teacher-forced Prefill/Decode 检查逐步误差；前缀恢复仍需要独立验收。
 
 | 最早异常附近 | 优先检查 |
 | --- | --- |

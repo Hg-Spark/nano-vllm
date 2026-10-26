@@ -383,8 +383,10 @@ def prepare_decode(
     block_size: int,
     host_pool: PinnedMetadataPool,
     page_cache: DecodePageTableCache | None = None,
+    layout: DecodeBatchLayout | None = None,
 ) -> PreparedBatch:
-    layout = build_decode_batch_layout(chunks, block_size, page_cache)
+    if layout is None:
+        layout = build_decode_batch_layout(chunks, block_size, page_cache)
     with host_pool.batch() as upload:
         host_pool.stage_host("decode_kv_indptr", layout.paged_kv_indptr, "int32")
         host_pool.stage_host("decode_page_len", layout.paged_kv_last_page_len, "int32")

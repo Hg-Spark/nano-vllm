@@ -54,7 +54,12 @@ class ModelRunner:
         try:
             if torch.cuda.get_device_capability()[0] not in (9, 10, 12):
                 raise RuntimeError("FlashInfer GDN requires SM90/SM100/SM120")
-            with torch.device("cuda"):
+            from transformers.initialization import no_init_weights
+
+            # Every registered parameter is replaced by load_model(), which
+            # rejects missing weights. Avoid initializing large GPU parameter
+            # tensors only to overwrite them immediately from the checkpoint.
+            with no_init_weights(), torch.device("cuda"):
                 self.model = Qwen3_5ForCausalLM(
                     config.root_config,
                     load_vision=config.max_visual_tokens_per_request != 0,
@@ -178,12 +183,16 @@ class ModelRunner:
             token_ids = logits.argmax(dim=-1).tolist()
         else:
             values = [seqs[idx].temperature for idx in sample_indices]
-            temperatures = self.metadata_pool.to_cuda("sample_temperatures", values, "float32")
             positions = [index for index, value in enumerate(values) if value > 1e-10]
+            with self.metadata_pool.batch() as upload:
+                temperatures = upload("sample_temperatures", values, "float32")
+                sampled_indices = (
+                    upload("sample_positions", positions, "int64")
+                    if len(positions) < len(values)
+                    else None
+                )
             token_ids = self.sampler(
-                logits,
-                temperatures,
-                sample_positions=positions if len(positions) < len(values) else None,
+                logits, temperatures, sample_positions=sampled_indices
             ).tolist()
         for idx, token_id in zip(sample_indices, token_ids):
             results[idx] = token_id
@@ -193,14 +202,16 @@ class ModelRunner:
         self,
         chunks: tuple[ScheduledChunk, ...],
         seqs: list[Sequence],
+        layout=None,
     ) -> BatchResult | None:
         bucket = self.decode_graph_buckets.get(len(chunks))
         if bucket is None:
             self.decode_graph_fallbacks["missing_bucket"] += 1
             return None
-        layout = build_decode_batch_layout(
-            chunks, self.block_size, getattr(self, "decode_page_table_cache", None)
-        )
+        if layout is None:
+            layout = build_decode_batch_layout(
+                chunks, self.block_size, getattr(self, "decode_page_table_cache", None)
+            )
         if not bucket.can_run(layout):
             self.decode_graph_fallbacks["layout_exceeded"] += 1
             return None
@@ -217,10 +228,15 @@ class ModelRunner:
         seqs = [chunk.seq for chunk in chunks]
         if not is_prefill and any(seq.pending_state_snapshot is not None for seq in seqs):
             raise RuntimeError("pending GDN prefix restore is valid only for prefill")
+        decode_layout = None
         if is_prefill:
             restore_pending_states(self.model, seqs, self.gdn_restore_staging)
         elif self.decode_graph_buckets:
-            graph_result = self._run_decode_graph(chunks, seqs)
+            if len(chunks) in self.decode_graph_buckets:
+                decode_layout = build_decode_batch_layout(
+                    chunks, self.block_size, self.decode_page_table_cache
+                )
+            graph_result = self._run_decode_graph(chunks, seqs, decode_layout)
             if graph_result is not None:
                 return graph_result
         else:
@@ -231,7 +247,11 @@ class ModelRunner:
             prepare_prefill(chunks, self.block_size, self.metadata_pool)
             if is_prefill
             else prepare_decode(
-                chunks, self.block_size, self.metadata_pool, self.decode_page_table_cache
+                chunks,
+                self.block_size,
+                self.metadata_pool,
+                self.decode_page_table_cache,
+                layout=decode_layout,
             )
         )
         context = plan_flashinfer_attention(
@@ -265,9 +285,18 @@ class ModelRunner:
                 else list(range(len(chunks)))
             )
             if sample_indices:
-                logits = self.model.compute_logits(
-                    hidden_states, None if len(sample_indices) == len(chunks) else sample_indices
-                )
+                if is_prefill:
+                    # Reuse the pinned metadata pool instead of creating a
+                    # fresh CUDA tensor from a Python list on each prefill.
+                    last_indices = [
+                        batch.layout.q_offsets[index + 1] - 1 for index in sample_indices
+                    ]
+                    indices = self.metadata_pool.to_cuda(
+                        "logit_token_indices", last_indices, "int64"
+                    )
+                    logits = self.model.compute_logits(hidden_states, token_indices=indices)
+                else:
+                    logits = self.model.compute_logits(hidden_states)
                 results = self._sample_logits(logits, seqs, sample_indices)
             else:
                 results = [None for _ in seqs]

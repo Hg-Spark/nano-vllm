@@ -72,14 +72,10 @@ class Scheduler:
                     len(seq) - seq.committed_tokens,
                     token_limit - num_batched_tokens,
                 )
-                scheduled = self.cache_manager.fit_prefill(seq, requested)
-
                 start = seq.committed_tokens
-                end = start + scheduled
-                end, positions, checkpoint_interval = self.cache_manager.plan_prefill_checkpoints(
-                    seq, start, end, planned_prefixes
+                end, positions, checkpoint_interval = self.cache_manager.prepare_prefill(
+                    seq, start, requested, planned_prefixes
                 )
-                self.cache_manager.reserve_prefill(seq, end)
                 prefill_chunks.append(
                     ScheduledChunk(
                         seq,
