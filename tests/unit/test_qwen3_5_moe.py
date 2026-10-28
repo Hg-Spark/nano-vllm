@@ -91,7 +91,7 @@ class Qwen3_5MoeTest(unittest.TestCase):
             original[:, :split],
         )
 
-    def test_shared_expert_initializes_packed_weights(self):
+    def test_shared_expert_packing_and_runtime_binding(self):
         model = Qwen3_5ForCausalLM(self.config)
         names = dict(model.model.layers[0].mlp.named_parameters())
         for name in (
@@ -114,8 +114,6 @@ class Qwen3_5MoeTest(unittest.TestCase):
         shards = model.packed_checkpoint_shards()
         self.assertIn("model.layers.0.mlp.shared_expert.gate_proj.weight", shards)
 
-    def test_model_binds_shared_moe_buffers(self):
-        model = Qwen3_5ForCausalLM(self.config)
         workspace = torch.empty(16, dtype=torch.uint8)
         output = torch.empty(8, self.config.hidden_size)
         model.bind_moe_runtime(workspace, output)

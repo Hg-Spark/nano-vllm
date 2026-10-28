@@ -370,7 +370,7 @@ flowchart TD
 | 生成的 token 为什么落后于物理状态一位？ | [sequence.py](../nanovllm/engine/sequence.py) → [scheduler.py](../nanovllm/engine/scheduler.py) | [test_scheduler.py](../tests/unit/test_scheduler.py) |
 | 两个请求 Packed 后如何保证历史隔离？ | [batch_common.py](../nanovllm/engine/batch_common.py) → [gated_delta_net.py](../nanovllm/layers/gated_delta_net.py) | [test_prefill_batch.py](../tests/unit/test_prefill_batch.py) |
 | KV/GDN 怎样联合预留和释放？ | [scheduler.py](../nanovllm/engine/scheduler.py) → [state_manager.py](../nanovllm/engine/state_manager.py) | [test_scheduler.py](../tests/unit/test_scheduler.py) |
-| 为什么缓存命中后还需要执行 Prefill？ | [prefix_cache.py](../nanovllm/engine/prefix_cache.py) → [cache_runtime.py](../nanovllm/engine/cache_runtime.py) | [test_scheduler_prefix_cache.py](../tests/unit/test_scheduler_prefix_cache.py) |
+| 为什么缓存命中后还需要执行 Prefill？ | [prefix_cache.py](../nanovllm/engine/prefix_cache.py) → [cache_runtime.py](../nanovllm/engine/cache_runtime.py) | [test_hybrid_cache_manager.py](../tests/unit/test_hybrid_cache_manager.py) |
 | Graph 未命中或 replay 报错会怎样？ | [decode_graph.py](../nanovllm/engine/decode_graph.py) → [model_runner.py](../nanovllm/engine/model_runner.py) | [test_model_runner.py](../tests/unit/test_model_runner.py) |
 | 单图跨 Chunk 的特征如何对齐？ | [request.py](../nanovllm/multimodal/request.py) → [batch_common.py](../nanovllm/engine/batch_common.py) | [test_multimodal.py](../tests/unit/test_multimodal.py) |
 

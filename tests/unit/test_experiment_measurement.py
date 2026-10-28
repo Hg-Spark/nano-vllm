@@ -28,6 +28,7 @@ class MeasurementTest(unittest.TestCase):
                 decode_tokens=0 if prefill else 2,
                 prefill_seconds=1.0 if prefill else 0.0,
                 decode_seconds=0.0 if prefill else 1.0,
+                snapshot_capture_seconds=0.125 if prefill else 0.25,
             )
 
         engine = SimpleNamespace(
@@ -52,7 +53,7 @@ class MeasurementTest(unittest.TestCase):
         self.assertEqual(result["tpot_seconds"]["mean"], 0.5)
         self.assertEqual(result["prefill_host_call_tok_s"], 2)
         self.assertEqual(result["decode_host_call_tok_s"], 2)
-        self.assertEqual(result["snapshot_capture_seconds"], 0.0)
+        self.assertAlmostEqual(result["snapshot_capture_seconds"], 0.375)
         self.assertEqual(result["decode_forward_calls"], 1)
         self.assertEqual(result["ttft_samples"], 1)
         self.assertIsNone(result["ttft_seconds"]["p99"])
@@ -71,19 +72,31 @@ class MeasurementTest(unittest.TestCase):
             if short.num_completion_tokens == 0:
                 short.num_completion_tokens = 1
                 return [], SimpleNamespace(
-                    prefill_tokens=8, decode_tokens=0, prefill_seconds=1, decode_seconds=0
+                    prefill_tokens=8,
+                    decode_tokens=0,
+                    prefill_seconds=1,
+                    decode_seconds=0,
+                    snapshot_capture_seconds=0.0,
                 )
             if short.num_completion_tokens < 4:
                 short.num_completion_tokens += 1
                 short.is_finished = short.num_completion_tokens == 4
                 return [], SimpleNamespace(
-                    prefill_tokens=0, decode_tokens=1, prefill_seconds=0, decode_seconds=1
+                    prefill_tokens=0,
+                    decode_tokens=1,
+                    prefill_seconds=0,
+                    decode_seconds=1,
+                    snapshot_capture_seconds=0.0,
                 )
             if long in queued and not long.is_finished:
                 long.num_completion_tokens = 1
                 long.is_finished = True
                 return [], SimpleNamespace(
-                    prefill_tokens=128, decode_tokens=0, prefill_seconds=1, decode_seconds=0
+                    prefill_tokens=128,
+                    decode_tokens=0,
+                    prefill_seconds=1,
+                    decode_seconds=0,
+                    snapshot_capture_seconds=0.0,
                 )
             raise AssertionError("benchmark called step without work")
 
@@ -122,17 +135,18 @@ class MeasurementTest(unittest.TestCase):
         self.assertEqual(compare_tokens([1, 2], [1, 3])["first_mismatch"], 1)
         self.assertEqual(compare_tokens([1], [1, 2])["first_mismatch"], 1)
 
-    def test_prefix_resume_rejects_matched_empty_outputs(self):
+    def test_prefix_resume_rejects_invalid_greedy_outputs(self):
         from scripts.verify_prefix_resume import validate_prefix_resume_result
 
-        with self.assertRaisesRegex(ValidationFailure, "expected 16 greedy tokens"):
-            validate_prefix_resume_result([], [], 16, {"num_tokens": 64}, 64)
-
-    def test_prefix_resume_rejects_mismatched_tokens(self):
-        from scripts.verify_prefix_resume import validate_prefix_resume_result
-
-        with self.assertRaisesRegex(ValidationFailure, "token 1"):
-            validate_prefix_resume_result([10, 20], [10, 30], 2, {"num_tokens": 64}, 64)
+        for actual, expected, target_len, message in (
+            ([], [], 16, "expected 16 greedy tokens"),
+            ([10, 20], [10, 30], 2, "token 1"),
+        ):
+            with self.subTest(actual=actual, expected=expected):
+                with self.assertRaisesRegex(ValidationFailure, message):
+                    validate_prefix_resume_result(
+                        actual, expected, target_len, {"num_tokens": 64}, 64
+                    )
 
     def test_logits_comparison_detects_numeric_divergence(self):
         try:

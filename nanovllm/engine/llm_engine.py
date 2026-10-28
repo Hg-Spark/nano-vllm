@@ -56,6 +56,8 @@ class LLMEngine:
         self.max_model_len = config.max_model_len
         self.model_runner = None
         self._closed = False
+        self._cleanup_complete = False
+        self._scheduler_cleared = False
         self._atexit_handler = None
         self.processor = None
 
@@ -98,19 +100,34 @@ class LLMEngine:
         atexit.register(cleanup)
 
     def exit(self) -> None:
-        if self._closed:
+        if getattr(self, "_cleanup_complete", False):
             return
         self._closed = True
+        failure = None
+        # Keep a failed runner reachable: its exit() may have more owners to
+        # release on retry. Scheduler cleanup is independent of runner cleanup.
+        runner = self.model_runner
+        if runner is not None:
+            try:
+                runner.exit()
+            except BaseException as exc:
+                failure = exc
+            else:
+                self.model_runner = None
+        if not getattr(self, "_scheduler_cleared", False):
+            try:
+                self.scheduler.clear()
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+            else:
+                self._scheduler_cleared = True
+        if failure is not None:
+            raise failure
+        self._cleanup_complete = True
         if self._atexit_handler is not None:
             atexit.unregister(self._atexit_handler)
             self._atexit_handler = None
-        runner = self.model_runner
-        self.model_runner = None
-        try:
-            if runner is not None:
-                runner.exit()
-        finally:
-            self.scheduler.clear()
 
     def _get_processor(self):
         if self.processor is None:

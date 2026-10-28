@@ -234,7 +234,6 @@ class Qwen3_5ForCausalLM(nn.Module):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sequence_indices: list[int] | None = None,
         token_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         from nanovllm.utils.context import get_context
@@ -242,11 +241,6 @@ class Qwen3_5ForCausalLM(nn.Module):
         context = get_context()
         if context.is_prefill:
             if token_indices is None:
-                last_indices = [end - 1 for end in context.prefill_q_offsets[1:]]
-                if sequence_indices is not None:
-                    last_indices = [last_indices[index] for index in sequence_indices]
-                token_indices = torch.tensor(
-                    last_indices, device=hidden_states.device, dtype=torch.long
-                )
+                raise ValueError("Prefill logits require ModelRunner token_indices")
             hidden_states = hidden_states.index_select(0, token_indices)
         return self.lm_head(hidden_states)

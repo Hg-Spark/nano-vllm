@@ -5,6 +5,7 @@ from torch.profiler import record_function
 
 from nanovllm.config import Config
 from nanovllm.engine.batch_common import (
+    DecodeBatchLayout,
     DecodePageTableCache,
     PinnedMetadataPool,
     build_decode_batch_layout,
@@ -37,6 +38,7 @@ class ModelRunner:
         self.config = config
         self.block_size = config.kv_cache_block_size
         self._closed = False
+        self._cleanup_complete = False
         self.model = None
         self.sampler = None
         self.kv_cache = None
@@ -127,31 +129,61 @@ class ModelRunner:
             torch.set_default_dtype(default_dtype)
 
     def _release_cuda_resources(self) -> None:
-        for bucket in self.decode_graph_buckets.values():
-            bucket.release()
-        self.decode_graph_buckets.clear()
-        self.metadata_pool.clear()
-        self.metadata_pool = None
-        if hasattr(self, "decode_page_table_cache"):
-            self.decode_page_table_cache.clear()
-        if hasattr(self, "gdn_restore_staging"):
-            self.gdn_restore_staging.clear()
+        # Tear down independent owners even if an earlier release fails. Keep
+        # failed owners reachable so exit() can retry their cleanup.
+        failures = []
+        for batch_size, bucket in tuple(self.decode_graph_buckets.items()):
+            try:
+                bucket.release()
+            except BaseException as exc:
+                failures.append(exc)
+            else:
+                del self.decode_graph_buckets[batch_size]
+
+        for name in ("metadata_pool", "decode_page_table_cache", "gdn_restore_staging"):
+            owner = getattr(self, name, None)
+            if owner is None:
+                continue
+            try:
+                owner.clear()
+            except BaseException as exc:
+                failures.append(exc)
+            else:
+                setattr(self, name, None)
+
         self.kv_cache = None
         self.prefill_wrapper = None
         self.decode_wrapper = None
         self.attention_workspace = None
         self.model = None
         self.sampler = None
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except BaseException as exc:
+            failures.append(exc)
+        if failures:
+            raise failures[0]
 
     def exit(self) -> None:
-        if self._closed:
+        if getattr(self, "_cleanup_complete", False):
             return
+        # Closed prevents further execution, but it is not a cleanup-success flag.
         self._closed = True
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        self._release_cuda_resources()
+        failure = None
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+        except BaseException as exc:
+            failure = exc
+        try:
+            self._release_cuda_resources()
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
+        if failure is not None:
+            raise failure
+        self._cleanup_complete = True
 
     def _ensure_visual_features(self, seq: Sequence) -> torch.Tensor:
         state = seq.image_state
@@ -202,16 +234,14 @@ class ModelRunner:
         self,
         chunks: tuple[ScheduledChunk, ...],
         seqs: list[Sequence],
-        layout=None,
+        layout: DecodeBatchLayout | None,
     ) -> BatchResult | None:
         bucket = self.decode_graph_buckets.get(len(chunks))
         if bucket is None:
             self.decode_graph_fallbacks["missing_bucket"] += 1
             return None
         if layout is None:
-            layout = build_decode_batch_layout(
-                chunks, self.block_size, getattr(self, "decode_page_table_cache", None)
-            )
+            raise RuntimeError("a configured Decode Graph bucket requires a prepared layout")
         if not bucket.can_run(layout):
             self.decode_graph_fallbacks["layout_exceeded"] += 1
             return None

@@ -59,23 +59,33 @@ class RollingPrefixTest(unittest.TestCase):
             raise AssertionError("scheduler did not finish")
         return scheduler.cache_manager.prefix_cache
 
-    def test_unaligned_prompt_captures_last_page_boundary(self):
-        engine, scheduler, runner = self._engine()
-        seq = Sequence(list(range(65)), SamplingParams(max_tokens=1))
-        cache = self._complete(engine, scheduler, seq)
-        self.assertEqual(runner.captures, [64])
-        self.assertEqual(cache._resident_lengths, [64])
-        self.assertIsNone(seq.prompt_snapshot)
-        self.assertIsNone(seq.completion_snapshot)
+    def test_prompt_boundary_is_captured_before_completion_and_released(self):
+        for prompt_len, boundary in ((64, 48), (65, 64)):
+            with self.subTest(prompt_len=prompt_len):
+                engine, scheduler, runner = self._engine()
+                seq = Sequence(list(range(prompt_len)), SamplingParams(max_tokens=1))
+                scheduler.add(seq)
+                first = scheduler.schedule().prefill_chunks
+                engine._run_batch(first, True)
+                cache = scheduler.cache_manager.prefix_cache
+                self.assertEqual(runner.captures, [boundary])
+                self.assertEqual(cache._resident_lengths, [])
+                self.assertEqual(seq.prompt_snapshot.num_tokens, boundary)
+                self.assertEqual(cache.staging_snapshot_bytes, 0)
 
-    def test_aligned_prompt_keeps_previous_page_for_sampling(self):
-        engine, scheduler, runner = self._engine()
-        seq = Sequence(list(range(64)), SamplingParams(max_tokens=1))
-        cache = self._complete(engine, scheduler, seq)
-        self.assertEqual(runner.captures, [48])
-        entry = scheduler.cache_manager.find_prefix(Sequence(list(range(64))))
-        self.assertEqual(entry.num_tokens, 48)
-        self.assertEqual(cache._resident_lengths, [48])
+                engine._run_batch(scheduler.schedule().prefill_chunks, True)
+                self.assertTrue(seq.is_finished)
+                self.assertEqual(cache._resident_lengths, [boundary])
+                self.assertIsNone(seq.prompt_snapshot)
+                self.assertIsNone(seq.completion_snapshot)
+                continuation = Sequence(list(range(prompt_len)) + [80])
+                entry = scheduler.cache_manager.find_prefix(continuation)
+                self.assertIsNotNone(entry)
+                self.assertEqual(entry.num_tokens, boundary)
+                scheduler.cache_manager.admit(continuation, entry)
+                self.assertIs(continuation.pending_state_snapshot, entry.state_snapshot)
+                self.assertEqual(continuation.block_table[0], entry.block_ids[0])
+                scheduler.cache_manager.release(continuation)
 
     def test_prompt_checkpoint_survives_followup_completion_eviction(self):
         engine, scheduler, runner = self._engine(entries=2)
@@ -96,6 +106,19 @@ class RollingPrefixTest(unittest.TestCase):
         )
         self.assertEqual(scheduler.cache_manager.find_prefix(Sequence(prompt)).num_tokens, 48)
 
+    def test_same_batch_identical_prompts_capture_twice_but_publish_once(self):
+        engine, scheduler, runner = self._engine()
+        for _ in range(2):
+            scheduler.add(Sequence([42] * 17, SamplingParams(max_tokens=1)))
+        chunks = scheduler.schedule().prefill_chunks
+        self.assertEqual(len(chunks), 2)
+        engine._run_batch(chunks, True)
+        self.assertEqual(runner.captures, [16, 16])
+        self.assertEqual(len(scheduler.cache_manager.prefix_cache), 0)
+        engine._run_batch(scheduler.schedule().prefill_chunks, True)
+        self.assertEqual(len(scheduler.cache_manager.prefix_cache), 1)
+        self.assertEqual(scheduler.cache_manager.prefix_cache.published_count, 1)
+
     def test_final_decode_aligned_boundary_is_captured(self):
         for prompt_len, outputs, expected in (
             (15, 2, [16]),
@@ -112,10 +135,11 @@ class RollingPrefixTest(unittest.TestCase):
 
     def test_decode_updates_one_completion_staging_slot(self):
         engine, scheduler, runner = self._engine(snapshot_bytes=68)
-        seq = Sequence(list(range(33)), SamplingParams(max_tokens=18))
+        seq = Sequence(list(range(33)), SamplingParams(max_tokens=33))
         cache = self._complete(engine, scheduler, seq)
-        self.assertEqual(runner.captures, [32, 48])
-        self.assertEqual(cache._resident_lengths, [32, 48])
+        self.assertEqual(runner.captures, [32, 48, 64])
+        # Only the latest completion is published, despite two updates.
+        self.assertEqual(cache._resident_lengths, [32, 64])
         self.assertEqual(cache.peak_staging_snapshot_bytes, 136)
         self.assertEqual(cache.staging_snapshot_bytes, 0)
         self.assertEqual(cache.snapshot_bytes, 136)
@@ -167,20 +191,6 @@ class RollingPrefixTest(unittest.TestCase):
         self.assertEqual(cache.published_count, 4)
         self.assertIsNotNone(cache.find(Sequence(list(range(64))), 63))
         self.assertIsNotNone(cache.find(Sequence(second_prompt), 96))
-
-    def test_cache_hit_does_not_mutate_published_snapshot(self):
-        engine, scheduler, _ = self._engine()
-        prompt = list(range(65))
-        self._complete(engine, scheduler, Sequence(prompt, SamplingParams(max_tokens=1)))
-        manager = scheduler.cache_manager
-        original = manager.find_prefix(Sequence(prompt))
-        self.assertIsNotNone(original)
-        consumer = Sequence(prompt)
-        manager.admit(consumer, original)
-        self.assertIsNone(consumer.prompt_snapshot)
-        self.assertIsNone(consumer.completion_snapshot)
-        self.assertIs(consumer.pending_state_snapshot, original.state_snapshot)
-        manager.release(consumer)
 
 
 if __name__ == "__main__":
