@@ -48,6 +48,8 @@ class FlashInferMoEIntegrationTest(unittest.TestCase):
         major, minor = torch.cuda.get_device_capability()
         if major * 10 + minor not in SUPPORTED_ARCHS:
             self.skipTest(f"FlashInfer CUTLASS MoE does not support SM{major}{minor}")
+        if not torch.cuda.is_bf16_supported():
+            self.skipTest("BF16 is required by the inference runtime")
         torch.manual_seed(19)
         self.config = SimpleNamespace(
             hidden_size=self.HIDDEN,
@@ -103,24 +105,21 @@ class FlashInferMoEIntegrationTest(unittest.TestCase):
         torch.testing.assert_close(actual.float().cpu(), expected, atol=atol, rtol=0.05)
 
     @torch.inference_mode()
-    def test_fp16_bf16_prefill_and_decode_against_independent_formula(self):
-        for dtype in (torch.float16, torch.bfloat16):
-            if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
-                continue
-            with self.subTest(dtype=dtype):
-                experts = self._make_experts(dtype)
-                # 1-token decode, partial tiles and a packed prefill.
-                for tokens in (1, 7, 65):
-                    with self.subTest(tokens=tokens):
-                        self._assert_reference(
-                            experts,
-                            self._batch(tokens, dtype, offset=tokens),
-                            atol=0.025 if dtype == torch.float16 else 0.07,
-                        )
+    def test_bf16_prefill_and_decode_against_independent_formula(self):
+        dtype = torch.bfloat16
+        experts = self._make_experts(dtype)
+        # 1-token decode, partial tiles and a packed prefill.
+        for tokens in (1, 7, 65):
+            with self.subTest(tokens=tokens):
+                self._assert_reference(
+                    experts,
+                    self._batch(tokens, dtype, offset=tokens),
+                    atol=0.07,
+                )
 
     @torch.inference_mode()
     def test_shared_expert_matches_independent_formula(self):
-        dtype = torch.float16
+        dtype = torch.bfloat16
         block = Qwen3_5SparseMoeBlock(self.config).cuda().to(dtype)
         with torch.no_grad():
             for param in block.parameters():
@@ -139,11 +138,11 @@ class FlashInferMoEIntegrationTest(unittest.TestCase):
         shared_gate = F.linear(x32, block.shared_expert_gate.weight.float().cpu()).sigmoid()
         expected = routed + shared_gate * down
         actual = block(x)
-        torch.testing.assert_close(actual.float().cpu(), expected, atol=0.035, rtol=0.05)
+        torch.testing.assert_close(actual.float().cpu(), expected, atol=0.07, rtol=0.05)
 
     @torch.inference_mode()
     def test_cuda_graph_replay_uses_updated_routes(self):
-        dtype = torch.float16
+        dtype = torch.bfloat16
         experts = self._make_experts(dtype)
         x_static = torch.empty(4, self.HIDDEN, dtype=dtype, device="cuda")
         ids_static = torch.empty(4, self.TOP_K, dtype=torch.int64, device="cuda")
@@ -173,7 +172,7 @@ class FlashInferMoEIntegrationTest(unittest.TestCase):
             graph.replay()
             actual = graph_output.clone()
             expected = _independent_experts(x, ids, scales, experts.gate_up_proj, experts.down_proj)
-            torch.testing.assert_close(actual.float().cpu(), expected, atol=0.025, rtol=0.05)
+            torch.testing.assert_close(actual.float().cpu(), expected, atol=0.07, rtol=0.05)
             if previous is not None:
                 self.assertFalse(torch.equal(actual, previous))
             previous = actual

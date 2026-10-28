@@ -20,7 +20,7 @@ class ImageState:
     """Processor-derived immutable image metadata plus cached visual features."""
 
     pixel_values: torch.Tensor | None
-    image_grid_thw: torch.Tensor
+    image_grid_thw: torch.Tensor | None
     rope_positions: tuple[
         tuple[int, ...],
         tuple[int, ...],
@@ -133,14 +133,14 @@ def image_state_from_processor_output(
         grid_signature,
         spatial_merge_size,
     )
-    # Pin the processor's CPU tensors once; ModelRunner uploads both asynchronously.
+    # Pin the large pixel tensor for asynchronous upload; the grid is tiny.
     import torch
 
     pixels = pixel_values.detach().cpu()
     grid = image_grid_thw.detach().cpu()
     if torch.cuda.is_available():
         pixels = pixels.pin_memory()
-        grid = grid.pin_memory()
+        # The grid is tiny; pinning is not worth its additional lifetime tracking.
     state = ImageState(
         pixel_values=pixels,
         image_grid_thw=grid,

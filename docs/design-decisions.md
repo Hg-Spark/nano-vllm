@@ -31,7 +31,7 @@ Qwen3.5 Hybrid Model → Full Attention KV + GDN Conv/Recurrent State
 | Prefill / Decode 执行 | V1 Scheduler 可以在一轮分配两类请求的 token；执行后端按模型和模式处理混合批次 | 可启用 Mixed Chunk，把部分 Prefill 与 Decode 合入执行批次 | 一轮调度、**两次 forward**（Decode → Prefill）；牺牲部分融合机会，简化 GDN Slot 与 Attention 元数据 |
 | 显存定容 | 默认借助模型峰值 Profiling 推导 KV 空间，并支持显式配置 KV 容量 | `mem_fraction_static` 控制模型权重与 KV Pool 等常驻预算，配合 Chunk/并发调节 | 不做启动 Profiling，按 `gpu_memory_utilization` 静态扣减已用显存、GDN/Vision 预留；减少专用执行路径，但需负载测试校准余量 |
 | 混合状态内存 | Hybrid KV 按层类型建立不同 cache spec / manager，并协调各组缓存有效性 | Unified Radix Cache 将 FULL/SWA/循环态组件放入统一前缀结构（以官方设计材料为准） | `BlockManager` 管分页 KV，`StateSlotManager` 管 GDN Slot，`Scheduler` 完成联合预留与释放；不引入通用 cache-spec 注册体系 |
-| 共享前缀 | Automatic Prefix Caching 以缓存块为基础；Hybrid 场景还要协调各组可用前缀 | RadixAttention / RadixTree 表示 token 前缀，HiCache 扩展到 GPU/CPU/外部存储 | 单一链式 Block Hash 匹配联合 KV/GDN Checkpoint，路径内优先裁剪中间 Checkpoint、全局 FIFO 淘汰，KV 引用共享、GDN CPU Snapshot 绑定同一边界；目标是验证复用正确性 |
+| 共享前缀 | Automatic Prefix Caching 以缓存块为基础；Hybrid 场景还要协调各组可用前缀 | RadixAttention / RadixTree 表示 token 前缀，HiCache 扩展到 GPU/CPU/外部存储 | 单一链式 Block Hash 匹配联合 KV/GDN Checkpoint，全局冷优先 FIFO 淘汰，KV 引用共享、GDN CPU Snapshot 绑定同一边界；目标是验证复用正确性 |
 | 循环状态恢复 | Hybrid 的 Mamba/循环缓存需满足对应的 checkpoint、对齐与保留规则 | 循环态在安全前缀边界需要 checkpoint，多个组件共同决定可恢复边界 | 仅完整 KV 页边界捕获 GDN 状态；KV 命中但缺少对应 GDN 快照时**不能单独复用 KV** |
 | 抢占与故障 | 生产引擎具有更完整的资源回收、请求重排及扩展缓存/通信路径 | 与 Cache/Allocator、请求生命周期和缓存复用协同 | 接纳前预留完整生命周期 KV 额度；运行中只淘汰 Prefix Cache；失败则抛错并关闭引擎 |
 | Full Attention | 支持多种 Attention 后端及针对模型/硬件的优化 | 支持多后端，也可按阶段组合后端 | 固定 FlashInfer Paged Prefill/Decode 与 KV Append；FP8 缩放及转换使用 PyTorch，避免自行维护写入 kernel |
@@ -61,7 +61,7 @@ SGLang RadixAttention 适合大量请求反复共享前缀的场景；HiCache �
 
 例如，块容量为 16，请求 A 已处理 20 个 token，GDN 状态在位置 20；即便 KV 的第一个完整块对应前 16 个 token，也不能直接把位置 20 的 GDN 状态当作位置 16 的 Snapshot。必须在位置 16 **实际捕获过**循环状态，才能发布对应的联合前缀条目。
 
-因此先使用 **64 Token 网格上的整块边界、链式 Block Hash 查找、路径内优先裁剪中间 Checkpoint、全局 FIFO 淘汰、独立快照**。Block Hash 只索引有效的联合条目，不再维持没有独立缓存所有权的冗余 Full KV 索引；只有 KV 与 GDN 在同一边界均有效时才恢复。局限是快照主机内存与 D2H/H2D 数据移动；只有实测证明必要，再评估 radix、分层缓存或更稀疏的状态 checkpoint。
+因此使用 **KV Page 完整对齐边界、链式 Block Hash 查找、全局冷优先 FIFO 淘汰、每轮回答前后各一份独立快照**。Block Hash 只索引有效的联合条目，不再维持没有独立缓存所有权的冗余 Full KV 索引；只有 KV 与 GDN 在同一边界均有效时才恢复。局限是快照主机内存与 D2H/H2D 数据移动；只有实测证明必要，再评估 radix、分层缓存或更稀疏的状态 checkpoint。
 
 ### 3. 为什么 Prefill / Decode 不合并成一次 Forward？
 

@@ -8,9 +8,11 @@ if TYPE_CHECKING:
 
 from scripts._common import (
     add_hf_experts_backend_argument,
+    add_kv_cache_arguments,
     add_model_argument,
     add_result_argument,
     execute,
+    kv_cache_kwargs,
     normalize_paths,
     require_greedy_parity,
     run_hf_reference,
@@ -55,9 +57,7 @@ def run_hf(
             output_ids = model.generate(**inputs, do_sample=False, max_new_tokens=max_new_tokens)
         return output_ids[0, input_len:].tolist()
 
-    return run_hf_reference(
-        AutoModelForImageTextToText, model_path, hf_experts_backend, generate
-    )
+    return run_hf_reference(AutoModelForImageTextToText, model_path, hf_experts_backend, generate)
 
 
 def build_nano_prompt(processor, image, prompt: str) -> ImagePrompt:
@@ -81,7 +81,7 @@ def run_nanovllm(
     max_num_batched_tokens: int,
     max_visual_tokens_per_request: int | None,
     use_decode_graph: bool,
-    dtype: str,
+    kv_options: dict,
 ) -> list[int]:
     import torch
 
@@ -94,6 +94,7 @@ def run_nanovllm(
         max_visual_tokens_per_request=max_visual_tokens_per_request,
         max_num_seqs=1,
         decode_graph_batch_sizes=(1,) if use_decode_graph else (),
+        **kv_options,
     )
     try:
         request = build_nano_prompt(processor, image, prompt)
@@ -111,6 +112,7 @@ def run_nanovllm(
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Compare one-image Qwen3.5 greedy generation.")
     add_model_argument(parser, required=True)
+    add_kv_cache_arguments(parser)
     add_hf_experts_backend_argument(parser)
     parser.add_argument("image")
     parser.add_argument("--prompt", default="Describe this image briefly.")
@@ -121,8 +123,8 @@ def parse_args(argv=None):
     parser.add_argument("--decode-graph", action="store_true")
     add_result_argument(parser)
     args = parser.parse_args(argv)
-    validate_positive(parser, args, "max_new_tokens")
-    if args.max_new_tokens >= args.max_model_len:
+    validate_positive(parser, args, "max_new_tokens", "max_model_len", "max_num_batched_tokens")
+    if args.max_new_tokens > args.max_model_len:
         parser.error("--max-new-tokens must leave room for the image prompt")
     return normalize_paths(args, "model", "image", "result_file")
 
@@ -150,6 +152,7 @@ def run(args):
             args.max_num_batched_tokens,
             args.max_visual_tokens_per_request,
             args.decode_graph,
+            kv_cache_kwargs(args),
         )
     finally:
         image.close()

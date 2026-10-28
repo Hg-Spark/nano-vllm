@@ -10,14 +10,14 @@ except ImportError:
     F = None
 
 
-@unittest.skipUnless(torch is not None and torch.cuda.is_available(), "requires torch and CUDA")
+@unittest.skipUnless(
+    torch is not None and torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
+    "requires CUDA BF16",
+)
 class Qwen35FlashInferOpsTest(unittest.TestCase):
     @staticmethod
     def _supported_dtypes():
-        dtypes = [torch.float16]
-        if torch.cuda.is_bf16_supported():
-            dtypes.append(torch.bfloat16)
-        return dtypes
+        return (torch.bfloat16,)
 
     def test_gemma_rmsnorm_matches_reference(self):
         from nanovllm.models.qwen3_5_layers import Qwen3_5RMSNorm
