@@ -45,6 +45,7 @@ class ModelRunner:
         self.prefill_wrapper = None
         self.decode_wrapper = None
         self.decode_graph_buckets: dict[int, DecodeGraphBucket] = {}
+        self.decode_graph_fallbacks = {"missing_bucket": 0, "layout_exceeded": 0}
 
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(getattr(torch, config.dtype))
@@ -226,9 +227,11 @@ class ModelRunner:
     ) -> BatchResult | None:
         bucket = self.decode_graph_buckets.get(len(chunks))
         if bucket is None:
+            self.decode_graph_fallbacks["missing_bucket"] += 1
             return None
         layout = build_decode_batch_layout(chunks, self.block_size)
         if not bucket.can_run(layout):
+            self.decode_graph_fallbacks["layout_exceeded"] += 1
             return None
         bucket.prepare(layout)
         logits = bucket.replay()
