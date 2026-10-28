@@ -82,7 +82,7 @@ class MeasurementTest(unittest.TestCase):
                 short.num_completion_tokens += 1
                 short.is_finished = short.num_completion_tokens == 4
                 return [], SimpleNamespace(
-                    prefill_tokens=0,
+                    prefill_tokens=(128 if long in queued and short.num_completion_tokens == 3 else 0),
                     decode_tokens=1,
                     prefill_seconds=0,
                     decode_seconds=1,
@@ -127,6 +127,8 @@ class MeasurementTest(unittest.TestCase):
         self.assertGreater(interference["short_token_gap_after_seconds"]["mean"], 0)
         self.assertIsNone(interference["short_token_gap_after_seconds"]["p99"])
         self.assertLess(interference["short_token_gap_after_samples"], 1000)
+        self.assertEqual(interference["post_arrival_mixed_steps"], 1)
+        self.assertEqual(interference["post_arrival_mixed_prefill_tokens"], 128)
 
     def test_require_greedy_parity_rejects_short_generations(self):
         with self.assertRaisesRegex(ValidationFailure, "expected 4 greedy tokens"):

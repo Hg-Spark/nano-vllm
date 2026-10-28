@@ -35,6 +35,7 @@ def workload_key(result, *, ignore_mixed_prefill_limit=False):
         "shared_prefix_len",
         "suffix_len",
         "target_requests",
+        "conversation_turns",
         "late_input_len",
         "late_after_decode_steps",
         "warmup_steps",
@@ -82,6 +83,24 @@ def percent(base, changed, higher_better=True):
     return 100.0 * ((changed / base - 1.0) if higher_better else (1.0 - changed / base))
 
 
+def describe_first_output_difference(left, right):
+    """Locate the first different generated token using optional benchmark diagnostics."""
+    if left is None or right is None:
+        return "rerun with --record-output-tokens to locate the first mismatch"
+    for request_index, (a, b) in enumerate(zip(left, right)):
+        for token_index, (token_a, token_b) in enumerate(zip(a, b)):
+            if token_a != token_b:
+                return (
+                    f"request={request_index}, token={token_index}: "
+                    f"reference={token_a}, changed={token_b}"
+                )
+        if len(a) != len(b):
+            return f"request={request_index}: output length {len(a)} vs {len(b)}"
+    if len(left) != len(right):
+        return f"request count {len(left)} vs {len(right)}"
+    return "recorded completions match; inspect prompt history or hash inputs"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("folder", help="directory of benchmark experiment JSON files")
@@ -126,15 +145,28 @@ def main(argv=None):
     grouped = defaultdict(list)
     for filename, r in samples:
         w, v = workload_key(r), variant(r)
-        by_workload[w].append((filename, r["details"]["token_hash"]))
+        by_workload[w].append((filename, r))
         grouped[(w, v)].append(r)
 
     mismatches = [
-        (str(k), v) for k, v in by_workload.items() if len({token_hash for _, token_hash in v}) > 1
+        (str(k), v) for k, v in by_workload.items()
+        if len({r["details"]["token_hash"] for _, r in v}) > 1
     ]
     if mismatches:
         for key, values in mismatches:
-            print("PARITY FAILURE", key, values)
+            reference_name, reference = values[0]
+            changed_name, changed = next(
+                (name, r) for name, r in values
+                if r["details"]["token_hash"] != reference["details"]["token_hash"]
+            )
+            print("PARITY FAILURE", key, [(name, r["details"]["token_hash"]) for name, r in values])
+            print(
+                f"  First mismatch {reference_name} vs {changed_name}: "
+                + describe_first_output_difference(
+                    reference["details"].get("output_token_sequences"),
+                    changed["details"].get("output_token_sequences"),
+                )
+            )
         raise SystemExit("Output token hashes differ for a supposedly identical workload")
 
     # An exclusive Decode-first run never uses mixed_prefill_limit: share the
@@ -188,10 +220,12 @@ def main(argv=None):
             matches = [(v, rs) for v, rs in variants.items() if v[0] and v[1] == 0]
             label = "Graph / Eager"
             latency_key = "tpot_seconds"
-        elif scenario == "prefix":
+        elif scenario in ("prefix", "conversation"):
             baseline = variants.get(((), 0, "mixed"))
             matches = [(v, rs) for v, rs in variants.items() if v[1] > 0 and not v[0]]
-            label = "Prefix On / Off"
+            label = (
+                "Conversation Cache On / Off" if scenario == "conversation" else "Prefix On / Off"
+            )
             latency_key = "ttft_seconds"
         elif scenario == "interference":
             baseline = variants.get(((), 0, "exclusive_decode_first"))
@@ -216,7 +250,11 @@ def main(argv=None):
                 r["details"]["token_hash"] for r in treatment
             }:
                 raise SystemExit(
-                    "PARITY FAILURE: shared exclusive baseline differs from Mixed output"
+                    "PARITY FAILURE: shared exclusive baseline differs from Mixed output; "
+                    + describe_first_output_difference(
+                        baseline[0]["details"].get("output_token_sequences"),
+                        treatment[0]["details"].get("output_token_sequences"),
+                    )
                 )
             if min(len(baseline), len(treatment)) < args.min_repeats:
                 issues.append(f"too few repeats for {label}, {scenario} batch={p['max_num_seqs']}")
@@ -250,6 +288,31 @@ def main(argv=None):
                 print(
                     f"  Peak CUDA allocated: {b_mem:.3f} -> {t_mem:.3f} GiB "
                     f"(reduction {format_percent(percent(b_mem, t_mem, higher_better=False))})"
+                )
+            if scenario == "conversation":
+                followup = treatment[0]["details"]["followup_requests"]
+                restored_fraction = median(
+                    run["details"]["restored_prompt_token_ratio"] for run in treatment
+                )
+                completion_hits = median(
+                    run["details"]["completion_checkpoint_hits"] for run in treatment
+                )
+                prompt_hits = median(run["details"]["prompt_checkpoint_hits"] for run in treatment)
+                print(
+                    f"  Follow-up TTFT ({followup} req/run): "
+                    f"{format_ms(milliseconds(baseline, 'ttft_seconds'))} -> "
+                    f"{format_ms(milliseconds(treatment, 'ttft_seconds'))} ms"
+                )
+                print(
+                    f"  Follow-up restored/input: {restored_fraction:.1%}; "
+                    f"Completion hits: {completion_hits:.0f}; Prompt hits: {prompt_hits:.0f}"
+                )
+                b_elapsed = number(baseline, "elapsed_seconds")
+                t_elapsed = number(treatment, "elapsed_seconds")
+                print(
+                    f"  Accumulated engine execution (all turns): "
+                    f"{b_elapsed:.3f} -> {t_elapsed:.3f} s "
+                    f"(reduction {format_percent(percent(b_elapsed, t_elapsed, higher_better=False))})"
                 )
             if scenario == "prefix":
                 restored = median(
@@ -309,6 +372,21 @@ def main(argv=None):
                     f"  Late long request TTFT: {b:.2f} -> {t:.2f} ms "
                     f"(reduction {format_percent(percent(b, t, higher_better=False))})"
                 )
+                # Count actual Decode+Prefill steps after injection, not just the configured cap.
+                if all(
+                    "post_arrival_mixed_steps" in r["metrics"]["long_prompt_interference"]
+                    for r in [*baseline, *treatment]
+                ):
+                    print(
+                        "  Mixed steps after injection: "
+                        f"{median(r['metrics']['long_prompt_interference']['post_arrival_mixed_steps'] for r in baseline):.0f}"
+                        " -> "
+                        f"{median(r['metrics']['long_prompt_interference']['post_arrival_mixed_steps'] for r in treatment):.0f}; "
+                        "Prefill tokens alongside Decode: "
+                        f"{median(r['metrics']['long_prompt_interference']['post_arrival_mixed_prefill_tokens'] for r in baseline):.0f}"
+                        " -> "
+                        f"{median(r['metrics']['long_prompt_interference']['post_arrival_mixed_prefill_tokens'] for r in treatment):.0f}"
+                    )
                 # Small synthetic samples: mean only; do not label tail latency as production P99.
                 tail_stats = []
                 for label2, runs in (("exclusive", baseline), ("mixed", treatment)):

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Engine-level benchmark experiments; run from any working directory.
-# 'long' and 'prefix' are opt-in because 8K/16K context tests need extra KV capacity.
+# 'long', 'prefix', and 'conversation' are opt-in benchmark modes.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -8,11 +8,11 @@ PYTHON="${PYTHON:-python3}"
 : "${NANOVLLM_MODEL:?export NANOVLLM_MODEL=/path/to/model}"
 MODE="${1:-smoke}"
 if (( $# > 1 )); then
-  echo "Usage: bash benchmarks/run.sh [smoke|full|tail|long|prefix]" >&2
+  echo "Usage: bash benchmarks/run.sh [smoke|full|tail|long|prefix|conversation]" >&2
   exit 2
 fi
 case "$MODE" in
-  smoke|full|tail|long|prefix) ;;
+  smoke|full|tail|long|prefix|conversation) ;;
   *) echo "Unknown benchmark mode: $MODE" >&2; exit 2 ;;
 esac
 REPEATS="${REPEATS:-5}"
@@ -24,7 +24,7 @@ KV_CACHE_DTYPE="${NANOVLLM_KV_CACHE_DTYPE:-auto}"
 KV_CACHE_K_SCALE="${NANOVLLM_KV_CACHE_K_SCALE:-1.0}"
 KV_CACHE_V_SCALE="${NANOVLLM_KV_CACHE_V_SCALE:-1.0}"
 COMMON=(
-  "$NANOVLLM_MODEL" --seed 0
+  "$NANOVLLM_MODEL" --seed 0 --record-output-tokens
   --kv-cache-dtype "$KV_CACHE_DTYPE"
   --kv-cache-k-scale "$KV_CACHE_K_SCALE"
   --kv-cache-v-scale "$KV_CACHE_V_SCALE"
@@ -36,7 +36,7 @@ if [[ "$MODE" == "full" ]]; then
   BATCHES=(1 2 4 8)
   PREFIXES=(512 1024 2048)
   BUDGETS=(256 512 1024)
-elif [[ "$MODE" == "prefix" ]]; then
+elif [[ "$MODE" == "prefix" || "$MODE" == "conversation" ]]; then
   BATCHES=()
   PREFIXES=()
   BUDGETS=()
@@ -84,6 +84,18 @@ run_prefix_probe() {
 
 for ((r=1; r<=REPEATS; r++)); do
   echo "Repeat $r of $REPEATS"
+  if [[ "$MODE" == "conversation" ]]; then
+    # Alternate AB/BA order across repetitions to reduce order effects.
+    if (( r % 2 )); then CACHE_ORDER=(0 32); else CACHE_ORDER=(32 0); fi
+    for cache in "${CACHE_ORDER[@]}"; do
+      "$PYTHON" -m benchmarks.bench_experiments "${COMMON[@]}" --scenario conversation \
+        --num-requests 8 --conversation-turns 6 --input-len 2048 \
+        --suffix-len 256 --output-len 96 --max-model-len 4096 \
+        --max-num-seqs 1 --budget 512 --cache-entries "$cache" \
+        --out "$RESULT_DIR/conversation_cache${cache}_r${r}.json"
+    done
+    continue
+  fi
   if [[ "$MODE" == "prefix" ]]; then
     for prefix in 512 2048 8192; do
       for batch in 1 4; do

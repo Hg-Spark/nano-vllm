@@ -11,6 +11,20 @@ from benchmarks import summarize_bench
 
 
 class BenchmarkSummaryTest(unittest.TestCase):
+    def test_first_output_difference_diagnostics(self):
+        describe = summarize_bench.describe_first_output_difference
+        self.assertEqual(
+            describe([[1, 2], [3, 4]], [[1, 2], [3, 5]]),
+            "request=1, token=1: reference=4, changed=5",
+        )
+        self.assertEqual(
+            describe([[1, 2]], [[1]]),
+            "request=0: output length 2 vs 1",
+        )
+        self.assertEqual(describe([[1]], [[1], [2]]), "request count 1 vs 2")
+        self.assertIn("--record-output-tokens", describe(None, [[1]]))
+
+
     def test_ab_parity_and_speedup(self):
         base = {
             "schema_version": 1,
@@ -178,6 +192,67 @@ class BenchmarkSummaryTest(unittest.TestCase):
             del legacy["result"]["details"]["peak_total_snapshot_bytes_including_setup"]
             Path(folder, "on.json").write_text(json.dumps(legacy), encoding="utf-8")
             with self.assertRaisesRegex(SystemExit, "missing required prefix snapshot metrics"):
+                with redirect_stdout(StringIO()):
+                    summarize_bench.main([folder, "--min-repeats", "1"])
+
+    def test_conversation_summary_checks_full_trace_and_followup_ttft(self):
+        def record(cache_entries, ttft, elapsed, restored):
+            return {
+                "experiment": "benchmark_conversation",
+                "execution_status": "completed",
+                "config": {
+                    "scenario": "conversation",
+                    "model": "model",
+                    "graph_sizes": [],
+                    "cache_entries": cache_entries,
+                    "schedule_mode": "mixed",
+                    "max_num_seqs": 1,
+                    "budget": 512,
+                    "seed": 0,
+                    "num_requests": 8,
+                    "conversation_turns": 6,
+                    "input_len": 2048,
+                    "suffix_len": 256,
+                    "output_len": 96,
+                },
+                "result": {
+                    "gpu": "GPU",
+                    "compute_capability": [9, 0],
+                    "metrics": {
+                        "output_throughput_tok_s": 100,
+                        "ttft_seconds": {"mean": ttft},
+                        "tpot_seconds": {"mean": 0.01},
+                        "elapsed_seconds": elapsed,
+                    },
+                    "details": {
+                        "token_hash": "all-prompt-and-output-tokens",
+                        "followup_requests": 40,
+                        "restored_prompt_token_ratio": restored,
+                        "completion_checkpoint_hits": 40 if cache_entries else 0,
+                        "prompt_checkpoint_hits": 0,
+                    },
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as folder:
+            off = Path(folder, "off.json")
+            on = Path(folder, "on.json")
+            off.write_text(json.dumps(record(0, 0.2, 24.0, 0.0)))
+            on.write_text(json.dumps(record(32, 0.1, 18.0, 0.8)))
+            out = StringIO()
+            with redirect_stdout(out):
+                summarize_bench.main([folder, "--min-repeats", "1"])
+            self.assertIn("Follow-up TTFT (40 req/run):  200.00 ->  100.00 ms", out.getvalue())
+            self.assertIn("Follow-up restored/input: 80.0%; Completion hits: 40", out.getvalue())
+            self.assertIn(
+                "Accumulated engine execution (all turns): 24.000 -> 18.000 s", out.getvalue()
+            )
+            self.assertIn("ttft_seconds reduction: +50.00%", out.getvalue())
+
+            divergent = record(32, 0.1, 18.0, 0.8)
+            divergent["result"]["details"]["token_hash"] = "mismatched-history"
+            on.write_text(json.dumps(divergent))
+            with self.assertRaisesRegex(SystemExit, "Output token hashes differ"):
                 with redirect_stdout(StringIO()):
                     summarize_bench.main([folder, "--min-repeats", "1"])
 

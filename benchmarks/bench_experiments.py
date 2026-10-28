@@ -45,7 +45,7 @@ def arguments(argv=None):
     add_kv_cache_arguments(p)
     p.add_argument(
         "--scenario",
-        choices=("throughput", "prefix", "interference", "decode"),
+        choices=("throughput", "prefix", "conversation", "interference", "decode"),
         required=True,
     )
     p.add_argument(
@@ -88,7 +88,12 @@ def arguments(argv=None):
         default=1024,
         help="prefix scenario; 0 measures cache overhead on unrelated prompts",
     )
-    p.add_argument("--suffix-len", type=int, default=256, help="prefix scenario")
+    p.add_argument(
+        "--suffix-len", type=int, default=256, help="prefix suffix / new conversation input"
+    )
+    p.add_argument(
+        "--conversation-turns", type=int, default=6, help="conversation turns per session"
+    )
     p.add_argument(
         "--target-requests", type=int, default=8, help="prefix: number of target requests"
     )
@@ -108,6 +113,11 @@ def arguments(argv=None):
     p.add_argument("--late-input-len", type=int, default=2048, help="interference scenario")
     p.add_argument("--late-after-decode-steps", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--record-output-tokens",
+        action="store_true",
+        help="retain generated token IDs per request to locate A/B parity failures",
+    )
     p.add_argument("--out", required=True, help="JSON result path; must not exist")
     a = normalize_paths(p.parse_args(argv), "model", "out")
     if not a.model:
@@ -136,6 +146,17 @@ def arguments(argv=None):
             p.error("shared-prefix-len must be zero or a multiple of 16; suffix-len >= 1")
         if a.shared_prefix_len + a.suffix_len + a.output_len - 1 > a.max_model_len:
             p.error("prefix-len + suffix-len + output-len exceeds max-model-len")
+    if a.scenario == "conversation":
+        if a.conversation_turns < 2 or a.suffix_len < 1:
+            p.error("conversation requires at least two turns and a positive suffix-len")
+        max_length = (
+            a.input_len
+            + (a.conversation_turns - 1) * (a.suffix_len + a.output_len)
+            + a.output_len
+            - 1
+        )
+        if max_length > a.max_model_len:
+            p.error("conversation history and final output exceed max-model-len")
     if a.scenario == "decode":
         if a.warmup_steps < 0 or a.measure_steps < 2:
             p.error("decode requires warmup-steps >= 0 and measure-steps >= 2")
@@ -264,11 +285,14 @@ def run_fixed_decode(engine, a):
         **cuda_memory_stats(),
         **graph_metrics,
     }
-    return metrics, {
+    details = {
         "token_hash": tokens_hash(seqs),
         "fixed_batch_size": a.max_num_seqs,
         "context_len": a.input_len,
     }
+    if a.record_output_tokens:
+        details["output_token_sequences"] = [list(seq.completion_token_ids) for seq in seqs]
+    return metrics, details
 
 
 def enable_exclusive_decode_first(scheduler):
@@ -317,8 +341,9 @@ def run(a):
         if a.schedule_mode == "exclusive_decode_first":
             enable_exclusive_decode_first(engine.scheduler)
 
-        track_schedule = a.scenario == "prefix" or a.cache_entries > 0
+        track_schedule = a.scenario in ("prefix", "conversation") or a.cache_entries > 0
         first_prefill_start = {}
+        admitted_checkpoints = {}
         sched_prefill_tokens = 0
         if track_schedule:
             original_schedule = engine.scheduler.schedule
@@ -327,12 +352,23 @@ def run(a):
                 nonlocal sched_prefill_tokens
                 outcome = original_schedule()
                 sched_prefill_tokens += outcome.prefill_tokens
-                if a.scenario == "prefix":
+                if a.scenario in ("prefix", "conversation"):
                     for chunk in outcome.prefill_chunks:
                         first_prefill_start.setdefault(chunk.seq.seq_id, chunk.start)
                 return outcome
 
             engine.scheduler.schedule = tracked_schedule
+        if a.scenario == "conversation":
+            manager = engine.scheduler.cache_manager
+            original_admit = manager.admit
+
+            def tracked_admit(seq, entry):
+                original_admit(seq, entry)
+                admitted_checkpoints[seq.seq_id] = (
+                    (entry.kind, entry.num_tokens) if entry is not None else (None, 0)
+                )
+
+            manager.admit = tracked_admit
         graph_before = graph_counters(engine.model_runner)
 
         if a.scenario == "decode":
@@ -357,6 +393,112 @@ def run(a):
                 late_after_decode_steps=a.late_after_decode_steps,
             )
             details = {"token_hash": tokens_hash([*short, late])}
+
+        elif a.scenario == "conversation":
+            from scripts.bench import P99_MIN_SAMPLES, summarize
+
+            cache = engine.scheduler.cache_manager.prefix_cache
+            if len(cache):
+                raise RuntimeError("conversation benchmark requires an empty cache after warmup")
+            histories = random_prompts(rng, vocab, a.num_requests, a.input_len)
+            additions = [
+                random_prompts(rng, vocab, a.conversation_turns - 1, a.suffix_len)
+                for _ in range(a.num_requests)
+            ]
+            records = []
+            trace = []
+            completion_trace = []
+            followup_ttft = []
+            all_tpot = []
+            elapsed = 0.0
+            output_tokens = 0
+            prompt_tokens = 0
+            decode_calls = 0
+            capture_seconds = 0.0
+            peak_cuda_memory = 0.0
+            restored_tokens = 0
+            followup_prompt_tokens = 0
+            hits = {"prompt": 0, "conversation": 0}
+            evictions_before = cache.evicted_count
+            publications_before = cache.published_count
+            for session in range(a.num_requests):
+                for turn in range(a.conversation_turns):
+                    seq = make_requests(engine, [histories[session]], a.output_len)[0]
+                    sample = run_benchmark(engine, [seq])
+                    start = first_prefill_start.get(seq.seq_id)
+                    kind, checkpoint_tokens = admitted_checkpoints.get(seq.seq_id, (None, -1))
+                    if start is None or start != checkpoint_tokens:
+                        raise RuntimeError("restored checkpoint and actual Prefill start disagree")
+                    if (turn == 0 or not cache.enabled) and start:
+                        raise RuntimeError("unexpected conversation prefix reuse")
+                    if start and kind not in hits:
+                        raise RuntimeError("unknown checkpoint type")
+                    trace.append((seq.num_prompt_tokens, seq.token_ids))
+                    if a.record_output_tokens:
+                        completion_trace.append(list(seq.completion_token_ids))
+                    records.append(
+                        {
+                            "session": session,
+                            "turn": turn + 1,
+                            "prompt_tokens": seq.num_prompt_tokens,
+                            "restored_tokens": start,
+                            "checkpoint_kind": kind,
+                            "ttft_ms": sample["ttft_seconds"]["mean"] * 1000,
+                        }
+                    )
+                    if turn:
+                        followup_ttft.append(sample["ttft_seconds"]["mean"])
+                        restored_tokens += start
+                        followup_prompt_tokens += seq.num_prompt_tokens
+                        if start:
+                            hits[kind] += 1
+                    all_tpot.append(sample["tpot_seconds"]["mean"])
+                    elapsed += sample["elapsed_seconds"]
+                    output_tokens += seq.num_completion_tokens
+                    prompt_tokens += seq.num_prompt_tokens
+                    decode_calls += sample["decode_forward_calls"]
+                    capture_seconds += sample["snapshot_capture_seconds"]
+                    peak_cuda_memory = max(peak_cuda_memory, sample["peak_cuda_memory_gib"])
+                    if turn + 1 < a.conversation_turns:
+                        # Only actual generated tokens become the next turn's history.
+                        histories[session] = list(seq.token_ids) + additions[session][turn]
+
+            if cache.enabled and not hits["conversation"]:
+                raise RuntimeError("conversation benchmark never restored a Completion checkpoint")
+            followup_count = len(followup_ttft)
+            metrics = {
+                "requests": len(records),
+                "prompt_tokens": prompt_tokens,
+                "output_tokens": output_tokens,
+                "elapsed_seconds": elapsed,
+                "output_throughput_tok_s": output_tokens / elapsed,
+                "ttft_seconds": summarize(followup_ttft, p99_min_samples=P99_MIN_SAMPLES),
+                "tpot_seconds": summarize(all_tpot, p99_min_samples=P99_MIN_SAMPLES),
+                "decode_forward_calls": decode_calls,
+                "snapshot_capture_seconds": capture_seconds,
+                "peak_cuda_memory_gib": peak_cuda_memory,
+            }
+            details = {
+                "token_hash": hashlib.sha256(
+                    json.dumps(trace, separators=(",", ":")).encode()
+                ).hexdigest(),
+                "conversation_turns": a.conversation_turns,
+                "followup_requests": followup_count,
+                "total_restored_prefix_tokens": restored_tokens,
+                "restored_prompt_token_ratio": restored_tokens / followup_prompt_tokens,
+                "prefix_hit_rate": sum(hits.values()) / followup_count,
+                "prompt_checkpoint_hits": hits["prompt"],
+                "completion_checkpoint_hits": hits["conversation"],
+                "peak_snapshot_bytes_including_setup": cache.peak_snapshot_bytes,
+                "peak_staging_snapshot_bytes_including_setup": cache.peak_staging_snapshot_bytes,
+                "peak_total_snapshot_bytes_including_setup": cache.peak_total_snapshot_bytes,
+                "published_snapshots_during_session": cache.published_count - publications_before,
+                "evicted_snapshots_during_session": cache.evicted_count - evictions_before,
+                "retained_snapshots_after_session": len(cache),
+                "per_request": records,
+            }
+            if a.record_output_tokens:
+                details["output_token_sequences"] = completion_trace
 
         else:
             shared = [rng.randrange(vocab) for _ in range(a.shared_prefix_len)]
@@ -422,6 +564,16 @@ def run(a):
                 / (a.shared_prefix_len + a.suffix_len),
                 "token_hash": tokens_hash(target),
             }
+
+        if a.record_output_tokens and a.scenario in ("throughput", "interference", "prefix"):
+            completed = (
+                seqs if a.scenario == "throughput"
+                else [*short, late] if a.scenario == "interference"
+                else target
+            )
+            details["output_token_sequences"] = [
+                list(seq.completion_token_ids) for seq in completed
+            ]
 
         if a.scenario != "decode":
             graph_metrics = measured_graph_usage(

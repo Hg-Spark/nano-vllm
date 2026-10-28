@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-STAGES = ("all", "check", "bench", "tail", "long", "prefix", "capacity")
+STAGES = ("all", "check", "bench", "tail", "long", "prefix", "conversation", "capacity")
 
 
 def load_config(path, root=ROOT, stage=None):
@@ -147,16 +147,17 @@ def execute(config, output):
                             str(output / f"prefix-{source}-parity.json"),
                         ],
                     )
-            elif stage in ("bench", "tail", "long", "prefix"):
+            elif stage in ("bench", "tail", "long", "prefix", "conversation"):
                 if stage == "prefix":
                     # Verify joint KV/GDN restore boundaries before timing cache hits.
                     for block_size, shared, budget in (
                         (16, 128, 65),
                         (32, 256, 129),
                         (64, 256, 129),
+                        (64, 8192, 512),
                     ):
                         python(
-                            f"prefix-resume-b{block_size}",
+                            f"prefix-resume-b{block_size}-p{shared}",
                             "scripts.verify_prefix_resume",
                             [
                                 *model,
@@ -164,7 +165,7 @@ def execute(config, output):
                                 "--max-new-tokens",
                                 "16",
                                 "--max-model-len",
-                                "1024",
+                                str(max(1024, shared + 512)),
                                 "--prefix-block-size",
                                 str(block_size),
                                 "--shared-prefix-len",
