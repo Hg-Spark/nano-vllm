@@ -156,7 +156,10 @@ class LLMEngineStepTest(unittest.TestCase):
             engine.step()
 
     def test_prefill_failure_disables_engine_after_committed_decode(self):
-        scheduler = make_engine_scheduler()
+        # Snapshot behavior is unrelated to this failure-atomicity contract.
+        scheduler = make_scheduler(
+            max_num_seqs=2, block_size=4, eos_token_ids=(99,), max_prefix_cache_entries=0
+        )
         running = make_running_sequence(scheduler, [1, 2])
         waiting = Sequence([3, 4], SamplingParams(max_tokens=2))
         scheduler.add(waiting)

@@ -78,8 +78,8 @@ class HybridCacheManager:
                 self.prefix_cache.mark_reused(seq, entry)
                 seq.committed_tokens = entry.num_tokens
                 seq.pending_state_snapshot = entry.state_snapshot
-                # The published snapshot is immutable. Rolling staging owns
-                # separate CPU tensors and may never overwrite cache entries.
+                # Cached CPU snapshots remain immutable; request-local
+                # completion state rolls in a separate GPU buffer.
             self.state_manager.allocate(seq)
         except Exception:
             # Never retain shared KV refs if GDN slot admission fails.

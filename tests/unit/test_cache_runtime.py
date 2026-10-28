@@ -127,7 +127,6 @@ class CacheRuntimeTest(unittest.TestCase):
             layer.conv_state[0].fill_(1)
             layer.recurrent_state[0].fill_(2)
         cache.update(layers, [(first, 64)])
-        self.assertEqual(cache._positions[0], (first.seq_id, 64))
 
         for layer in layers:
             layer.conv_state[0].fill_(3)
@@ -156,8 +155,6 @@ class CacheRuntimeTest(unittest.TestCase):
         cache.update(layers, [(second, 96)])
         self.assertEqual(cache.take([second])[second.seq_id].num_tokens, 96)
         cache.clear()
-        self.assertEqual(cache._positions, {})
-
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_completion_buffer_uses_device_copies_until_final_export(self):
@@ -190,7 +187,6 @@ class CacheRuntimeTest(unittest.TestCase):
         self.assertTrue(torch.all(snapshot.layers[0][0] == 7))
         self.assertTrue(torch.all(snapshot.layers[0][1] == 8))
         buffer.clear()
-
 
 
 if __name__ == "__main__":

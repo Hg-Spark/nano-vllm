@@ -251,9 +251,16 @@ class LLMEngine:
                 completion_updates.append((seq, chunk.end))
 
         capture_start = perf_counter()
-        self.model_runner.stage_completion_states(completion_updates)
-        prompt_snapshots = self.model_runner.capture_live_states(prompt_captures)
-        completion_snapshots = self.model_runner.take_completion_states(finished)
+        if completion_updates:
+            self.model_runner.stage_completion_states(completion_updates)
+        prompt_snapshots = (
+            self.model_runner.capture_live_states(prompt_captures) if prompt_captures else {}
+        )
+        completion_snapshots = (
+            self.model_runner.take_completion_states(finished)
+            if finished and cache._can_capture()
+            else {}
+        )
         for seq, _ in prompt_captures:
             snapshot = prompt_snapshots.get(seq.seq_id)
             if snapshot is not None:
