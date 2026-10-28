@@ -276,7 +276,7 @@ class ModelRunnerTest(unittest.TestCase):
         self.assertEqual(empty_cache.call_count, 2)
         pool.clear.assert_called_once()
 
-    def test_gdn_capture_preserves_prompt_and_rolls_completion_cpu_tensor(self):
+    def test_prompt_capture_is_immutable_after_live_state_changes(self):
         from nanovllm.engine.state_manager import GDNStateSnapshot
 
         class Layer:
@@ -290,39 +290,17 @@ class ModelRunnerTest(unittest.TestCase):
         layers = [Layer(1), Layer(2)]
         runner = object.__new__(ModelRunner)
         runner.model = SimpleNamespace(state_cache_modules=lambda: layers)
-        runner.block_size = 16
         seq = Sequence(list(range(65)))
         seq.state_slot = 0
-
-        prompt = runner.capture_live_states([(seq, 64)])[seq.seq_id]
-        self.assertIsInstance(prompt, GDNStateSnapshot)
-        seq.prompt_snapshot = prompt
-        prompt_before = tuple((conv.clone(), state.clone()) for conv, state in prompt.layers)
-
+        captured = runner.capture_live_states([(seq, 64)])[seq.seq_id]
+        self.assertIsInstance(captured, GDNStateSnapshot)
+        self.assertEqual(captured.num_tokens, 64)
         for layer in layers:
-            layer.conv.fill_(5)
-            layer.recurrent.fill_(6)
-        completion = runner.capture_live_states([(seq, 80)])[seq.seq_id]
-        seq.completion_snapshot = completion
-        completion_ptrs = tuple((c.data_ptr(), r.data_ptr()) for c, r in completion.layers)
-
-        for layer in layers:
-            layer.conv.fill_(7)
-            layer.recurrent.fill_(8)
-        updated = runner.capture_live_states([(seq, 96)])[seq.seq_id]
-
-        self.assertEqual(updated.num_tokens, 96)
-        self.assertEqual(
-            tuple((c.data_ptr(), r.data_ptr()) for c, r in updated.layers), completion_ptrs
-        )
-        for (actual_conv, actual_state), (saved_conv, saved_state) in zip(
-            prompt.layers, prompt_before
-        ):
-            torch.testing.assert_close(actual_conv, saved_conv)
-            torch.testing.assert_close(actual_state, saved_state)
-        for actual_conv, actual_state in updated.layers:
-            self.assertTrue(torch.all(actual_conv == 7))
-            self.assertTrue(torch.all(actual_state == 8))
+            layer.conv.fill_(9)
+            layer.recurrent.fill_(9)
+        for index, (conv, recurrent) in enumerate(captured.layers):
+            self.assertTrue(torch.all(conv == index + 1))
+            self.assertTrue(torch.all(recurrent == index + 1))
 
 
 if __name__ == "__main__":

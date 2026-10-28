@@ -218,7 +218,8 @@ class LLMEngine:
         # One immutable prompt checkpoint plus one replaceable completion
         # checkpoint per request. Their KV pages share the same block table.
         cache = self.scheduler.cache_manager.prefix_cache
-        captures = []
+        prompt_captures = []
+        completion_updates = []
         finished = []
         block_size = cache.block_size
         for chunk, token_id in zip(chunks, result.token_ids):
@@ -241,29 +242,33 @@ class LLMEngine:
             if chunk.end % block_size:
                 continue
             if is_prefill and chunk.end == prompt_boundary and seq.prompt_snapshot is None:
-                captures.append((seq, chunk.end, "prompt"))
+                prompt_captures.append((seq, chunk.end))
             elif chunk.end > prompt_boundary and (
                 (not is_prefill) or (chunk.end == seq.num_prompt_tokens and not request_complete)
             ):
-                # Capture the final Decode boundary even when this sample ends
-                # the request. The sampled token itself was not forwarded.
-                captures.append((seq, chunk.end, "completion"))
+                # Keep the latest complete KV-block boundary on GPU; do not
+                # transfer recurrent states to CPU on intermediate Decode steps.
+                completion_updates.append((seq, chunk.end))
 
         capture_start = perf_counter()
-        captured = (
-            self.model_runner.capture_live_states([(seq, pos) for seq, pos, _ in captures])
-            if captures
-            else {}
-        )
-        for seq, _, kind in captures:
-            snapshot = captured.get(seq.seq_id)
+        self.model_runner.stage_completion_states(completion_updates)
+        prompt_snapshots = self.model_runner.capture_live_states(prompt_captures)
+        completion_snapshots = self.model_runner.take_completion_states(finished)
+        for seq, _ in prompt_captures:
+            snapshot = prompt_snapshots.get(seq.seq_id)
             if snapshot is not None:
-                if kind == "prompt":
-                    seq.prompt_snapshot = snapshot
-                else:
-                    seq.completion_snapshot = snapshot
-                cache.stage(seq, kind)
-        self._last_snapshot_capture_seconds = perf_counter() - capture_start if captures else 0.0
+                seq.prompt_snapshot = snapshot
+                cache.stage(seq, "prompt")
+        for seq in finished:
+            snapshot = completion_snapshots.get(seq.seq_id)
+            if snapshot is not None:
+                seq.completion_snapshot = snapshot
+                cache.stage(seq, "completion")
+        self._last_snapshot_capture_seconds = (
+            perf_counter() - capture_start
+            if completion_updates or prompt_captures or completion_snapshots
+            else 0.0
+        )
 
         publications = []
         for seq in finished:
