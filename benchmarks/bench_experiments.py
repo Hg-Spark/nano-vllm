@@ -1,0 +1,390 @@
+#!/usr/bin/env python3
+"""Qwen3.5 Hybrid Runtime benchmark experiments for Hg-Spark/nano-vllm@qwen3.5.
+
+Uses scripts.bench and nanovllm from the repository root.
+Measures the engine directly (no HTTP, network time, or Poisson arrivals).
+One process = one sample. Use the companion shell script for A/B repetitions.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+from random import Random
+from time import perf_counter
+
+from nanovllm.engine.schedule import GDN_CHECKPOINT_INTERVAL
+from scripts._common import (
+    add_dtype_argument,
+    add_model_argument,
+    cuda_memory_stats,
+    execute,
+    execute_fixed_decode_step,
+    kv_cache_stats,
+    normalize_paths,
+    prepare_fixed_decode_batch,
+    validate_positive,
+)
+
+
+def parse_graph_sizes(raw: str) -> tuple[int, ...]:
+    if not raw.strip():
+        return ()
+    values = tuple(sorted({int(x.strip()) for x in raw.split(",")}))
+    if not values or any(value < 1 for value in values):
+        raise ValueError("graph sizes must be positive integers")
+    return values
+
+
+def arguments():
+    p = argparse.ArgumentParser(description=__doc__)
+    add_model_argument(p)
+    add_dtype_argument(p)
+    p.add_argument(
+        "--scenario",
+        choices=("throughput", "prefix", "interference", "decode"),
+        required=True,
+    )
+    p.add_argument(
+        "--num-requests",
+        type=int,
+        default=16,
+        help="total initial requests (interference: short only)",
+    )
+    p.add_argument("--input-len", type=int, default=1024)
+    p.add_argument("--output-len", type=int, default=256)
+    p.add_argument("--max-num-seqs", type=int, default=4)
+    p.add_argument("--budget", type=int, default=512, help="max_num_batched_tokens")
+    p.add_argument("--max-model-len", type=int, default=4096)
+    p.add_argument("--gpu-memory-utilization", type=float, default=0.8)
+    p.add_argument("--kv-cache-dtype", choices=("auto", "fp8_e4m3"), default="auto")
+    p.add_argument(
+        "--graph-sizes", default="", help="comma separated Graph buckets, e.g. 1,2,4; empty=Eager"
+    )
+    p.add_argument("--cache-entries", type=int, default=0, help="0 disables prefix cache")
+    p.add_argument("--shared-prefix-len", type=int, default=1024, help="prefix scenario")
+    p.add_argument("--suffix-len", type=int, default=256, help="prefix scenario")
+    p.add_argument(
+        "--target-requests", type=int, default=8, help="prefix: number of target requests"
+    )
+    p.add_argument("--warmup-steps", type=int, default=8, help="fixed decode warmup steps")
+    p.add_argument("--measure-steps", type=int, default=128, help="fixed decode measured steps")
+    p.add_argument(
+        "--schedule-mode",
+        choices=("mixed", "exclusive_decode_first"),
+        default="mixed",
+        help="exclusive mode only changes prefill scheduling",
+    )
+    p.add_argument("--late-input-len", type=int, default=2048, help="interference scenario")
+    p.add_argument("--late-after-decode-steps", type=int, default=8)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--out", required=True, help="JSON result path; must not exist")
+    a = normalize_paths(p.parse_args(), "model", "out")
+    if not a.model:
+        p.error("model path or NANOVLLM_MODEL must be provided")
+    a.graph_sizes = parse_graph_sizes(a.graph_sizes)
+    validate_positive(p, a, "input_len", "num_requests")
+    if a.output_len < 2:
+        p.error("output-len must be at least 2")
+    if a.scenario == "throughput" and a.input_len + a.output_len > a.max_model_len:
+        p.error("input-len + output-len exceeds max-model-len")
+    if a.scenario == "prefix":
+        if a.target_requests < 1:
+            p.error("target-requests must be positive")
+        if (
+            a.shared_prefix_len < GDN_CHECKPOINT_INTERVAL
+            or a.shared_prefix_len % GDN_CHECKPOINT_INTERVAL
+            or a.suffix_len < 1
+        ):
+            p.error("shared-prefix-len must be a positive multiple of 64; suffix-len >= 1")
+        if a.shared_prefix_len + a.suffix_len + a.output_len > a.max_model_len:
+            p.error("prefix-len + suffix-len + output-len exceeds max-model-len")
+    if a.scenario == "decode":
+        if a.warmup_steps < 0 or a.measure_steps < 2:
+            p.error("decode requires warmup-steps >= 0 and measure-steps >= 2")
+        if a.input_len + a.warmup_steps + a.measure_steps + 2 > a.max_model_len:
+            p.error("decode requires input-len + warmup-steps + measure-steps + 2 <= max-model-len")
+    if a.schedule_mode != "mixed" and a.scenario != "interference":
+        p.error("exclusive_decode_first is supported only for interference")
+    if a.scenario == "interference":
+        if a.num_requests >= a.max_num_seqs:
+            p.error("reserve one max-num-seqs slot for the injected long request")
+        if a.late_input_len <= a.input_len or a.late_input_len + a.output_len > a.max_model_len:
+            p.error("late-input-len must exceed input-len and fit in max-model-len")
+        if not 0 < a.late_after_decode_steps < a.output_len:
+            p.error("late-after-decode-steps must be between 1 and output-len-1")
+    if Path(a.out).exists():
+        p.error("output path already exists: refusing to overwrite experimental evidence")
+    return a
+
+
+def tokens_hash(seqs):
+    # Hash all complete token sequences in order without bloating result files.
+    data = json.dumps([list(s.completion_token_ids) for s in seqs], separators=(",", ":"))
+    return hashlib.sha256(data.encode()).hexdigest()
+
+
+def make_requests(engine, prompts, max_tokens):
+    from nanovllm import SamplingParams
+
+    params = SamplingParams(temperature=0.0, ignore_eos=True, max_tokens=max_tokens)
+    return [engine._prepare_request(prompt, params) for prompt in prompts]
+
+
+def run_fixed_decode(engine, a, graph_replays):
+    """Measure real Scheduler + ModelRunner at a fixed active decode batch."""
+    import torch
+
+    from nanovllm import SamplingParams
+    from scripts.bench import summarize
+
+    vocab = engine.config.text_config.vocab_size
+    prompt = [1 if vocab > 1 else 0] * a.input_len
+    sampling = SamplingParams(
+        temperature=0.0,
+        ignore_eos=True,
+        max_tokens=a.warmup_steps + a.measure_steps + 2,
+    )
+    prepare_fixed_decode_batch(engine, prompt, sampling, a.max_num_seqs)
+
+    for _ in range(a.warmup_steps):
+        execute_fixed_decode_step(engine, a.max_num_seqs, "warmup")
+
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    replay_before = graph_replays()
+    step_durations = []
+    gpu_step_durations = []
+    start_ev = torch.cuda.Event(enable_timing=True)
+    end_ev = torch.cuda.Event(enable_timing=True)
+    t_begin = perf_counter()
+    for _ in range(a.measure_steps):
+        t0 = perf_counter()
+        start_ev.record()
+        execute_fixed_decode_step(engine, a.max_num_seqs, "measurement")
+        end_ev.record()
+        end_ev.synchronize()
+        t1 = perf_counter()
+        step_durations.append(t1 - t0)
+        gpu_step_durations.append(start_ev.elapsed_time(end_ev) / 1000.0)
+    duration = perf_counter() - t_begin
+    replays = graph_replays() - replay_before
+    if a.graph_sizes and replays != a.measure_steps:
+        raise RuntimeError(f"expected {a.measure_steps} measured graph replays, got {replays}")
+    if not a.graph_sizes and replays:
+        raise RuntimeError("Eager unexpectedly used a graph")
+    # CUDA event elapsed time includes host submission gaps, not pure kernel time.
+    seqs = list(engine.scheduler.running)
+    if len(seqs) != a.max_num_seqs:
+        raise RuntimeError("fixed decode batch lost running requests")
+    metrics = {
+        "requests": a.max_num_seqs,
+        "measured_decode_steps": a.measure_steps,
+        "output_tokens": a.max_num_seqs * a.measure_steps,
+        "elapsed_seconds": duration,
+        "output_throughput_tok_s": a.max_num_seqs * a.measure_steps / duration,
+        "step_latency_seconds": summarize(step_durations),
+        "cuda_event_step_window_seconds": summarize(gpu_step_durations),
+        "tpot_seconds": summarize(step_durations),
+        **cuda_memory_stats(),
+        "graph_replays": replays,
+    }
+    return metrics, {
+        "token_hash": tokens_hash(seqs),
+        "fixed_batch_size": a.max_num_seqs,
+        "context_len": a.input_len,
+    }
+
+
+def enable_exclusive_decode_first(scheduler):
+    """Suppress Prefill in a step that already schedules Decode."""
+    original_prefill_pass = scheduler._schedule_prefill_pass
+
+    def exclusive_prefill(prefill_chunks, decode_count):
+        if not decode_count:
+            original_prefill_pass(prefill_chunks, decode_count)
+
+    scheduler._schedule_prefill_pass = exclusive_prefill
+
+
+def run(a):
+    import torch
+
+    from nanovllm import LLM
+    from scripts.bench import run_benchmark
+
+    engine = LLM(
+        a.model,
+        dtype=a.dtype,
+        max_num_batched_tokens=a.budget,
+        max_num_seqs=a.max_num_seqs,
+        max_model_len=a.max_model_len,
+        gpu_memory_utilization=a.gpu_memory_utilization,
+        kv_cache_dtype=a.kv_cache_dtype,
+        max_prefix_cache_entries=a.cache_entries,
+        decode_graph_batch_sizes=a.graph_sizes,
+    )
+    try:
+        gpu = torch.cuda.get_device_name(0)
+        cc = torch.cuda.get_device_capability(0)
+        vocab = engine.config.text_config.vocab_size
+        effective_max_len = engine.max_model_len
+        kv_stats = kv_cache_stats(engine)
+        if vocab < 2:
+            raise RuntimeError("vocabulary is unexpectedly small")
+        rng = Random(a.seed)
+        # Use a sub-block setup prompt to avoid publishing an unrelated prefix.
+        warmup = make_requests(engine, [[1] * 15], 2)
+        run_benchmark(engine, warmup)
+
+        first_prefill_start = {}
+        sched_prefill_tokens = 0
+        original_schedule = engine.scheduler.schedule
+
+        def graph_replays():
+            return sum(
+                bucket.replay_count for bucket in engine.model_runner.decode_graph_buckets.values()
+            )
+
+        if a.schedule_mode == "exclusive_decode_first":
+            enable_exclusive_decode_first(engine.scheduler)
+
+        def tracked_schedule():
+            nonlocal sched_prefill_tokens
+            outcome = original_schedule()
+            sched_prefill_tokens += outcome.prefill_tokens
+            for chunk in outcome.prefill_chunks:
+                first_prefill_start.setdefault(chunk.seq.seq_id, chunk.start)
+            return outcome
+
+        engine.scheduler.schedule = tracked_schedule
+        replay_before = graph_replays()
+
+        if a.scenario == "decode":
+            metrics, details = run_fixed_decode(engine, a, graph_replays)
+
+        elif a.scenario == "throughput":
+            prompts = [
+                [rng.randrange(vocab) for _ in range(a.input_len)] for _ in range(a.num_requests)
+            ]
+            seqs = make_requests(engine, prompts, a.output_len)
+            metrics = run_benchmark(engine, seqs)
+            completion_hash = tokens_hash(seqs)
+            details = {"token_hash": completion_hash}
+
+        elif a.scenario == "interference":
+            prompts = [
+                [rng.randrange(vocab) for _ in range(a.input_len)] for _ in range(a.num_requests)
+            ]
+            short = make_requests(engine, prompts, a.output_len)
+            late_prompt = [rng.randrange(vocab) for _ in range(a.late_input_len)]
+            late = make_requests(engine, [late_prompt], a.output_len)[0]
+            metrics = run_benchmark(
+                engine,
+                short,
+                late_sequence=late,
+                late_after_decode_steps=a.late_after_decode_steps,
+            )
+            details = {"token_hash": tokens_hash([*short, late])}
+
+        else:
+            shared = [rng.randrange(vocab) for _ in range(a.shared_prefix_len)]
+            warm_tail = [rng.randrange(vocab) for _ in range(a.suffix_len)]
+            target_tails = [
+                [rng.randrange(vocab) for _ in range(a.suffix_len)]
+                for _ in range(a.target_requests)
+            ]
+            for idx, tail in enumerate(target_tails):
+                if tail == warm_tail:
+                    tail[-1] = (tail[-1] + idx + 1) % vocab
+            # Stop immediately after the shared block boundary to cache it,
+            # regardless of the target requests' different suffixes.
+            warm = make_requests(engine, [shared + warm_tail[:1]], 1)
+            run_benchmark(engine, warm)  # Build exactly the same history in both A/B runs.
+            replay_before = graph_replays()
+            cache = engine.scheduler.block_manager.prefix_cache
+            entries_before = len(cache)
+            bytes_before = cache.snapshot_bytes
+            target = make_requests(engine, [shared + tail for tail in target_tails], a.output_len)
+            metrics = run_benchmark(engine, target)
+            restored = [first_prefill_start.get(seq.seq_id, -1) for seq in target]
+            if any(start < 0 for start in restored):
+                raise RuntimeError("some target requests never executed Prefill")
+            if a.cache_entries and not any(start > 0 for start in restored):
+                raise RuntimeError("enabled cache never restored a shared prefix")
+            if not a.cache_entries and any(start != 0 for start in restored):
+                raise RuntimeError("disabled cache unexpectedly restored a prefix")
+            details = {
+                "warm_prompt_tokens": warm[0].num_prompt_tokens,
+                "target_requests": len(target),
+                "target_prompt_tokens": target[0].num_prompt_tokens,
+                "cache_entries_before_target": entries_before,
+                "snapshot_bytes_before_target": bytes_before,
+                "snapshot_bytes_after_target": cache.snapshot_bytes,
+                "restored_tokens_per_target": restored,
+                "prefix_hit_rate": sum(start > 0 for start in restored) / len(restored),
+                "total_restored_prefix_tokens": sum(max(start, 0) for start in restored),
+                "token_hash": tokens_hash(target),
+            }
+
+        if a.scenario != "decode":
+            measured_replays = graph_replays() - replay_before
+            if a.graph_sizes and a.scenario == "throughput" and measured_replays == 0:
+                raise RuntimeError(
+                    "Graph buckets were captured, but no measured replay was observed"
+                )
+            metrics["graph_replays"] = measured_replays
+        details["scheduled_prefill_tokens_including_setup"] = sched_prefill_tokens
+        result = {
+            "source": "nano-vllm qwen3.5 engine, no HTTP",
+            "gpu": gpu,
+            "compute_capability": cc,
+            "torch_version": torch.__version__,
+            "torch_cuda_version": torch.version.cuda,
+            "effective_max_model_len": effective_max_len,
+            **kv_stats,
+            "metrics": metrics,
+            "details": details,
+        }
+        return result
+    finally:
+        engine.exit()
+
+
+def main():
+    a = arguments()
+    target = Path(a.out)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    a.result_file = a.out
+    completed = None
+
+    def run_and_capture(args):
+        nonlocal completed
+        completed = run(args)
+        return completed
+
+    code = execute(f"benchmark_{a.scenario}", a, run_and_capture)
+    if code:
+        return code
+
+    result = completed
+    metrics = result["metrics"]
+    print(
+        f"saved {target} | throughput={metrics['output_throughput_tok_s']:.1f} tok/s "
+        f"TPOT={metrics['tpot_seconds']['mean'] * 1000:.2f} ms "
+        f"graph_replays={metrics['graph_replays']}"
+    )
+    if "total_restored_prefix_tokens" in result["details"]:
+        print(
+            "restored prefix tokens:",
+            result["details"]["total_restored_prefix_tokens"],
+            "hit rate:",
+            result["details"]["prefix_hit_rate"],
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
