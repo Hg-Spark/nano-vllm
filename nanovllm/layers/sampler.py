@@ -3,10 +3,28 @@ from torch import nn
 
 
 class Sampler(nn.Module):
+    def forward(
+        self,
+        logits: torch.Tensor,
+        temperatures: torch.Tensor,
+        *,
+        sample_positions: list[int] | None = None,
+    ):
+        logits = logits.float()
+        if sample_positions is None:
+            return self._sample(logits, temperatures)
+        result = logits.argmax(dim=-1)
+        if sample_positions:
+            indices = torch.tensor(sample_positions, device=logits.device, dtype=torch.long)
+            selected = self._sample(
+                logits.index_select(0, indices), temperatures.index_select(0, indices)
+            )
+            result.index_copy_(0, indices, selected)
+        return result
 
-    @torch.compile
-    def forward(self, logits: torch.Tensor, temperatures: torch.Tensor):
-        logits = logits.float().div_(temperatures.unsqueeze(dim=1))
-        probs = torch.softmax(logits, dim=-1)
-        sample_tokens = probs.div_(torch.empty_like(probs).exponential_(1).clamp_min_(1e-10)).argmax(dim=-1)
-        return sample_tokens
+    @staticmethod
+    def _sample(logits: torch.Tensor, temperatures: torch.Tensor) -> torch.Tensor:
+        from flashinfer.sampling import sampling_from_probs, softmax
+
+        probs = softmax(logits, temperature=temperatures)
+        return sampling_from_probs(probs).long()
