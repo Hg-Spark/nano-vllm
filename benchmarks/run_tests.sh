@@ -3,7 +3,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then
-  echo 'Usage: bash benchmarks/run_tests.sh [CONFIG.toml] [all|check|bench|tail|capacity]'
+  echo 'Usage: bash benchmarks/run_tests.sh [CONFIG.toml] [all|check|bench|tail|long|capacity]'
   echo 'Default config: configs/tests.toml; default stage: the stage in that file.'
   exit 0
 fi

@@ -39,7 +39,7 @@ Full Attention 的 KV 总量随上下文长度增长。分页只改变存储和�
 
 ```text
 输入投影
-  → 拼接历史的因果逐通道卷积
+  → 使用历史状态的因果逐通道卷积
   → 拆分 Q/K/V，归一化 Q/K
   → Prefill 按 64-token 块计算 delta-rule；Decode 执行递归更新
   → 带门控的 RMSNorm
@@ -65,9 +65,11 @@ output  = S_new × q_t
 
 其中 `beta_t = sigmoid(b_t)`，`g_t = -exp(A_log) × softplus(a_t + dt_bias)`；q 在归一化后还乘以 `head_k_dim ** -0.5`。直观上，先衰减旧状态，再用当前 value 与旧记忆的差修正状态，最后读取输出。
 
+等长多请求 Prefill 的卷积直接用 `causal-conv1d` 原生 Batch + `initial_states` / `return_final_states`，不再显式拼接每段历史或二次拼接输出。变长请求仍走历史窗口的 Packed 单 Kernel 路径；两者均保持每请求独立的卷积状态。
+
 单层活动循环矩阵的形状是 `[num_value_heads, value_head_dim, key_head_dim]`，不随序列长度增长。卷积状态也固定大小。不过本模型仍有 Full Attention 层，因此整个请求的显存并非与上下文长度无关。
 
-GDN Prefill/Decode 固定使用 FlashInfer 0.7.0 的 Indexed 算子，要求 GPU 为 SM90/100/120、模型 dtype 为 FP16/BF16 且 K/V head_dim 均为 128；不满足时在初始化阶段报错。循环状态统一维护 FP32 `[V,K]` 布局，不保留 PyTorch GDN 计算回退。
+GDN Prefill/Decode 固定使用 FlashInfer 0.7.0 的 Indexed 算子，要求 GPU 为 SM90/100/120、模型 dtype 为 BF16 且 K/V head_dim 均为 128；不满足时在初始化阶段报错。循环状态统一维护 FP32 `[V,K]` 布局，不保留 PyTorch GDN 计算回退。
 
 调度层的“分块 prefill”仍表示分几轮执行输入，与算子内部的 chunk 64 分别处理。非零历史状态、变长请求和前缀快照沿用原接口。不同调度分块会改变 FP32 舍入顺序，不能要求任意分块方式都逐位相同。Decode 保留现有向量化递归路径；分块递推与 HF 数学等价但运算顺序不同，不保证逐位一致，也不代表完整模型已与 HF 对齐。
 
@@ -205,13 +207,14 @@ KV 的逻辑位置与 mRoPE 三轴位置分别维护：图片展开可能改变 
 
 ## 启动时怎样分配缓存
 
-[ModelRunner](../nanovllm/engine/model_runner.py)先加载模型并调用 `eval()`，由 [allocate_runtime_caches()](../nanovllm/engine/cache_runtime.py)根据 `gpu_memory_utilization` 和当下已使用显存计算静态 KV 预算，同时扣除 `max_num_seqs` 个 GDN 槽位、启用前缀缓存且快照预算充足时的 GDN Checkpoint 工作区，以及启用视觉模式时的视觉特征预留。不再运行模型来测量历史激活峰值，剩余显存作为 Prefill、MoE、Vision 临时激活和 Graph Capture 的余量；这不是 OOM 安全证明。
+[ModelRunner](../nanovllm/engine/model_runner.py)先加载模型并调用 `eval()`，由 [allocate_runtime_caches()](../nanovllm/engine/cache_runtime.py)根据 `gpu_memory_utilization` 和当下已使用显存计算静态 KV 预算，同时扣除 `max_num_seqs` 个 GDN 槽位、启用前缀缓存且快照预算充足时的 GDN Checkpoint 工作区，以及启用视觉模式时的视觉特征预留、每个 Decode Graph Bucket 的固定空间估算及额外 `activation_reserve_bytes`（默认 256 MiB）。不再运行模型来测量历史激活峰值，剩余显存作为 Prefill、MoE、Vision 临时激活和 Graph Capture 的余量；这不是 OOM 安全证明。
 
 ```text
 GPU_used = total_GPU_memory - CUDA_free_at_allocation
 KV_budget = floor(total_GPU_memory × gpu_memory_utilization)
             - GPU_used - GDN_pool_bytes - checkpoint_workspace_bytes
-            - visual_feature_reserve_bytes
+            - visual_feature_reserve_bytes - graph_reserve_bytes
+            - activation_reserve_bytes
 KV_blocks = floor(KV_budget / KV_block_bytes)
 ```
 
@@ -315,9 +318,9 @@ generate(prompts, sampling_params) 或 add_request(prompt, params)
 
 在 [ModelRunner.run()](../nanovllm/engine/model_runner.py) 中，首先将待恢复 GDN 快照写回活动槽；Decode 会先尝试匹配已捕获的 CUDA Graph bucket，不匹配则走 Eager。Eager Batch 用 [Context](../nanovllm/utils/context.py) 将 Paged KV 元数据和状态槽传递给模型层。
 
-`_plan_attention()` 在每次常规 Batch 调用时对对应 FlashInfer wrapper 执行一次 `plan()`，并由所有 Full Attention 层复用该计划；Eager Decode 和 CUDA Graph 分别调用 FlashInfer 的 Decode `plan()`，参数规格均由 `flashinfer_attention_spec()` 提供；各层仍拥有自身的物理 KV 数据。GDN Prefill 按 `q_offsets` 拆开不同请求的 token 段，读取各自 Slot，依次推进卷积与循环状态。**Packed 输入只拼接计算张量，不合并不同请求的历史。**
+`_plan_attention()` 在每次常规 Batch 调用时对对应 FlashInfer wrapper 执行一次 `plan()`，并由所有 Full Attention 层复用该计划。Eager 模式将 `qo_indptr`（仅 Prefill）、`paged_kv_indptr`、`paged_kv_last_page_len` 保留为 pinned CPU 输入，由 FlashInfer 0.7.0 的 `plan()` 生成 GPU 缓冲，随后供 GDN 与 KV Append 共用，避免提前执行重复 H2D；页索引则沿用单份 GPU Tensor。CUDA Graph 仍使用固定设备缓冲。参数规格由 `flashinfer_attention_spec()` 提供；各层仍拥有自身的物理 KV 数据。GDN Prefill 按 `q_offsets` 拆开不同请求的 token 段，读取各自 Slot，依次推进卷积与循环状态。**Packed 输入只拼接计算张量，不合并不同请求的历史。**
 
-三种实际执行路径的差异限定在准备与执行层：普通 Prefill 采用变长打包和 FlashInfer Paged Prefill；Eager Decode 每请求一个 token，使用 FlashInfer Paged Decode；可选 CUDA Graph Decode 复用固定输入地址和预捕获的模型前向。未配置的 Decode Batch Size 使用 Eager；已配置的 Graph Bucket 若布局不匹配、Plan 或 Replay 失败，则抛出异常并使 Engine 不可继续执行。三条路径都依赖同一组物理 KV/GDN Pool，**没有启动时无缓存 SDPA/GDN 参考路径**。
+三种实际执行路径的差异限定在准备与执行层：普通 Prefill 采用变长打包和 FlashInfer Paged Prefill；Eager Decode 每请求一个 token，使用 FlashInfer Paged Decode；可选 CUDA Graph Decode 复用固定输入地址和预捕获的模型前向。未配置的 Decode Batch Size 使用 Eager；已配置的 Graph Bucket 如果布局超出容量，同样回退 Eager；Plan 或 Replay 过程中出现异常时才将异常向上传播。三条路径都依赖同一组物理 KV/GDN Pool，**没有启动时无缓存 SDPA/GDN 参考路径**。
 
 图片请求复用同一 Prefill 过程。`ImagePrompt` 在入队时由 Processor 展开 token 和三轴位置；当 Chunk 与图像 token 区间相交时，ModelRunner 按需调用 `encode_image()`，把对应的视觉特征切片写入 `inputs_embeds`。编码完成后释放 CPU pixel_values；Prefill 提交越过图像区间后释放 GPU 视觉特征，三轴位置信息保留到请求结束；当前仅支持单图。
 

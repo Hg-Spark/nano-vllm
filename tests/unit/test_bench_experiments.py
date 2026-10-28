@@ -48,6 +48,7 @@ class BenchmarkExperimentsTest(unittest.TestCase):
                 num_kv_cache_blocks=32,
                 kv_cache=SimpleNamespace(numel=lambda: 32, element_size=lambda: 4),
                 decode_graph_buckets={1: bucket},
+                decode_graph_fallbacks={"missing_bucket": 0, "layout_exceeded": 0},
             ),
             scheduler=SimpleNamespace(schedule=lambda: None),
             _prepare_request=lambda tokens, params: Sequence(tokens, params),
@@ -57,12 +58,15 @@ class BenchmarkExperimentsTest(unittest.TestCase):
             model="stub",
             dtype="float16",
             budget=16,
+            mixed_prefill_limit=128,
+            activation_reserve_mib=256,
             max_num_seqs=4,
             max_model_len=128,
             gpu_memory_utilization=0.8,
             kv_cache_dtype="auto",
             cache_entries=0,
             graph_sizes=(1,),
+            min_graph_coverage=0.0,
             seed=0,
             scenario="throughput",
             schedule_mode="mixed",
@@ -78,7 +82,9 @@ class BenchmarkExperimentsTest(unittest.TestCase):
             calls += 1
             if calls == 1:
                 bucket.replay_count += 1
-            return {}
+            else:
+                engine.model_runner.decode_graph_fallbacks["layout_exceeded"] += 1
+            return {"decode_forward_calls": 1}
 
         with (
             patch("nanovllm.LLM", return_value=engine),
@@ -86,7 +92,7 @@ class BenchmarkExperimentsTest(unittest.TestCase):
             patch("torch.cuda.get_device_name", return_value="cpu-test"),
             patch("torch.cuda.get_device_capability", return_value=(9, 0)),
         ):
-            with self.assertRaisesRegex(RuntimeError, "no measured replay"):
+            with self.assertRaisesRegex(RuntimeError, "Graph coverage"):
                 experiments.run(args)
 
             calls = 0
@@ -96,11 +102,13 @@ class BenchmarkExperimentsTest(unittest.TestCase):
                 calls += 1
                 if calls == 2:
                     bucket.replay_count += 1
-                return {}
+                return {"decode_forward_calls": 1}
 
             with patch("scripts.bench.run_benchmark", side_effect=measured_benchmark):
                 result = experiments.run(args)
             self.assertEqual(result["metrics"]["graph_replays"], 1)
+            self.assertEqual(result["metrics"]["graph_coverage"], 1.0)
+            self.assertEqual(result["metrics"]["eager_decode_forward_calls"], 0)
 
     def test_capacity_search_uses_fixed_decode(self):
         with tempfile.TemporaryDirectory() as folder:
