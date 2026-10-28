@@ -197,7 +197,7 @@ class GatedDeltaNet(nn.Module):
 
         packed_conv = self._causal_conv_batch(mixed_qkv, conv_states, q_offsets)
         query, key, value = self._split_qkv(packed_conv)
-        # FlashInfer 0.7.0's prefill path ignores its Q/K normalization flag.
+        # Normalize Q/K explicitly to preserve BF16 rounding across FlashInfer versions.
         query = _l2norm(query.float()).to(query.dtype).contiguous()
         key = _l2norm(key.float()).to(key.dtype).contiguous()
         with record_function("nanovllm::gdn_prefill_flashinfer"):
