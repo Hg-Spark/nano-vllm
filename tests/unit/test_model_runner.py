@@ -1,6 +1,7 @@
 """ModelRunner CUDA Graph lifecycle and context contracts."""
 
 import unittest
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -13,6 +14,7 @@ if torch is not None:
     from nanovllm.engine.decode_graph import DecodeGraphBucket
     from nanovllm.engine.model_runner import ModelRunner
     from nanovllm.engine.sequence import Sequence
+    from nanovllm.layers.attention import plan_flashinfer_attention
     from nanovllm.sampling_params import SamplingParams
     from nanovllm.utils.context import Context
 
@@ -61,14 +63,17 @@ class ModelRunnerTest(unittest.TestCase):
                 # Simulate buffers populated by FlashInfer 0.7.0 plan().
                 wrapper._qo_indptr_buf = torch.tensor(q_offsets, dtype=torch.int32)
                 wrapper._paged_kv_indptr_buf = torch.tensor(indptr, dtype=torch.int32)
-                wrapper._paged_kv_last_page_len_buf = torch.tensor(
-                    last_page_len, dtype=torch.int32
+                wrapper._paged_kv_last_page_len_buf = torch.tensor(last_page_len, dtype=torch.int32)
+                result = plan_flashinfer_attention(
+                    SimpleNamespace(context=context, layout=layout),
+                    runner.metadata_pool,
+                    runner.prefill_wrapper,
+                    runner.decode_wrapper,
+                    runner.attention_spec,
+                    runner.block_size,
                 )
-                result = runner._plan_attention(SimpleNamespace(context=context, layout=layout))
                 self.assertIs(result.paged_kv_indptr, wrapper._paged_kv_indptr_buf)
-                self.assertIs(
-                    result.paged_kv_last_page_len, wrapper._paged_kv_last_page_len_buf
-                )
+                self.assertIs(result.paged_kv_last_page_len, wrapper._paged_kv_last_page_len_buf)
                 if prefill:
                     self.assertIs(result.qo_indptr, wrapper._qo_indptr_buf)
                 else:
@@ -184,10 +189,7 @@ class ModelRunnerTest(unittest.TestCase):
         )
         bucket.load(layout)
         bucket.load(layout)
-        uploads = [
-            call.args[0]
-            for call in bucket._copy_layout.call_args_list
-        ]
+        uploads = [call.args[0] for call in bucket._copy_layout.call_args_list]
         self.assertEqual(uploads.count("paged_kv_indices"), 1)
         changed = SimpleNamespace(**vars(layout))
         changed.page_table_key = (16, ((42, 2, 1, 1),))
@@ -208,6 +210,9 @@ class ModelRunnerTest(unittest.TestCase):
         with patch("nanovllm.engine.model_runner.build_decode_batch_layout", return_value=object()):
             self.assertIsNone(runner._run_decode_graph(chunks, []))
         self.assertEqual(runner.decode_graph_fallbacks["layout_exceeded"], 1)
+        with patch("nanovllm.engine.model_runner.build_decode_batch_layout") as builder:
+            self.assertIsNone(runner._run_decode_graph(chunks, [], layout=object()))
+            builder.assert_not_called()
 
     def test_all_greedy_batch_avoids_temperature_upload(self):
         runner = object.__new__(ModelRunner)
@@ -222,6 +227,34 @@ class ModelRunnerTest(unittest.TestCase):
         self.assertEqual(result, [1, 0])
         runner.sampler.assert_not_called()
         runner.metadata_pool.to_cuda.assert_not_called()
+
+    def test_mixed_sampling_uses_pinned_metadata_indices(self):
+        runner = object.__new__(ModelRunner)
+        runner.sampler = Mock(return_value=torch.tensor([0, 1], dtype=torch.long))
+        uploads = []
+
+        @contextmanager
+        def fake_batch():
+            def upload(name, values, dtype):
+                uploads.append((name, tuple(values)))
+                return torch.tensor(
+                    values, dtype=torch.float32 if dtype == "float32" else torch.int64
+                )
+
+            yield upload
+
+        runner.metadata_pool = SimpleNamespace(batch=fake_batch)
+        seqs = [
+            Sequence([1], SamplingParams(temperature=0.0)),
+            Sequence([2], SamplingParams(temperature=0.8)),
+        ]
+        result = runner._sample_logits(torch.tensor([[3.0, 2.0], [1.0, 3.0]]), seqs, [0, 1])
+        self.assertEqual(result, [0, 1])
+        self.assertEqual(
+            uploads,
+            [("sample_temperatures", (0.0, 0.8)), ("sample_positions", (1,))],
+        )
+        self.assertEqual(runner.sampler.call_args.kwargs["sample_positions"].tolist(), [1])
 
     def test_visual_feature_cache_uses_text_dtype(self):
         runner = object.__new__(ModelRunner)
@@ -243,6 +276,7 @@ class ModelRunnerTest(unittest.TestCase):
         self.assertEqual(features.dtype, torch.float16)
         self.assertIs(features, state.visual_features)
         self.assertIsNone(state.pixel_values)
+        self.assertIsNone(state.image_grid_thw)
 
     def test_model_runner_exit_releases_gpu_owners(self):
         runner = object.__new__(ModelRunner)
@@ -268,6 +302,54 @@ class ModelRunnerTest(unittest.TestCase):
         bucket.release.assert_called_once()
         metadata_pool.clear.assert_called_once()
         self.assertIsNone(runner.model)
+
+    def test_gdn_capture_preserves_prompt_and_rolls_completion_cpu_tensor(self):
+        from nanovllm.engine.state_manager import GDNStateSnapshot
+
+        class Layer:
+            def __init__(self, value):
+                self.conv = torch.full((3, 4), value, dtype=torch.bfloat16)
+                self.recurrent = torch.full((2, 4), value, dtype=torch.float32)
+
+            def slot(self, _slot_id):
+                return self.conv, self.recurrent
+
+        layers = [Layer(1), Layer(2)]
+        runner = object.__new__(ModelRunner)
+        runner.model = SimpleNamespace(state_cache_modules=lambda: layers)
+        runner.block_size = 16
+        seq = Sequence(list(range(65)))
+        seq.state_slot = 0
+
+        prompt = runner.capture_live_states([(seq, 64)])[seq.seq_id]
+        self.assertIsInstance(prompt, GDNStateSnapshot)
+        seq.prompt_snapshot = prompt
+        prompt_before = tuple((conv.clone(), state.clone()) for conv, state in prompt.layers)
+
+        for layer in layers:
+            layer.conv.fill_(5)
+            layer.recurrent.fill_(6)
+        completion = runner.capture_live_states([(seq, 80)])[seq.seq_id]
+        seq.completion_snapshot = completion
+        completion_ptrs = tuple((c.data_ptr(), r.data_ptr()) for c, r in completion.layers)
+
+        for layer in layers:
+            layer.conv.fill_(7)
+            layer.recurrent.fill_(8)
+        updated = runner.capture_live_states([(seq, 96)])[seq.seq_id]
+
+        self.assertEqual(updated.num_tokens, 96)
+        self.assertEqual(
+            tuple((c.data_ptr(), r.data_ptr()) for c, r in updated.layers), completion_ptrs
+        )
+        for (actual_conv, actual_state), (saved_conv, saved_state) in zip(
+            prompt.layers, prompt_before
+        ):
+            torch.testing.assert_close(actual_conv, saved_conv)
+            torch.testing.assert_close(actual_state, saved_state)
+        for actual_conv, actual_state in updated.layers:
+            self.assertTrue(torch.all(actual_conv == 7))
+            self.assertTrue(torch.all(actual_state == 8))
 
 
 if __name__ == "__main__":
