@@ -45,7 +45,7 @@ class SchedulerAdmissionTest(unittest.TestCase):
         scheduler = make_scheduler(
             max_num_batched_tokens=8,
             max_num_seqs=2,
-            num_blocks=4,
+            num_blocks=3,
             block_size=4,
             max_prefix_cache_entries=0,
         )
@@ -57,7 +57,7 @@ class SchedulerAdmissionTest(unittest.TestCase):
         self.assertEqual(scheduled_sequences(output.decode_chunks), [running])
         self.assertEqual(scheduled_sequences(output.prefill_chunks), [waiting])
         self.assertEqual(output.prefill_tokens, 3)
-        self.assertEqual(len(scheduler.cache_manager.block_manager.free_block_ids), 1)
+        self.assertEqual(len(scheduler.cache_manager.block_manager.free_block_ids), 0)
 
     def test_admission_counts_shared_kv_blocks_only_once(self):
         scheduler = make_scheduler(

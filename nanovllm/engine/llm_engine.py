@@ -56,6 +56,8 @@ class LLMEngine:
         self.max_model_len = config.max_model_len
         self.model_runner = None
         self._closed = False
+        self._cleanup_complete = False
+        self._scheduler_cleared = False
         self._atexit_handler = None
         self.processor = None
 
@@ -98,19 +100,34 @@ class LLMEngine:
         atexit.register(cleanup)
 
     def exit(self) -> None:
-        if self._closed:
+        if getattr(self, "_cleanup_complete", False):
             return
         self._closed = True
+        failure = None
+        # Keep a failed runner reachable: its exit() may have more owners to
+        # release on retry. Scheduler cleanup is independent of runner cleanup.
+        runner = self.model_runner
+        if runner is not None:
+            try:
+                runner.exit()
+            except BaseException as exc:
+                failure = exc
+            else:
+                self.model_runner = None
+        if not getattr(self, "_scheduler_cleared", False):
+            try:
+                self.scheduler.clear()
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+            else:
+                self._scheduler_cleared = True
+        if failure is not None:
+            raise failure
+        self._cleanup_complete = True
         if self._atexit_handler is not None:
             atexit.unregister(self._atexit_handler)
             self._atexit_handler = None
-        runner = self.model_runner
-        self.model_runner = None
-        try:
-            if runner is not None:
-                runner.exit()
-        finally:
-            self.scheduler.clear()
 
     def _get_processor(self):
         if self.processor is None:
@@ -201,7 +218,8 @@ class LLMEngine:
         # One immutable prompt checkpoint plus one replaceable completion
         # checkpoint per request. Their KV pages share the same block table.
         cache = self.scheduler.cache_manager.prefix_cache
-        captures = []
+        prompt_captures = []
+        completion_updates = []
         finished = []
         block_size = cache.block_size
         for chunk, token_id in zip(chunks, result.token_ids):
@@ -224,29 +242,40 @@ class LLMEngine:
             if chunk.end % block_size:
                 continue
             if is_prefill and chunk.end == prompt_boundary and seq.prompt_snapshot is None:
-                captures.append((seq, chunk.end, "prompt"))
+                prompt_captures.append((seq, chunk.end))
             elif chunk.end > prompt_boundary and (
                 (not is_prefill) or (chunk.end == seq.num_prompt_tokens and not request_complete)
             ):
-                # Capture the final Decode boundary even when this sample ends
-                # the request. The sampled token itself was not forwarded.
-                captures.append((seq, chunk.end, "completion"))
+                # Keep the latest complete KV-block boundary on GPU; do not
+                # transfer recurrent states to CPU on intermediate Decode steps.
+                completion_updates.append((seq, chunk.end))
 
         capture_start = perf_counter()
-        captured = (
-            self.model_runner.capture_live_states([(seq, pos) for seq, pos, _ in captures])
-            if captures
+        if completion_updates:
+            self.model_runner.stage_completion_states(completion_updates)
+        prompt_snapshots = (
+            self.model_runner.capture_live_states(prompt_captures) if prompt_captures else {}
+        )
+        completion_snapshots = (
+            self.model_runner.take_completion_states(finished)
+            if finished and cache._can_capture()
             else {}
         )
-        for seq, _, kind in captures:
-            snapshot = captured.get(seq.seq_id)
+        for seq, _ in prompt_captures:
+            snapshot = prompt_snapshots.get(seq.seq_id)
             if snapshot is not None:
-                if kind == "prompt":
-                    seq.prompt_snapshot = snapshot
-                else:
-                    seq.completion_snapshot = snapshot
-                cache.stage(seq, kind)
-        self._last_snapshot_capture_seconds = perf_counter() - capture_start if captures else 0.0
+                seq.prompt_snapshot = snapshot
+                cache.stage(seq, "prompt")
+        for seq in finished:
+            snapshot = completion_snapshots.get(seq.seq_id)
+            if snapshot is not None:
+                seq.completion_snapshot = snapshot
+                cache.stage(seq, "completion")
+        self._last_snapshot_capture_seconds = (
+            perf_counter() - capture_start
+            if completion_updates or prompt_captures or completion_snapshots
+            else 0.0
+        )
 
         publications = []
         for seq in finished:

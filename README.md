@@ -13,7 +13,7 @@
 | 输入 | 文本与单图（Processor / 视觉塔），不支持多图/视频 |
 | 可选 | FP8 E4M3 KV、固定 Decode CUDA Graph bucket；Prefill Eager |
 
-GDN 循环矩阵及快照保持 FP32 `[V,K]` 布局；Prefill/Decode 统一使用 FlashInfer 0.7.0，要求 SM90/100/120 且 K/V head_dim=128。无 PyTorch GDN 计算回退，SM75（例如 RTX 2080 Ti）不支持推理。输入投影和 Dense MLP 的 Gate/Up 权重在 checkpoint 加载后打包。MoE Prefill / Decode 统一使用 FlashInfer CUTLASS。模型计算 dtype 在引擎内部固定为 `bfloat16`，无需用户传参。
+GDN 循环矩阵及快照保持 FP32 `[V,K]` 布局；Prefill/Decode 使用 FlashInfer >=0.7.0，要求 SM90/100/120 且 K/V head_dim=128。无 PyTorch GDN 计算回退，SM75（例如 RTX 2080 Ti）不支持推理。输入投影和 Dense MLP 的 Gate/Up 权重在 checkpoint 加载后打包。MoE Prefill / Decode 统一使用 FlashInfer CUTLASS。模型计算 dtype 在引擎内部固定为 `bfloat16`，无需用户传参。
 
 KV 写入统一调用 FlashInfer `append_paged_kv_cache`；FP8 路径先用 PyTorch 进行 FP32 缩放、裁剪及转换，再追加到分页缓存。项目不再直接导入 Triton 或维护 Triton kernel；依赖包可能仍间接安装或使用 Triton。
 
@@ -31,7 +31,7 @@ python example.py
 python -m scripts.chat "$NANOVLLM_MODEL"
 ```
 
-依赖以 [pyproject.toml](pyproject.toml) 为准；FlashInfer 固定 0.7.0。完整说明见 [安装与运行](docs/getting-started.md)。
+依赖以 [pyproject.toml](pyproject.toml) 为准；FlashInfer 依赖为 `flashinfer-python[cu13]>=0.7.0`。完整说明见 [安装与运行](docs/getting-started.md)。
 
 ## 文档
 
@@ -43,7 +43,7 @@ python -m scripts.chat "$NANOVLLM_MODEL"
 
 ## 提交与源码导读
 
-相对 `main` 的重构历史按职责整理为主题提交（后续修改也继续按主题提交）：`feat(model/cache/runtime)` 构成模型与执行主链；`feat(cli/validation)` 提供实验入口；`test(model/kernels/scheduler/engine/cli)` 验证模块契约；`docs` 收录设计与证据。可在 [qwen3.5 提交历史](https://github.com/Hg-Spark/nano-vllm/commits/qwen3.5/)查看最新顺序；若本地也已获取 `main` 引用，可运行 `git log --oneline main..qwen3.5`。旧版 Warmup、参考后端与重复实现均未作为独立路径保留。
+相对 `main` 的重构历史按职责整理为主题提交（后续修改也继续按主题提交）：`feat(model/cache/runtime)` 构成模型与执行主链；`feat(cli/validation)` 提供实验入口；`test(model/kernels/scheduler/engine/cli)` 验证模块契约；`docs` 收录设计与证据。可在 [hybrid-runtime 提交历史](https://github.com/Hg-Spark/nano-vllm/commits/hybrid-runtime/) 查看最新顺序；若本地也已获取 `main` 引用，可运行 `git log --oneline main..hybrid-runtime`。旧版 Warmup、参考后端与重复实现均未作为独立路径保留。
 
 建议依次阅读 [模型与运行时](docs/runtime.md) → [调度与缓存](docs/scheduling.md) → [设计取舍](docs/design-decisions.md) → [验证与性能](docs/validation.md)，避免把未运行的 GPU 验证当作功能已经通过实测。
 

@@ -54,14 +54,27 @@ class HybridCacheManagerTest(unittest.TestCase):
         cache.block_manager.deallocate(one)
         cache.block_manager.deallocate(two)
 
-    def test_disabled_prefix_uses_request_reservations(self):
-        scheduler = make_scheduler(num_blocks=16, block_size=16, max_prefix_cache_entries=0)
-        cache = scheduler.cache_manager
-        one = Sequence([1] * 65, SamplingParams(max_tokens=1))
-        two = Sequence([2] * 33, SamplingParams(max_tokens=1))
-        occupied, reserved = cache.reservation_usage((one, two))
-        self.assertEqual(occupied, set())
-        self.assertEqual(reserved, 8)
+    def test_disabled_or_underfunded_prefix_uses_request_reservations(self):
+        # Disabled cache settings should avoid scanning block tables even if
+        # requests already own physical KV pages.
+        for entries, budget, snapshot_size in ((0, None, 0), (4, 0, 64), (4, 63, 64)):
+            with self.subTest(entries=entries, budget=budget):
+                scheduler = make_scheduler(
+                    num_blocks=16,
+                    block_size=16,
+                    max_prefix_cache_entries=entries,
+                    max_prefix_cache_snapshot_bytes=budget,
+                    snapshot_nbytes=snapshot_size,
+                )
+                cache = scheduler.cache_manager
+                one = Sequence([1] * 65, SamplingParams(max_tokens=1))
+                two = Sequence([2] * 33, SamplingParams(max_tokens=1))
+                cache.block_manager.ensure_capacity(one, 16)
+                self.assertFalse(cache.prefix_cache.enabled)
+                occupied, reserved = cache.reservation_usage((one, two))
+                self.assertEqual(occupied, set())
+                self.assertEqual(reserved, 8)
+                cache.block_manager.deallocate(one)
 
     def test_failed_gdn_slot_admission_releases_shared_kv_refs(self):
         scheduler = make_scheduler(max_num_seqs=1, num_blocks=16, block_size=16)
@@ -86,20 +99,6 @@ class HybridCacheManagerTest(unittest.TestCase):
             [cache.block_manager.block_refcounts[block] for block in entry.block_ids], before
         )
         cache.release(first)
-
-    def test_cache_admission_checks_aligned_processed_state(self):
-        scheduler = make_scheduler(num_blocks=32, block_size=16)
-        cache = scheduler.cache_manager
-        seq = Sequence(list(range(30)), SamplingParams(max_tokens=3))
-        cache.block_manager.ensure_capacity(seq, 32)
-        with self.assertRaisesRegex(RuntimeError, "invalid GDN snapshot"):
-            cache.publish_batch([(seq, GDNStateSnapshot(30, ()))])
-        seq.append_token(30)
-        seq.append_token(31)
-        cache.publish_batch([(seq, GDNStateSnapshot(32, ()))])
-        before = cache.prefix_cache.published_count
-        cache.publish_batch([(seq, GDNStateSnapshot(32, ()))])
-        self.assertEqual(cache.prefix_cache.published_count, before)
 
     def test_prefill_evicts_only_enough_checkpoints_to_make_progress(self):
         scheduler = make_scheduler(num_blocks=16, block_size=16, max_prefix_cache_entries=4)
