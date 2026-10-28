@@ -1,8 +1,16 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from typing import TYPE_CHECKING
+
 import torch
 from torch import nn
 from torch.profiler import record_function
 
 from nanovllm.utils.context import Context, get_context
+
+if TYPE_CHECKING:
+    from nanovllm.engine.batch_common import PinnedMetadataPool, PreparedBatch
 
 
 def flashinfer_attention_spec(
@@ -22,6 +30,61 @@ def flashinfer_attention_spec(
             "pos_encoding_mode": "NONE",
             "sm_scale": head_dim**-0.5,
         },
+    )
+
+
+def plan_flashinfer_attention(
+    batch: PreparedBatch,
+    metadata_pool: PinnedMetadataPool,
+    prefill_wrapper,
+    decode_wrapper,
+    attention_spec: tuple,
+    block_size: int,
+) -> Context:
+    context = batch.context
+    layout = batch.layout
+    suffix = "prefill" if context.is_prefill else "decode"
+    kv_indptr = metadata_pool.host_view(f"{suffix}_kv_indptr", len(layout.paged_kv_indptr))
+    last_page_len = metadata_pool.host_view(
+        f"{suffix}_page_len", len(layout.paged_kv_last_page_len)
+    )
+    num_qo_heads, num_kv_heads, head_dim, common = attention_spec
+    if context.is_prefill:
+        prefill_wrapper.plan(
+            metadata_pool.host_view("prefill_q_offsets", len(layout.q_offsets)),
+            kv_indptr,
+            context.paged_kv_indices,
+            last_page_len,
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            causal=True,
+            **common,
+        )
+        wrapper = prefill_wrapper
+    else:
+        decode_wrapper.plan(
+            kv_indptr,
+            context.paged_kv_indices,
+            last_page_len,
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            **common,
+        )
+        wrapper = decode_wrapper
+    metadata_pool.record_plan_transfer()
+    # Eager FlashInfer 0.7.0 owns the device copies of this metadata.
+    # Share those buffers with KV append and GDN instead of uploading a
+    # duplicate Context copy before plan(). Graph buckets are separate.
+    return replace(
+        context,
+        attention_wrapper=wrapper,
+        qo_indptr=wrapper._qo_indptr_buf if context.is_prefill else None,
+        paged_kv_indptr=wrapper._paged_kv_indptr_buf,
+        paged_kv_last_page_len=wrapper._paged_kv_last_page_len_buf,
     )
 
 

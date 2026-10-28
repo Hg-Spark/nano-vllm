@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
 
-_FLASHINFER_PAGE_SIZES = (16, 32, 64, 128)
+_FLASHINFER_PAGE_SIZES = (16, 32, 64)
 
 
 _TEXT_FAMILIES = {"qwen3_5_text": "qwen3_5", "qwen3_5_moe_text": "qwen3_5_moe"}
@@ -28,6 +28,13 @@ def is_qwen3_5_moe(config) -> bool:
             f"root={root_type!r}, text={text_type!r}"
         )
     return text_type == "qwen3_5_moe_text"
+
+
+def _require_int(name: str, value: object, minimum: int = 0, *, allow_none: bool = False) -> None:
+    if value is None and allow_none:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
 
 
 def _load_hf_config(model_path: str) -> PretrainedConfig:
@@ -103,7 +110,6 @@ class Config:
     max_mixed_prefill_tokens: int | None = 128
     kv_cache_block_size: int = 16
     max_prefix_cache_entries: int = 0
-    max_gdn_checkpoints: int = 4
     max_prefix_cache_snapshot_bytes: int | None = None
     max_visual_tokens_per_request: int | None = 0
     kv_cache_dtype: str = "auto"
@@ -121,10 +127,20 @@ class Config:
         self.model = os.path.expanduser(self.model)
         if not os.path.isdir(self.model):
             raise ValueError(f"model path does not exist: {self.model}")
-        if self.max_num_batched_tokens <= 0 or self.max_num_seqs <= 0 or self.max_model_len <= 0:
-            raise ValueError(
-                "max_num_batched_tokens, max_num_seqs, and max_model_len must be positive"
-            )
+        for name in ("max_num_batched_tokens", "max_num_seqs", "max_model_len"):
+            _require_int(name, getattr(self, name), 1)
+        _require_int("kv_cache_block_size", self.kv_cache_block_size, 1)
+        _require_int("max_prefix_cache_entries", self.max_prefix_cache_entries)
+        _require_int(
+            "max_prefix_cache_snapshot_bytes",
+            self.max_prefix_cache_snapshot_bytes,
+            allow_none=True,
+        )
+        _require_int(
+            "max_visual_tokens_per_request",
+            self.max_visual_tokens_per_request,
+            allow_none=True,
+        )
         if (
             isinstance(self.activation_reserve_bytes, bool)
             or not isinstance(self.activation_reserve_bytes, int)
@@ -137,27 +153,16 @@ class Config:
             or self.max_mixed_prefill_tokens < 0
         ):
             raise ValueError("max_mixed_prefill_tokens must be None or a non-negative integer")
-        graph_sizes = tuple(int(size) for size in self.decode_graph_batch_sizes)
+        for size in self.decode_graph_batch_sizes:
+            _require_int("decode_graph_batch_sizes item", size, 1)
+        graph_sizes = tuple(self.decode_graph_batch_sizes)
         if len(graph_sizes) != len(set(graph_sizes)):
             raise ValueError("decode_graph_batch_sizes must not contain duplicates")
         max_graph_batch = min(self.max_num_seqs, self.max_num_batched_tokens)
         if any(size <= 0 or size > max_graph_batch for size in graph_sizes):
             raise ValueError("decode_graph_batch_sizes must be within batch and token limits")
         self.decode_graph_batch_sizes = tuple(sorted(graph_sizes))
-        if self.max_prefix_cache_entries < 0:
-            raise ValueError("max_prefix_cache_entries must be non-negative")
-        if self.max_gdn_checkpoints <= 0:
-            raise ValueError("max_gdn_checkpoints must be positive")
-        if (
-            self.max_prefix_cache_snapshot_bytes is not None
-            and self.max_prefix_cache_snapshot_bytes < 0
-        ):
-            raise ValueError("max_prefix_cache_snapshot_bytes must be non-negative")
-        if (
-            self.max_visual_tokens_per_request is not None
-            and self.max_visual_tokens_per_request < 0
-        ):
-            raise ValueError("max_visual_tokens_per_request must be non-negative")
+
         if self.kv_cache_dtype not in ("auto", "fp8_e4m3"):
             raise ValueError("kv_cache_dtype must be 'auto' or 'fp8_e4m3'")
         for name, scale in (
@@ -228,7 +233,8 @@ class Config:
             and self.max_visual_tokens_per_request > self.max_model_len
         ):
             raise ValueError("max_visual_tokens_per_request must be within [0, max_model_len]")
-        if getattr(
-            self.root_config, "vision_config", None
-        ) is None and self.max_visual_tokens_per_request not in (0, None):
+        if (
+            getattr(self.root_config, "vision_config", None) is None
+            and self.max_visual_tokens_per_request != 0
+        ):
             raise ValueError("max_visual_tokens_per_request requires a vision model")

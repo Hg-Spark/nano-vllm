@@ -20,6 +20,7 @@ class StepStats:
     decode_tokens: int = 0
     prefill_seconds: float = 0.0
     decode_seconds: float = 0.0
+    snapshot_capture_seconds: float = 0.0
 
 
 def _normalize_eos_token_ids(value) -> tuple[int, ...]:
@@ -28,6 +29,20 @@ def _normalize_eos_token_ids(value) -> tuple[int, ...]:
     if isinstance(value, int):
         return (value,)
     return tuple(int(token_id) for token_id in value)
+
+
+def _resolve_eos_token_ids(generation_eos, tokenizer_eos, model_eos) -> tuple[int, ...]:
+    preferred = _normalize_eos_token_ids(generation_eos)
+    if preferred:
+        return preferred
+    return tuple(
+        dict.fromkeys(
+            (
+                *_normalize_eos_token_ids(tokenizer_eos),
+                *_normalize_eos_token_ids(model_eos),
+            )
+        )
+    )
 
 
 class LLMEngine:
@@ -51,14 +66,15 @@ class LLMEngine:
 
             try:
                 generation_config = GenerationConfig.from_pretrained(config.model)
-                eos_token_ids = _normalize_eos_token_ids(generation_config.eos_token_id)
+                generation_eos = generation_config.eos_token_id
             except (OSError, ValueError):
-                eos_token_ids = ()
+                generation_eos = None
 
-            if not eos_token_ids:
-                eos_token_ids = _normalize_eos_token_ids(self.tokenizer.eos_token_id) or (
-                    _normalize_eos_token_ids(getattr(config.text_config, "eos_token_id", None))
-                )
+            eos_token_ids = _resolve_eos_token_ids(
+                generation_eos,
+                self.tokenizer.eos_token_id,
+                getattr(config.text_config, "eos_token_id", None),
+            )
             config.eos_token_ids = eos_token_ids
             self.scheduler = Scheduler(
                 config,
@@ -176,17 +192,70 @@ class LLMEngine:
         chunks: tuple[ScheduledChunk, ...],
         is_prefill: bool,
     ) -> tuple[list[tuple[int, list[int]]], float]:
+        self._last_snapshot_capture_seconds = 0.0
         if not chunks:
             return [], 0.0
         start = perf_counter()
         result = self.model_runner.run(chunks, is_prefill)
         elapsed = perf_counter() - start
-        self.scheduler.postprocess(
-            chunks,
-            result.token_ids,
-            is_prefill,
-            result.prefix_snapshots,
+        # One immutable prompt checkpoint plus one replaceable completion
+        # checkpoint per request. Their KV pages share the same block table.
+        cache = self.scheduler.cache_manager.prefix_cache
+        captures = []
+        finished = []
+        block_size = cache.block_size
+        for chunk, token_id in zip(chunks, result.token_ids):
+            seq = chunk.seq
+            partial_prefill = is_prefill and chunk.end < len(seq)
+            request_complete = (
+                not partial_prefill
+                and token_id is not None
+                and (
+                    seq.num_completion_tokens + 1 >= seq.max_tokens
+                    or (not seq.ignore_eos and token_id in self.scheduler.eos_token_ids)
+                )
+            )
+            if request_complete:
+                finished.append(seq)
+            if not cache._can_capture() or seq.image_state is not None:
+                continue
+
+            prompt_boundary = ((seq.num_prompt_tokens - 1) // block_size) * block_size
+            if chunk.end % block_size:
+                continue
+            if is_prefill and chunk.end == prompt_boundary and seq.prompt_snapshot is None:
+                captures.append((seq, chunk.end, "prompt"))
+            elif chunk.end > prompt_boundary and (
+                (not is_prefill) or (chunk.end == seq.num_prompt_tokens and not request_complete)
+            ):
+                # Capture the final Decode boundary even when this sample ends
+                # the request. The sampled token itself was not forwarded.
+                captures.append((seq, chunk.end, "completion"))
+
+        capture_start = perf_counter()
+        captured = (
+            self.model_runner.capture_live_states([(seq, pos) for seq, pos, _ in captures])
+            if captures
+            else {}
         )
+        for seq, _, kind in captures:
+            snapshot = captured.get(seq.seq_id)
+            if snapshot is not None:
+                if kind == "prompt":
+                    seq.prompt_snapshot = snapshot
+                else:
+                    seq.completion_snapshot = snapshot
+                cache.stage(seq, kind)
+        self._last_snapshot_capture_seconds = perf_counter() - capture_start if captures else 0.0
+
+        publications = []
+        for seq in finished:
+            for snapshot in (seq.prompt_snapshot, seq.completion_snapshot):
+                if snapshot is not None:
+                    publications.append((seq, snapshot))
+        if publications:
+            self.scheduler.cache_manager.publish_batch(publications)
+        self.scheduler.postprocess(chunks, result.token_ids, is_prefill)
         outputs = [
             (chunk.seq.seq_id, chunk.seq.completion_token_ids)
             for chunk in chunks
@@ -205,7 +274,9 @@ class LLMEngine:
                 decode_tokens=scheduled.decode_tokens,
             )
             decode_outputs, stats.decode_seconds = self._run_batch(scheduled.decode_chunks, False)
+            stats.snapshot_capture_seconds += self._last_snapshot_capture_seconds
             prefill_outputs, stats.prefill_seconds = self._run_batch(scheduled.prefill_chunks, True)
+            stats.snapshot_capture_seconds += self._last_snapshot_capture_seconds
             completed = True
             return decode_outputs + prefill_outputs, stats
         finally:
