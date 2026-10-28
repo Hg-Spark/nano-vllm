@@ -194,6 +194,15 @@ def measured_graph_usage(runner, before, decode_calls):
     }
 
 
+def require_throughput_graph_coverage(graph_metrics: dict, minimum: float) -> None:
+    """Enforce measured graph coverage, excluding setup and warmup replays."""
+    if graph_metrics["graph_replays"] and graph_metrics["graph_coverage"] >= minimum:
+        return
+    raise RuntimeError(
+        f"Graph coverage {graph_metrics['graph_coverage']:.1%} below required {minimum:.1%}"
+    )
+
+
 def run_fixed_decode(engine, a):
     """Measure real Scheduler + ModelRunner at a fixed active decode batch."""
     import torch
@@ -419,18 +428,8 @@ def run(a):
                 engine.model_runner, graph_before, metrics["decode_forward_calls"]
             )
             metrics.update(graph_metrics)
-            if (
-                a.graph_sizes
-                and a.scenario == "throughput"
-                and (
-                    not graph_metrics["graph_replays"]
-                    or graph_metrics["graph_coverage"] < a.min_graph_coverage
-                )
-            ):
-                raise RuntimeError(
-                    f"Graph coverage {graph_metrics['graph_coverage']:.1%} "
-                    f"below required {a.min_graph_coverage:.1%}"
-                )
+            if a.graph_sizes and a.scenario == "throughput":
+                require_throughput_graph_coverage(graph_metrics, a.min_graph_coverage)
         if track_schedule:
             details["scheduled_prefill_tokens_including_setup"] = sched_prefill_tokens
         result = {
