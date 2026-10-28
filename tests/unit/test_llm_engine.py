@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from nanovllm.engine.llm_engine import LLMEngine
+from nanovllm.engine.llm_engine import LLMEngine, _resolve_eos_token_ids
 from nanovllm.engine.schedule import BatchResult
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
@@ -42,6 +42,10 @@ class DecodeThenFailPrefillRunner:
 
 
 class LLMEngineStepTest(unittest.TestCase):
+    def test_eos_sources_keep_generation_config_authoritative(self):
+        self.assertEqual(_resolve_eos_token_ids([7, 8], 9, [10, 11]), (7, 8))
+        self.assertEqual(_resolve_eos_token_ids(None, 9, [10, 9, 11]), (9, 10, 11))
+
     def test_add_request_returns_id_used_by_scheduler(self):
         engine = make_engine_stub()
         engine.scheduler = make_engine_scheduler()
@@ -57,7 +61,7 @@ class LLMEngineStepTest(unittest.TestCase):
     def test_decode_failure_disables_engine(self):
         scheduler = make_scheduler(max_num_seqs=2, num_blocks=32, block_size=4, eos_token_ids=(99,))
         running = make_running_sequence(scheduler, list(range(65)))
-        scheduler.block_manager.prefix_cache.publish_many(running, (GDNStateSnapshot(64, ()),))
+        scheduler.cache_manager.prefix_cache.publish_many(running, (GDNStateSnapshot(64, ()),))
         image = SimpleNamespace(visual_features=object(), image_start=0)
         scheduler.add(Sequence([3, 4], SamplingParams(max_tokens=2), image_state=image))
         engine = make_engine_stub()
@@ -69,9 +73,10 @@ class LLMEngineStepTest(unittest.TestCase):
 
         self.assertTrue(engine._closed)
         self.assertTrue(scheduler.is_finished())
-        self.assertEqual(len(scheduler.block_manager.prefix_cache), 0)
+        self.assertEqual(len(scheduler.cache_manager.prefix_cache), 0)
         self.assertEqual(
-            len(scheduler.block_manager.free_block_ids), scheduler.block_manager.num_blocks
+            len(scheduler.cache_manager.block_manager.free_block_ids),
+            scheduler.cache_manager.block_manager.num_blocks,
         )
         self.assertIsNone(image.visual_features)
         engine.exit()  # Repeated cleanup is safe.

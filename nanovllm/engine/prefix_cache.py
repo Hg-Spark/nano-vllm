@@ -102,7 +102,7 @@ class PrefixCache:
         # max_entries) instead of rescanning every old checkpoint each chunk.
         step = lcm(GDN_CHECKPOINT_INTERVAL, self.block_size)
         cached = []
-        for position in self._resident_lengths[:bisect_right(self._resident_lengths, end)]:
+        for position in self._resident_lengths[: bisect_right(self._resident_lengths, end)]:
             if position % step:
                 continue
             digest = hashes[position // self.block_size - 1]
@@ -122,7 +122,10 @@ class PrefixCache:
         return limit
 
     def select_checkpoints(
-        self, candidates: list[tuple[int, bytes]], cached: list[int]
+        self,
+        candidates: list[tuple[int, bytes]],
+        cached: list[int],
+        max_reusable_tokens: int | None = None,
     ) -> list[tuple[int, bytes]]:
         """Choose useful checkpoints within the effective global/per-path capacity."""
         if not candidates:
@@ -130,6 +133,14 @@ class PrefixCache:
         limit = self._path_limit()
         if limit <= 0:
             return []
+        if max_reusable_tokens is not None and (limit == 1 or cached):
+            # A checkpoint at the full prompt length cannot resume another
+            # identical prompt, since its last token still needs a forward pass.
+            reusable = [pair for pair in candidates if pair[0] <= max_reusable_tokens]
+            if reusable:
+                candidates = reusable
+            elif cached and cached[-1] <= max_reusable_tokens:
+                return []
         if limit == 1 and cached and cached[-1] > candidates[-1][0]:
             return []
         if limit == 1 or cached:
@@ -181,6 +192,7 @@ class PrefixCache:
         if len(by_position) != len(snapshots) or any(
             position <= 0
             or position > seq.num_prompt_tokens
+            or (seq.image_state is not None and position > seq.image_state.image_start)
             or position % self.block_size
             or position % GDN_CHECKPOINT_INTERVAL
             for position in by_position
@@ -298,11 +310,18 @@ class PrefixCache:
     def evict(self, block_refcounts: list[int] | None = None) -> bool:
         if not self._entries:
             return False
+        # Evict cold checkpoints first. Active requests retain their own KV
+        # references, but dropping a reused checkpoint hurts future hits.
+        candidates = [
+            key for key in self._entries if self._active_reuses.get(key, 0) == 0
+        ]
+        if not candidates:
+            candidates = list(self._entries)
         if block_refcounts is None:
-            victim = next(iter(self._entries))
+            victim = candidates[0]
         else:
             victim = max(
-                self._entries,
+                candidates,
                 key=lambda key: sum(
                     block_refcounts[block_id] == 1 for block_id in self._entries[key].block_ids
                 ),

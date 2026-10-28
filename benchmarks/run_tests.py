@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-STAGES = ("all", "check", "bench", "tail", "long", "capacity")
+STAGES = ("all", "check", "bench", "tail", "long", "prefix", "capacity")
 
 
 def load_config(path, root=ROOT, stage=None):
@@ -53,19 +53,33 @@ def run_logged(name, command, output, env):
 
 
 def execute(config, output):
+    kv = config.get("kv_cache", {})
+    kv_dtype = kv.get("dtype", "auto")
+    kv_k_scale = kv.get("k_scale", 1.0)
+    kv_v_scale = kv.get("v_scale", 1.0)
+    kv_args = [
+        "--kv-cache-dtype",
+        str(kv_dtype),
+        "--kv-cache-k-scale",
+        str(kv_k_scale),
+        "--kv-cache-v-scale",
+        str(kv_v_scale),
+    ]
     env = {
         **os.environ,
         "CUDA_VISIBLE_DEVICES": config["gpu"],
         "NANOVLLM_MODEL": config["model"],
-        "NANOVLLM_DTYPE": config["dtype"],
-        "REPEATS": str(config["repeats"]),
+        "REPEATS": str(config["benchmark"].get("repeats", config.get("repeats", 5))),
+        "NANOVLLM_KV_CACHE_DTYPE": str(kv_dtype),
+        "NANOVLLM_KV_CACHE_K_SCALE": str(kv_k_scale),
+        "NANOVLLM_KV_CACHE_V_SCALE": str(kv_v_scale),
         "PYTHON": sys.executable,
         "PYTHONUNBUFFERED": "1",
         "MAX_JOBS": str(config["correctness"]["max_jobs"]),
         "FLASHINFER_NVCC_THREADS": str(config["correctness"]["nvcc_threads"]),
     }
     env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
-    model = [config["model"], "--dtype", config["dtype"]]
+    model = [config["model"]]
     current = "nvidia-smi"
 
     def run(name, args):
@@ -89,6 +103,7 @@ def execute(config, output):
                 check = config["correctness"]
                 common = [
                     *model,
+                    *kv_args,
                     "--max-new-tokens",
                     str(check["max_new_tokens"]),
                     "--max-model-len",
@@ -129,11 +144,36 @@ def execute(config, output):
                         str(output / "prefix-parity.json"),
                     ],
                 )
-            elif stage in ("bench", "tail", "long"):
+            elif stage in ("bench", "tail", "long", "prefix"):
+                if stage == "prefix":
+                    # Verify joint KV/GDN restore boundaries before timing cache hits.
+                    for block_size, shared, budget in (
+                        (16, 128, 65),
+                        (32, 256, 129),
+                        (64, 256, 129),
+                    ):
+                        python(
+                            f"prefix-resume-b{block_size}",
+                            "scripts.verify_prefix_resume",
+                            [
+                                *model,
+                                *kv_args,
+                                "--max-new-tokens",
+                                "16",
+                                "--max-model-len",
+                                "1024",
+                                "--prefix-block-size",
+                                str(block_size),
+                                "--shared-prefix-len",
+                                str(shared),
+                                "--prefill-budget",
+                                str(budget),
+                            ],
+                        )
                 mode = config["benchmark"]["mode"] if stage == "bench" else stage
                 run(stage, ["bash", "benchmarks/run.sh", mode])
             elif stage == "capacity":
-                args = [*model, "--out-dir", str(output / "capacity")]
+                args = [*model, *kv_args, "--out-dir", str(output / "capacity")]
                 for key, value in config["capacity"].items():
                     args.extend(["--" + key.replace("_", "-"), str(value)])
                 python("capacity", "benchmarks.capacity_search", args)

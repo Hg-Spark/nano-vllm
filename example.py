@@ -1,6 +1,5 @@
 import os
 
-from transformers import AutoTokenizer
 
 from nanovllm import LLM, SamplingParams
 
@@ -10,13 +9,12 @@ def main():
     if not model:
         raise SystemExit("Set NANOVLLM_MODEL to a Qwen3.5 Dense or MoE checkpoint directory")
     path = os.path.expanduser(model)
-    tokenizer = AutoTokenizer.from_pretrained(path)
-
     llm = LLM(
         path,
         max_num_batched_tokens=256,
         max_num_seqs=2,
     )
+    tokenizer = llm.tokenizer
     prompts = [
         "Explain why KV cache helps autoregressive inference.",
         "What makes a sparse MoE layer different from a dense FFN?",

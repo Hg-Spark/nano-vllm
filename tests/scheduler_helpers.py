@@ -32,8 +32,8 @@ def make_scheduler(
 
 def make_running_sequence(scheduler, token_ids):
     seq = Sequence(token_ids, SamplingParams(max_tokens=2))
-    scheduler.block_manager.ensure_capacity(seq, len(seq))
-    scheduler.state_manager.allocate(seq)
+    scheduler.cache_manager.block_manager.ensure_capacity(seq, len(seq))
+    scheduler.cache_manager.state_manager.allocate(seq)
     seq.committed_tokens = len(seq) - 1
     scheduler.running.append(seq)
     return seq

@@ -42,6 +42,11 @@ class CacheRuntimeTest(unittest.TestCase):
         layer = SimpleNamespace(k_cache=None, v_cache=None)
         state = SimpleNamespace(
             state_cache_nbytes=lambda slots: 128,
+            # 64B recurrent + 64B convolution history per live slot.
+            num_v_heads=1,
+            head_k_dim=4,
+            head_v_dim=4,
+            recurrent_state=torch.empty(0, dtype=torch.float32),
             allocate_state_cache=Mock(),
         )
         model = SimpleNamespace(
@@ -59,6 +64,7 @@ class CacheRuntimeTest(unittest.TestCase):
             kv_cache_block_size=16,
             max_num_seqs=2,
             max_prefix_cache_entries=0,
+            max_gdn_checkpoints=4,
             max_prefix_cache_snapshot_bytes=None,
             max_num_batched_tokens=512,
             text_config=SimpleNamespace(num_key_value_heads=1, head_dim=8),

@@ -1,37 +1,19 @@
 from collections import deque
 from collections.abc import Iterable
 
-from nanovllm.engine.prefix_cache import PrefixCache
 from nanovllm.engine.sequence import Sequence
 
 
 class BlockManager:
     """Paged-KV allocator with request-local growth and shared-prefix refs."""
 
-    def __init__(
-        self,
-        num_blocks: int,
-        block_size: int,
-        max_prefix_entries: int = 0,
-        max_prefix_cache_snapshot_bytes: int | None = None,
-        snapshot_nbytes: int = 0,
-        max_checkpoints_per_path: int = 4,
-    ) -> None:
-        if num_blocks <= 0 or max_prefix_entries < 0:
-            raise ValueError("num_blocks must be positive and max_prefix_entries non-negative")
+    def __init__(self, num_blocks: int, block_size: int) -> None:
+        if num_blocks <= 0 or block_size <= 0:
+            raise ValueError("num_blocks and block_size must be positive")
         self.block_size = block_size
         self.num_blocks = num_blocks
         self.free_block_ids: deque[int] = deque(range(num_blocks))
         self.block_refcounts = [0] * num_blocks
-        self.prefix_cache = PrefixCache(
-            block_size,
-            max_prefix_entries,
-            self.retain_blocks,
-            self.release_blocks,
-            max_snapshot_bytes=max_prefix_cache_snapshot_bytes,
-            snapshot_nbytes=snapshot_nbytes,
-            max_checkpoints_per_path=max_checkpoints_per_path,
-        )
 
     def _allocate_block(self) -> int:
         if not self.free_block_ids:
@@ -91,7 +73,6 @@ class BlockManager:
         seq.block_table_version += 1
 
     def deallocate(self, seq: Sequence) -> None:
-        self.prefix_cache.unmark_reused(seq)
         if seq.block_table:
             self.release_blocks(seq.block_table)
             seq.block_table.clear()

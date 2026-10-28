@@ -30,6 +30,20 @@ def _normalize_eos_token_ids(value) -> tuple[int, ...]:
     return tuple(int(token_id) for token_id in value)
 
 
+def _resolve_eos_token_ids(generation_eos, tokenizer_eos, model_eos) -> tuple[int, ...]:
+    preferred = _normalize_eos_token_ids(generation_eos)
+    if preferred:
+        return preferred
+    return tuple(
+        dict.fromkeys(
+            (
+                *_normalize_eos_token_ids(tokenizer_eos),
+                *_normalize_eos_token_ids(model_eos),
+            )
+        )
+    )
+
+
 class LLMEngine:
     def __init__(self, model, **kwargs) -> None:
         from transformers import AutoTokenizer, GenerationConfig
@@ -51,14 +65,15 @@ class LLMEngine:
 
             try:
                 generation_config = GenerationConfig.from_pretrained(config.model)
-                eos_token_ids = _normalize_eos_token_ids(generation_config.eos_token_id)
+                generation_eos = generation_config.eos_token_id
             except (OSError, ValueError):
-                eos_token_ids = ()
+                generation_eos = None
 
-            if not eos_token_ids:
-                eos_token_ids = _normalize_eos_token_ids(self.tokenizer.eos_token_id) or (
-                    _normalize_eos_token_ids(getattr(config.text_config, "eos_token_id", None))
-                )
+            eos_token_ids = _resolve_eos_token_ids(
+                generation_eos,
+                self.tokenizer.eos_token_id,
+                getattr(config.text_config, "eos_token_id", None),
+            )
             config.eos_token_ids = eos_token_ids
             self.scheduler = Scheduler(
                 config,

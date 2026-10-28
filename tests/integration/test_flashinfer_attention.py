@@ -14,7 +14,7 @@ from nanovllm.engine.decode_graph import DecodeGraphBucket
 from nanovllm.engine.model_runner import ModelRunner
 from nanovllm.engine.schedule import ScheduledChunk
 from nanovllm.engine.sequence import Sequence
-from nanovllm.layers.attention import Attention, store_kv_cache
+from nanovllm.layers.attention import Attention, plan_flashinfer_attention, store_kv_cache
 from nanovllm.utils.context import Context, use_context
 
 
@@ -23,8 +23,8 @@ def _has_cuda_gpu() -> bool:
 
 
 @unittest.skipUnless(
-    _has_cuda_gpu(),
-    "FlashInfer integration tests require a CUDA GPU",
+    _has_cuda_gpu() and torch.cuda.is_bf16_supported(),
+    "FlashInfer integration tests require CUDA BF16",
 )
 class FlashInferPagedAttentionIntegrationTest(unittest.TestCase):
     PAGE_SIZE = 16
@@ -32,11 +32,7 @@ class FlashInferPagedAttentionIntegrationTest(unittest.TestCase):
     NUM_KV_HEADS = 2
     HEAD_DIM = 256
     SCALE = HEAD_DIM**-0.5
-    DTYPE = (
-        torch.bfloat16
-        if _has_cuda_gpu() and torch.cuda.get_device_capability()[0] >= 8
-        else torch.float16
-    )
+    DTYPE = torch.bfloat16
 
     def setUp(self):
         torch.manual_seed(0)
@@ -73,10 +69,15 @@ class FlashInferPagedAttentionIntegrationTest(unittest.TestCase):
         )
         try:
             prefill = prepare_prefill((ScheduledChunk(seq, 0, 4),), 16, runner.metadata_pool)
-            prefill_ctx = runner._plan_attention(prefill)
-            self.assertIs(
-                prefill_ctx.paged_kv_indptr, runner.prefill_wrapper._paged_kv_indptr_buf
+            prefill_ctx = plan_flashinfer_attention(
+                prefill,
+                runner.metadata_pool,
+                runner.prefill_wrapper,
+                runner.decode_wrapper,
+                runner.attention_spec,
+                runner.block_size,
             )
+            self.assertIs(prefill_ctx.paged_kv_indptr, runner.prefill_wrapper._paged_kv_indptr_buf)
             self.assertIs(
                 prefill_ctx.paged_kv_last_page_len,
                 runner.prefill_wrapper._paged_kv_last_page_len_buf,
@@ -93,10 +94,15 @@ class FlashInferPagedAttentionIntegrationTest(unittest.TestCase):
                 runner.metadata_pool,
                 DecodePageTableCache(),
             )
-            decode_ctx = runner._plan_attention(decode)
-            self.assertIs(
-                decode_ctx.paged_kv_indptr, runner.decode_wrapper._paged_kv_indptr_buf
+            decode_ctx = plan_flashinfer_attention(
+                decode,
+                runner.metadata_pool,
+                runner.prefill_wrapper,
+                runner.decode_wrapper,
+                runner.attention_spec,
+                runner.block_size,
             )
+            self.assertIs(decode_ctx.paged_kv_indptr, runner.decode_wrapper._paged_kv_indptr_buf)
             self.assertIs(
                 decode_ctx.paged_kv_last_page_len,
                 runner.decode_wrapper._paged_kv_last_page_len_buf,

@@ -23,13 +23,13 @@ class SchedulerPrefixCacheTest(unittest.TestCase):
         cached_block = original.block_table[0]
         snapshot = GDNStateSnapshot(num_tokens=64, layers=())
         scheduler.postprocess(first.prefill_chunks, [None], True, {original.seq_id: (snapshot,)})
-        self.assertEqual(len(scheduler.block_manager.prefix_cache), 1)
-        self.assertEqual(scheduler.block_manager.block_refcounts[cached_block], 2)
+        self.assertEqual(len(scheduler.cache_manager.prefix_cache), 1)
+        self.assertEqual(scheduler.cache_manager.block_manager.block_refcounts[cached_block], 2)
 
         final = scheduler.schedule()
         scheduler.postprocess(final.prefill_chunks, [99], True)
         self.assertTrue(original.is_finished)
-        self.assertEqual(scheduler.block_manager.block_refcounts[cached_block], 1)
+        self.assertEqual(scheduler.cache_manager.block_manager.block_refcounts[cached_block], 1)
 
         newcomer = Sequence(list(range(64)) + [80], SamplingParams(max_tokens=1))
         scheduler.add(newcomer)
@@ -39,7 +39,7 @@ class SchedulerPrefixCacheTest(unittest.TestCase):
         self.assertIs(newcomer.pending_state_snapshot, snapshot)
         self.assertEqual(newcomer.block_table[0], cached_block)
         self.assertEqual(resumed.prefill_chunks[0].num_tokens, 1)
-        self.assertEqual(scheduler.block_manager.block_refcounts[cached_block], 2)
+        self.assertEqual(scheduler.cache_manager.block_manager.block_refcounts[cached_block], 2)
 
     def test_aligned_prompt_restores_reusable_partial_prefix(self):
         scheduler = make_scheduler(
@@ -80,8 +80,8 @@ class SchedulerPrefixCacheTest(unittest.TestCase):
             block_size=16,
         )
         seq = Sequence(list(range(4097)), SamplingParams(max_tokens=1))
-        scheduler.block_manager.ensure_capacity(seq, 1100)
-        scheduler.state_manager.allocate(seq)
+        scheduler.cache_manager.block_manager.ensure_capacity(seq, 1100)
+        scheduler.cache_manager.state_manager.allocate(seq)
         seq.committed_tokens = 1100
         scheduler.prefilling.append(seq)
 

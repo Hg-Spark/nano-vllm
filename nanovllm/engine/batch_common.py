@@ -71,15 +71,18 @@ class DecodePageTableCache:
         self._indices = ()
 
     def get(self, seqs: list[Sequence], kv_lens: list[int], block_size: int):
-        key = (block_size, tuple(
-            (
-                seq.seq_id,
-                seq.block_table_version,
-                len(seq.block_table),
-                (kv_len + block_size - 1) // block_size,
-            )
-            for seq, kv_len in zip(seqs, kv_lens)
-        ))
+        key = (
+            block_size,
+            tuple(
+                (
+                    seq.seq_id,
+                    seq.block_table_version,
+                    len(seq.block_table),
+                    (kv_len + block_size - 1) // block_size,
+                )
+                for seq, kv_len in zip(seqs, kv_lens)
+            ),
+        )
         if key != self._key:
             indptr, indices, _ = _paged_kv_metadata(seqs, kv_lens, block_size)
             self._key = key
@@ -217,6 +220,8 @@ class PinnedMetadataPool:
         # FlashInfer's plan may enqueue additional copies from pinned host metadata.
         import torch
 
+        if self._transfer_done is None:
+            self._transfer_done = torch.cuda.Event()
         self._transfer_done.record(torch.cuda.current_stream())
         self._pending = True
 
@@ -312,8 +317,8 @@ def build_decode_batch_layout(
         )
         page_table_key = None
     else:
-        paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len, page_table_key = (
-            page_cache.get(seqs, kv_lens, block_size)
+        paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len, page_table_key = page_cache.get(
+            seqs, kv_lens, block_size
         )
     return DecodeBatchLayout(
         input_ids=tuple(seq[-1] for seq in seqs),

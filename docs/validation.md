@@ -1,6 +1,6 @@
 # 验证与性能分析
 
-本页集中维护命令、覆盖范围与结果判定。实验报告需保存环境、模型 revision、输入、配置、原始指标及验证状态。模型计算 dtype 必须显式指定为 `bfloat16`，没有 `auto` 默认值。
+本页集中维护命令、覆盖范围与结果判定。实验报告需保存环境、模型 revision、输入、配置、原始指标及验证状态。模型计算精度固定为 BF16，无需显式传入 `dtype`；KV Cache 精度通过独立参数控制。
 
 ## 顺序测试脚本
 
@@ -22,7 +22,7 @@ bash benchmarks/run_tests.sh configs/tests.toml
 
 普通依赖默认使用[清华 PyPI 镜像](https://mirrors.tuna.tsinghua.edu.cn/help/pypi/)，PyTorch 使用官方 CUDA 源。临时切换普通依赖的镜像可在运行前设置 `export UV_DEFAULT_INDEX=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple`。
 
-默认执行 `check`：GPU 信息采集、单元/集成测试、32-token HF 贪心对齐和前缀恢复对齐。性能测试需显式选择 `bench`、`tail`、`long` 或 `capacity`；正式 A/B 对照将 `repeats` 设置为至少 5。各阶段失败即停止，配置、原始 JSON、日志与 `status.txt` 保存在 `results/run_<UTC时间>/`。每次 `check` 都重新执行，不使用历史成功标记跳过。
+默认执行 `check`：GPU 信息采集、单元/集成测试、32-token HF 贪心对齐和前缀恢复对齐。性能测试需显式选择 `bench`、`tail`、`long` 或 `capacity`；正式 A/B 对照将 `[benchmark].repeats` 设置为至少 5。各阶段失败即停止，配置、原始 JSON、日志与 `status.txt` 保存在 `results/run_<UTC时间>/`。每次 `check` 都重新执行，不使用历史成功标记跳过。
 
 单元测试和集成测试分别运行，实时显示每个用例，首次失败立即停止并打印简短堆栈，输出同时写入 `unit-tests.log` 和 `integration-tests.log`。`[correctness]` 的 `max_jobs`、`nvcc_threads` 默认均为 1，控制所有阶段的 FlashInfer JIT 编译并发；它们不限制测试请求并发数，也不保证内存峰值低于某个上限。
 
@@ -58,7 +58,7 @@ bash benchmarks/run_tests.sh configs/tests.toml capacity
 bash benchmarks/run_tests.sh --help
 ```
 
-模型、精度、GPU、重复次数与各阶段参数统一在 TOML 中修改。路径支持 `~` 和环境变量，相对路径以项目根目录为基准。
+模型路径、KV Cache 精度与 Scale、GPU、Benchmark 重复次数及各阶段参数统一在 TOML 中修改。路径支持 `~` 和环境变量，相对路径以项目根目录为基准。
 
 `[benchmark].mode` 用于 `bench` 或 `all` 阶段，只接受 `smoke`、`full`；`tail`、`long` 通过独立阶段或直接调用 `run.sh`，避免 `all` 重复执行。具体负载以原始 JSON 为准。汇总脚本不要求额外 Git 元数据；遇到 `PARITY FAILURE` 应保留失败，不绕过输出一致性检查。Tail 的基线为 Step-exclusive Decode-first，容量搜索未启用 Joint Prefix Cache，不能据此填写“前缀缓存使最大并发提升 X%”。
 
@@ -66,14 +66,13 @@ bash benchmarks/run_tests.sh --help
 
 ```bash
 export NANOVLLM_MODEL=/absolute/path/to/Qwen3.5
-export NANOVLLM_DTYPE=bfloat16
 python -m pytest tests/unit -q
 python -m pytest tests/integration -q
-python -m scripts.verify_qwen3_5 "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE"
-python -m scripts.verify_prefix_resume "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE"
-python -m benchmarks.bench_experiments "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
+python -m scripts.verify_qwen3_5 "$NANOVLLM_MODEL"
+python -m scripts.verify_prefix_resume "$NANOVLLM_MODEL"
+python -m benchmarks.bench_experiments "$NANOVLLM_MODEL" \
   --scenario throughput --out results/throughput.json
-python -m scripts.profile_decode "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE"
+python -m scripts.profile_decode "$NANOVLLM_MODEL"
 ```
 
 需要分别记录 PASS / FAIL / SKIP；GDN 固定要求 SM90/100/120 且 K/V head_dim=128，MoE 还受 FlashInfer CUTLASS 架构范围约束。SM75 的 Dense/MoE 均不支持。
@@ -111,13 +110,13 @@ CUTLASS MoE 集成测试未在受支持 GPU 上运行时必须保留 PENDING/SKI
 ## 比较真实权重的生成结果
 
 ```bash
-python -m scripts.verify_qwen3_5 "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
+python -m scripts.verify_qwen3_5 "$NANOVLLM_MODEL" \
   --prompt "请解释自回归推理为什么需要 KV cache。" \
   --max-new-tokens 32 \
   --max-model-len 4096
 ```
 
-脚本先运行 Transformers 参考模型，再运行本实现。HF 使用显式传入的 `--dtype`（与 nano-vLLM 相同）、关闭随机采样并取消 EOS 提前结束；本实现使用 `temperature=0.0`、`ignore_eos=True`。除生成部分的 token ID 严格一致外，还通过两侧 `lm_head` Hook 比较每个生成步骤的原始 logits（包括 Prefill 最后位置与后续 Decode）。逐步计算 `RMS(Nano - HF) / max(RMS(HF), 1e-12)`，默认阈值为 `0.05`，可通过 `--logits-relative-rms-threshold` 修改。结果保存每步相对 RMS 与最大绝对误差，不保存完整词表 logits。
+脚本先运行 Transformers 参考模型，再运行本实现。HF 固定使用 BF16（与 nano-vLLM 相同）、关闭随机采样并取消 EOS 提前结束；本实现使用 `temperature=0.0`、`ignore_eos=True`。除生成部分的 token ID 严格一致外，还通过两侧 `lm_head` Hook 比较每个生成步骤的原始 logits（包括 Prefill 最后位置与后续 Decode）。逐步计算 `RMS(Nano - HF) / max(RMS(HF), 1e-12)`，默认阈值为 `0.05`，可通过 `--logits-relative-rms-threshold` 修改。结果保存每步相对 RMS 与最大绝对误差，不保存完整词表 logits。
 
 文本、单图对齐和逐层诊断在 MoE 模型上显式指定 HF 的专家后端：`--hf-experts-backend`
 接受 `eager`、`batched_mm`、`grouped_mm`，默认 `eager`，不接受 `auto`。
@@ -135,7 +134,7 @@ token 对齐成功输出 `PASS: greedy token sequences match exactly`，logits �
 ### 单图、Chunked Prefill 与 Decode Graph
 
 ```bash
-python -m scripts.verify_qwen3_5_multimodal "$NANOVLLM_MODEL" /path/to/image.jpg --dtype "$NANOVLLM_DTYPE" \
+python -m scripts.verify_qwen3_5_multimodal "$NANOVLLM_MODEL" /path/to/image.jpg \
   --max-num-batched-tokens 256 \
   --decode-graph
 ```
@@ -145,7 +144,7 @@ python -m scripts.verify_qwen3_5_multimodal "$NANOVLLM_MODEL" /path/to/image.jpg
 ## 不一致时做逐层诊断
 
 ```bash
-python -m scripts.diagnose_qwen3_5 "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
+python -m scripts.diagnose_qwen3_5 "$NANOVLLM_MODEL" \
   --prompt "请解释自回归推理为什么需要 KV cache。" \
   --max-probe-tokens 64 \
   --relative-rms-threshold 0.02
@@ -174,8 +173,8 @@ relative_rms = RMS(nano - HF) / max(RMS(HF), 1e-12)
 先运行 HF 贪心对齐，再独立检查**关闭联合前缀复用**与**启用联合前缀恢复**时的贪心续算：
 
 ```bash
-python -m scripts.verify_qwen3_5 "$NANOVLLM_MODEL" --max-new-tokens 32 --dtype "$NANOVLLM_DTYPE"
-python -m scripts.verify_prefix_resume "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
+python -m scripts.verify_qwen3_5 "$NANOVLLM_MODEL" --max-new-tokens 32
+python -m scripts.verify_prefix_resume "$NANOVLLM_MODEL" \
   --max-new-tokens 32 --prefix-block-size 16
 ```
 
@@ -187,7 +186,7 @@ python -m scripts.verify_prefix_resume "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYP
 4. 运行 B，复用共享 KV 并恢复保持原始状态精度的 GDN 快照。
 5. 比较 B 的两条生成序列，并输出快照边界和大小。
 
-第二阶段比较的是“不开启联合前缀复用”与“恢复联合前缀快照”，**两者都使用正常 Paged KV 和持久 GDN State Slot**，并不是已移除的无持久缓存 Warmup。此项不能单独当作 HF 对齐证明。若没有产生缓存条目，探针会失败。该探针在 KV Block Size 为 16/32 时仍构造至少 64 Token 的共享前缀，以匹配固定 GDN Checkpoint 网格。验证脚本已独立 Hook `restore_gdn_state()`，并检查 `restore_boundary` 与共享 KV Block，避免仅凭缓存条目推断真实命中。
+第二阶段比较的是“不开启联合前缀复用”与“恢复联合前缀快照”，**两者都使用正常 Paged KV 和持久 GDN State Slot**，并不是已移除的无持久缓存 Warmup。此项不能单独当作 HF 对齐证明。若没有产生缓存条目，探针会失败。该探针在 KV Block Size 为 16/32/64 时仍构造至少 64 Token 的共享前缀，以匹配固定 GDN Checkpoint 网格。验证脚本通过包装 `GDNRestoreStaging.restore()` 观察实际恢复调用，并检查 `restore_boundary` 与共享 KV Block，避免仅凭缓存条目推断真实命中。
 
 将误差指标记录在独立的本地实验结果中。当前 snapshot 不再主动降精度；恢复验证仍用于发现状态边界、复制或其他执行路径问题。
 
@@ -196,7 +195,7 @@ Prefix Cache 的 GPU KV 静态容量会按每请求最多两个选中 Checkpoint
 ## 测量端到端性能
 
 ```bash
-python -m benchmarks.bench_experiments "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
+python -m benchmarks.bench_experiments "$NANOVLLM_MODEL" \
   --scenario throughput --num-requests 8 --input-len 256 --output-len 32 \
   --max-num-seqs 4 --budget 512 --max-model-len 4096 \
   --out results/throughput.json
@@ -226,7 +225,7 @@ Prefix Cache 默认关闭；使用 `--scenario prefix --cache-entries 32` 可测
 ### 长 Prompt 干扰实验
 
 ```bash
-python -m benchmarks.bench_experiments "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
+python -m benchmarks.bench_experiments "$NANOVLLM_MODEL" \
   --scenario interference --num-requests 3 --max-num-seqs 4 \
   --input-len 128 --output-len 32 --budget 512 --max-model-len 4096 \
   --late-input-len 2048 --late-after-decode-steps 4 \
@@ -270,7 +269,7 @@ FP8 分页存储 → FlashInfer paged attention（按 scale 反量化）
 
 此功能改变持久 KV 的存储 dtype，不改变专家权重或 GDN 状态格式。读取侧不再物化连续 KV 临时张量。两个 scale 均为 `1.0` 时仍会提示未校准告警；性能收益与数值质量都需要实测。
 
-**现有脚本接口的边界：** `benchmarks.bench_experiments` 支持 `--kv-cache-dtype`，但没有 K/V scale 参数；`verify_qwen3_5.py` 没有 KV dtype/scale 命令行选项。`profile_decode.py` 支持 KV dtype，但没有 K/V scale 选项，因此 FP8 profile 使用默认 scale。校准后精度对比需要通过 Python API 或扩展验证脚本明确传参，不能用其他 dtype 的验证替代。
+**测试入口：** `configs/tests.toml` 的 `[kv_cache]` 支持 `dtype`（`auto` / `fp8_e4m3`）、`k_scale` 和 `v_scale`，统一传给 `check`、`bench` 和 `capacity`。`benchmarks.bench_experiments`、`scripts.verify_qwen3_5`、`scripts.verify_prefix_resume` 和 `scripts.profile_decode` 的直接 CLI 同样支持 `--kv-cache-dtype`、`--kv-cache-k-scale`、`--kv-cache-v-scale`。FP8 数值精度仍需通过校准及对应的 HF parity 验证。
 
 ## 启动显存定容
 
@@ -292,7 +291,7 @@ KV Cache 仍在初始化时预分配，Scheduler 按需分配逻辑 Block。需�
 
 ```bash
 python -c 'import logging; logging.basicConfig(level=logging.INFO); from benchmarks.bench_experiments import main; raise SystemExit(main())' \
-  "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" --scenario throughput \
+  "$NANOVLLM_MODEL" --scenario throughput \
   --out results/memory_budget.json
 ```
 
@@ -301,7 +300,7 @@ python -c 'import logging; logging.basicConfig(level=logging.INFO); from benchma
 **最大单轮纯文本 Prefill（示例 Token Budget = 1024）：**
 
 ```bash
-python -m benchmarks.bench_experiments "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
+python -m benchmarks.bench_experiments "$NANOVLLM_MODEL" \
   --scenario throughput --num-requests 1 --input-len 1024 --output-len 2 \
   --max-num-seqs 1 --budget 1024 --max-model-len 1026 \
   --out results/prefill_limit.json
@@ -312,7 +311,7 @@ python -m benchmarks.bench_experiments "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYP
 **最大 Decode Batch（示例并发数 = 8）：**
 
 ```bash
-python -m scripts.profile_decode "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
+python -m scripts.profile_decode "$NANOVLLM_MODEL" \
   --batch-size 8 --context-len 1024 --max-num-batched-tokens 1024 \
   --warmup-steps 2 --profile-steps 4
 ```
@@ -323,7 +322,7 @@ python -m scripts.profile_decode "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
 
 ```bash
 python -m scripts.verify_qwen3_5_multimodal "$NANOVLLM_MODEL" /path/to/image.jpg \
-  --dtype "$NANOVLLM_DTYPE" --max-model-len 4096 \
+  --max-model-len 4096 \
   --max-num-batched-tokens 1024
 ```
 
@@ -337,7 +336,6 @@ python -m scripts.verify_qwen3_5_multimodal "$NANOVLLM_MODEL" /path/to/image.jpg
 
 ```bash
 export NANOVLLM_MODEL=/absolute/path/to/Qwen3.5
-export NANOVLLM_DTYPE=bfloat16
 REPEATS=1 bash benchmarks/run.sh smoke
 REPEATS=5 bash benchmarks/run.sh full
 REPEATS=5 bash benchmarks/run.sh tail
@@ -365,7 +363,7 @@ REPEATS=5 bash benchmarks/run.sh long
 通过已有 `benchmarks.bench_experiments --scenario decode` 每次独立启动一个进程，可搜索固定输入输出长度下的完整 Decode 并发上界：
 
 ```bash
-python -m benchmarks.capacity_search "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
+python -m benchmarks.capacity_search "$NANOVLLM_MODEL" \
   --input-len 1024 --output-len 128 --max-batch 32 --budget 512 \
   --out-dir results/capacity_bf16
 ```
@@ -374,12 +372,12 @@ python -m benchmarks.capacity_search "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE"
 
 固定 Decode 的 `cuda_event_step_window_seconds` 是 CUDA Event 包住 Engine Step 的时间窗口，**包含可能发生的 CPU 提交间隙**；不是纯 Kernel 耗时。测量 GPU Kernel 应使用 `scripts.profile_decode` 或 Nsight。完整生命周期 KV 额度可能降低低显存条件下的并发度，应同时对比吞吐与 TTFT。前缀 Snapshot 存储字节不等于 GPU→CPU 传输耗时。
 
-每组独立进程执行且保留失败结果；汇总先比较同负载的完整输出 Hash，再计算 A/B 百分比。基准使用合成 Token、固定输出长度，小样本 P99 Token Gap 不代表真实在线服务尾延迟。正式结论需要至少五轮并记录 Git SHA、模型 revision、GPU、dtype 和工作负载。
+每组独立进程执行且保留失败结果；汇总先比较同负载的完整输出 Hash，再计算 A/B 百分比。基准使用合成 Token、固定输出长度，小样本 P99 Token Gap 不代表真实在线服务尾延迟。正式结论需要至少五轮并记录 Git SHA、模型 revision、GPU、模型 BF16 计算精度、KV Cache dtype / scale 和工作负载。
 
 ## 先 profile，再选择 kernel
 
 ```bash
-python -m scripts.profile_decode "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
+python -m scripts.profile_decode "$NANOVLLM_MODEL" \
   --context-len 4096 \
   --batch-size 8 \
   --max-num-batched-tokens 2048 \

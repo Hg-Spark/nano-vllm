@@ -44,14 +44,7 @@ class PrefillBatchLayoutTest(unittest.TestCase):
         )
 
         self.assertEqual(layout.input_ids, (2, 3, 4, 10, 11))
-        self.assertEqual(
-            layout.rope_positions,
-            (
-                (2, 3, 4, 0, 1),
-                (2, 3, 4, 0, 1),
-                (2, 3, 4, 0, 1),
-            ),
-        )
+        self.assertEqual(layout.rope_positions, ((2, 3, 4, 0, 1),))
         self.assertEqual(layout.q_offsets, (0, 3, 5))
         self.assertEqual(layout.state_slots, (4, 1))
         self.assertEqual(layout.state_prefix_lens, (2, 0))

@@ -1,12 +1,10 @@
 from collections import deque
-from math import lcm
 
 from nanovllm.config import Config
-from nanovllm.engine.block_manager import BlockManager
-from nanovllm.engine.prefix_cache import PrefixEntry
-from nanovllm.engine.schedule import GDN_CHECKPOINT_INTERVAL, ScheduledChunk, SchedulerOutput
+from nanovllm.engine.hybrid_cache_manager import HybridCacheManager
+from nanovllm.engine.schedule import ScheduledChunk, SchedulerOutput
 from nanovllm.engine.sequence import Sequence
-from nanovllm.engine.state_manager import GDNStateSnapshot, StateSlotManager
+from nanovllm.engine.state_manager import GDNStateSnapshot
 
 
 class Scheduler:
@@ -15,15 +13,7 @@ class Scheduler:
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.max_mixed_prefill_tokens = config.max_mixed_prefill_tokens
         self.eos_token_ids = set(config.eos_token_ids)
-        self.block_manager = BlockManager(
-            num_kv_cache_blocks,
-            config.kv_cache_block_size,
-            max_prefix_entries=config.max_prefix_cache_entries,
-            max_prefix_cache_snapshot_bytes=config.max_prefix_cache_snapshot_bytes,
-            snapshot_nbytes=snapshot_nbytes,
-            max_checkpoints_per_path=config.max_gdn_checkpoints,
-        )
-        self.state_manager = StateSlotManager(config.max_num_seqs)
+        self.cache_manager = HybridCacheManager(config, num_kv_cache_blocks, snapshot_nbytes)
         self.waiting: deque[Sequence] = deque()
         self.prefilling: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
@@ -33,17 +23,6 @@ class Scheduler:
 
     def add(self, seq: Sequence) -> None:
         self.waiting.append(seq)
-
-    def _try_restore_prefix(self, seq: Sequence, entry: PrefixEntry | None) -> None:
-        if entry is None:
-            return
-        self.block_manager.attach_shared_prefix(seq, entry.block_ids, entry.num_tokens)
-        self.block_manager.prefix_cache.mark_reused(seq, entry)
-        seq.committed_tokens = entry.num_tokens
-        seq.pending_state_snapshot = entry.state_snapshot
-
-    def _request_blocks(self, seq: Sequence) -> int:
-        return self.block_manager.required_blocks(seq.num_prompt_tokens + seq.max_tokens - 1)
 
     def _schedule_prefill_pass(
         self,
@@ -58,19 +37,10 @@ class Scheduler:
         token_limit = self.max_num_batched_tokens
         if decode_count and self.max_mixed_prefill_tokens is not None:
             token_limit = min(token_limit, decode_count + self.max_mixed_prefill_tokens)
+        if num_batched_tokens >= token_limit:
+            return
         active = (*self.running, *self.prefilling)
-        prefix_cache = self.block_manager.prefix_cache
-        if prefix_cache.enabled:
-            # Cached prefixes can share physical pages across active requests.
-            occupied_blocks = {block for seq in active for block in seq.block_table}
-            reserved_blocks = len(occupied_blocks) + sum(
-                self._request_blocks(seq) - len(seq.block_table) for seq in active
-            )
-        else:
-            # Without prefix sharing, every active request owns its KV pages.
-            # Avoid rebuilding a set of all resident pages on every decode step.
-            occupied_blocks = set()
-            reserved_blocks = sum(self._request_blocks(seq) for seq in active)
+        occupied_blocks, reserved_blocks = self.cache_manager.reservation_usage(active)
         active_count = len(self.running) + len(self.prefilling)
         planned_prefixes: set[bytes] = set()
 
@@ -85,109 +55,48 @@ class Scheduler:
 
                 seq = queue.popleft()
                 if not admitted:
-                    entry = prefix_cache.find(seq, max_tokens=len(seq) - 1)
-                    shared_blocks = entry.block_ids if entry is not None else ()
-                    blocks = self._request_blocks(seq)
-                    if shared_blocks:
-                        blocks -= len(shared_blocks)
-                        blocks += len(set(shared_blocks) - occupied_blocks)
+                    entry = self.cache_manager.find_prefix(seq)
+                    blocks = self.cache_manager.admission_blocks(seq, entry, occupied_blocks)
                     if (
                         active_count >= self.max_num_seqs
-                        or reserved_blocks + blocks > self.block_manager.num_blocks
+                        or reserved_blocks + blocks > self.cache_manager.total_blocks
                     ):
                         queue.appendleft(seq)
                         break
-                    self._try_restore_prefix(seq, entry)
-                    self.state_manager.allocate(seq)
+                    self.cache_manager.admit(seq, entry)
                     active_count += 1
-                    occupied_blocks.update(shared_blocks)
+                    occupied_blocks.update(entry.block_ids if entry is not None else ())
                     reserved_blocks += blocks
 
                 requested = min(
                     len(seq) - seq.committed_tokens,
                     token_limit - num_batched_tokens,
                 )
-                scheduled = self.block_manager.max_schedulable_tokens(seq, requested)
-                while scheduled < requested and prefix_cache.evict(
-                    self.block_manager.block_refcounts
-                ):
-                    scheduled = self.block_manager.max_schedulable_tokens(seq, requested)
-                if scheduled == 0:
-                    raise RuntimeError("admitted prefill cannot acquire reserved KV blocks")
+                scheduled = self.cache_manager.fit_prefill(seq, requested)
 
                 start = seq.committed_tokens
                 end = start + scheduled
-                positions: tuple[int, ...] = ()
-                interval = 0
-                if prefix_cache.enabled:
-                    interval = GDN_CHECKPOINT_INTERVAL
-                    candidates, cached = prefix_cache.candidates(seq, start, end)
-                    candidates = [pair for pair in candidates if pair[1] not in planned_prefixes]
-                    step = lcm(interval, self.block_manager.block_size)
-                    if end < len(seq):
-                        # Prefer low-cost alignment, but recover off-grid chunks
-                        # periodically. Intermediate FlashInfer GDN snapshots
-                        # require an aligned start; the final live state does not.
-                        selected = prefix_cache.select_checkpoints(candidates, cached)
-                        max_trim = min(step - 1, scheduled // 4, max(16, scheduled // 8))
-                        target = None
-                        if (
-                            start % step
-                            and selected
-                            and (
-                                not cached
-                                or start - cached[-1]
-                                >= step * prefix_cache.max_checkpoints_per_path
-                            )
-                        ):
-                            # Recover at the deepest useful joint boundary;
-                            # limit forced short chunks to useful cache intervals.
-                            target = selected[-1][0]
-                        else:
-                            target = next(
-                                (
-                                    position
-                                    for position, _ in reversed(selected)
-                                    if position < end and end - position <= max_trim
-                                ),
-                                None,
-                            )
-                        if target is not None and target < end:
-                            end = target
-                            scheduled = end - start
-
-                    candidates = [pair for pair in candidates if pair[0] <= end]
-                    if start % step:
-                        # FlashInfer's intermediate GDN checkpoints are relative
-                        # to an aligned chunk start. An off-grid chunk may only
-                        # publish its final, live GDN state at an aligned end.
-                        candidates = [pair for pair in candidates if pair[0] == end]
-                    candidates = prefix_cache.select_checkpoints(candidates, cached)
-                    positions = tuple(p for p, _ in candidates)
-                    planned_prefixes.update(digest for _, digest in candidates)
-
-                self.block_manager.ensure_capacity(seq, end)
+                end, positions, checkpoint_interval = self.cache_manager.plan_prefill_checkpoints(
+                    seq, start, end, planned_prefixes
+                )
+                self.cache_manager.reserve_prefill(seq, end)
                 prefill_chunks.append(
                     ScheduledChunk(
                         seq,
                         start,
                         end,
                         checkpoint_positions=positions,
-                        checkpoint_interval=interval if any(p < end for p in positions) else 0,
+                        checkpoint_interval=checkpoint_interval,
                     )
                 )
-                num_batched_tokens += scheduled
+                num_batched_tokens += end - start
                 if end == len(seq):
                     self.running.append(seq)
                 else:
                     self.prefilling.append(seq)
 
     def _release_runtime_state(self, seq: Sequence) -> None:
-        seq.pending_state_snapshot = None
-        self.block_manager.deallocate(seq)
-        self.state_manager.deallocate(seq)
-        seq.committed_tokens = 0
-        seq.clear_runtime_features()
+        self.cache_manager.release(seq)
 
     def clear(self) -> None:
         for seq in (*self.waiting, *self.prefilling, *self.running):
@@ -195,23 +104,18 @@ class Scheduler:
         self.waiting.clear()
         self.prefilling.clear()
         self.running.clear()
-        while self.block_manager.prefix_cache.evict():
-            pass
+        self.cache_manager.clear_prefixes()
 
     def schedule(self) -> SchedulerOutput:
         decode_chunks: list[ScheduledChunk] = []
         prefill_chunks: list[ScheduledChunk] = []
-        prefix_cache = self.block_manager.prefix_cache
 
         # Accepted requests already reserve their maximum KV lifetime.
         for _ in range(min(len(self.running), self.max_num_seqs, self.max_num_batched_tokens)):
             seq = self.running.popleft()
             if seq.committed_tokens != len(seq) - 1:
                 raise RuntimeError(f"sequence {seq.seq_id} decode prefix mismatch")
-            while self.block_manager.max_schedulable_tokens(seq, 1) == 0:
-                if not prefix_cache.evict(self.block_manager.block_refcounts):
-                    raise RuntimeError("admitted decode cannot acquire reserved KV blocks")
-            self.block_manager.ensure_capacity(seq, len(seq))
+            self.cache_manager.reserve_decode(seq)
             decode_chunks.append(ScheduledChunk(seq, seq.committed_tokens, len(seq)))
             self.running.append(seq)
 
@@ -242,7 +146,7 @@ class Scheduler:
             if not partial_prefill and token_id is None:
                 raise RuntimeError("completed model step did not produce a token")
 
-            self.block_manager.prefix_cache.publish_many(seq, prefix_snapshots.get(seq.seq_id, ()))
+            self.cache_manager.publish_prefixes(seq, prefix_snapshots.get(seq.seq_id, ()))
 
             seq.committed_tokens = chunk.end
             if seq.image_state is not None and chunk.end >= seq.image_state.image_end:

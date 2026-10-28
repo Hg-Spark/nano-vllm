@@ -101,7 +101,7 @@ MLP 直接创建融合后的 `gate_up_proj`；严格加载器将 HF `gate_proj`�
 | --- | --- | --- |
 | Full Attention KV | `BlockManager` | 按固定容量块增长，完整前缀块可共享并计数引用 |
 | 活动 GDN 状态 | `StateSlotManager` + `GDNStatePool` | 每个请求独占一个逻辑槽位，各 GDN 层用相同槽号索引 |
-| 可复用联合前缀 | `BlockManager` | 完整 KV 块引用与同边界的 GDN CPU 快照保存在同一 prefix entry；卷积保持活动 dtype，循环矩阵保持 FP32 |
+| 可复用联合前缀 | `HybridCacheManager` + `PrefixCache` | 完整 KV 块引用与同边界的 GDN CPU 快照保存在同一 prefix entry；卷积保持活动 dtype，循环矩阵保持 FP32 |
 
 核心约束是：**用于继续计算的 KV 历史和 GDN 状态必须表示同一段 token 前缀。** 稳定的已提交状态可以表示为：
 
@@ -132,9 +132,11 @@ KV 的有效前缀长度 = GDN 的有效前缀长度 = Sequence.committed_tokens
 
 ```mermaid
 flowchart TD
-    A[LLMEngine：请求与生成循环] --> B[Scheduler：安排工作和资源]
-    B --> C[BlockManager：KV 块与联合前缀]
-    B --> D[StateSlotManager：GDN 槽位分配]
+    A[LLMEngine：请求与生成循环] --> B[Scheduler：队列与 Token Budget]
+    B --> E[HybridCacheManager：KV/GDN 联合资源生命周期]
+    E --> C[BlockManager：KV 块分配与引用]
+    E --> D[StateSlotManager：GDN 槽位分配]
+    E --> P[PrefixCache：联合前缀与快照]
     B --> F[ModelRunner：执行与采样]
     F --> G[batch_common：构造 Prefill / Decode 输入]
     G --> H[Context：传递批次元数据]
@@ -151,8 +153,9 @@ flowchart TD
 | 文件 | 职责 |
 | --- | --- |
 | [llm_engine.py](../nanovllm/engine/llm_engine.py) | API、请求校验、生成循环和执行失败后的关闭 |
-| [scheduler.py](../nanovllm/engine/scheduler.py) | 调度预算、联合 KV/GDN 准入、状态提交和释放 |
+| [scheduler.py](../nanovllm/engine/scheduler.py) | 调度预算、请求队列及调用资源接口完成状态提交 |
 | [schedule.py](../nanovllm/engine/schedule.py) | 保存本轮执行区间和快照需求 |
+| [hybrid_cache_manager.py](../nanovllm/engine/hybrid_cache_manager.py) | 统一 KV/GDN 准入、共享前缀恢复、Checkpoint 规划与引用释放 |
 | [block_manager.py](../nanovllm/engine/block_manager.py) | KV Block 分配与共享前缀引用 |
 | [state_manager.py](../nanovllm/engine/state_manager.py) | GDN 状态槽分配 |
 | [prefix_cache.py](../nanovllm/engine/prefix_cache.py) | KV Block Hash 与 GDN Checkpoint 联合匹配、路径内优先裁剪中间 Checkpoint、全局 FIFO 淘汰 |
@@ -161,6 +164,7 @@ flowchart TD
 | [context.py](../nanovllm/utils/context.py) | 将单次 forward 的元数据传给模型层 |
 | [cache_runtime.py](../nanovllm/engine/cache_runtime.py) | 分配物理 KV/GDN 张量并恢复 GDN 快照 |
 | [model_runner.py](../nanovllm/engine/model_runner.py) | 构造模型、静态缓存分配、前向、采样和批量快照捕获 |
+| [attention.py](../nanovllm/layers/attention.py) | FlashInfer Paged Attention 元数据规划及 KV 写入/计算 |
 
 `Context` 是当前批次的临时元数据，不拥有长期请求状态。Prefill/Decode batch builder 将它与输入张量一起返回；`ModelRunner.run()` 在作用域内安装上下文，退出作用域时恢复原值。
 
@@ -352,7 +356,7 @@ flowchart TD
 | KV/GDN 资源不足 | `Scheduler.schedule()` | 按完整生命周期 KV 页额度及 GDN 槽位准入；已接纳请求不足时淘汰缓存 |
 | 已接纳请求 KV 扩容不足 | `Scheduler.schedule()` | 仅淘汰可回收的缓存条目；不抢占已接纳请求，仍不足则报告内部额度异常 |
 | 模型前向、Graph 或提交失败 | `LLMEngine.step()` | 标记引擎不可继续使用并上抛原异常；不进行跨 Step 输出补发或 GPU 状态回滚 |
-| 联合前缀命中 | `Scheduler._try_restore_prefix()` | 挂接共享 KV、分配独占 GDN Slot、设置 `pending_state_snapshot`；下次 Prefill forward 前恢复到同一 token 边界 |
+| 联合前缀命中 | `HybridCacheManager.admit()` | 挂接共享 KV、分配独占 GDN Slot、设置 `pending_state_snapshot`；下次 Prefill forward 前恢复到同一 token 边界 |
 | 请求正常完成 | `Scheduler.postprocess()` | 释放请求 KV 引用与 GDN Slot；视觉特征可在图像区间 Prefill 完成后提前释放，缓存自身的独立 KV 引用仍可存在 |
 
 共享 KV 使用引用计数：释放一个请求不一定让物理页空闲。GDN Slot 不在请求之间共享；可复用的是 CPU 上与整块 KV 前缀边界绑定的 GDN Snapshot。前缀缓存不保存下一 token logits，因此命中后至少保留一个已知 token 用于重新计算。

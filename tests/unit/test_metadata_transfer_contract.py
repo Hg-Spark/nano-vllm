@@ -46,8 +46,7 @@ class MetadataTransferContractTest(unittest.TestCase):
             ["prefill_q_offsets", "prefill_kv_indptr", "prefill_page_len"],
         )
         self.assertFalse(
-            {"prefill_q_offsets", "prefill_kv_indptr", "prefill_page_len"}
-            & set(pool.uploads)
+            {"prefill_q_offsets", "prefill_kv_indptr", "prefill_page_len"} & set(pool.uploads)
         )
         self.assertIsNone(prepared.context.qo_indptr)
         self.assertIsNone(prepared.context.paged_kv_indptr)
@@ -59,9 +58,7 @@ class MetadataTransferContractTest(unittest.TestCase):
         seq.block_table = [5]
         seq.state_slot = 0
         pool = RecordingPool()
-        prepared = prepare_decode(
-            (ScheduledChunk(seq, 3, 4),), 16, pool, DecodePageTableCache()
-        )
+        prepared = prepare_decode((ScheduledChunk(seq, 3, 4),), 16, pool, DecodePageTableCache())
 
         self.assertEqual(pool.host_stages, ["decode_kv_indptr", "decode_page_len"])
         self.assertFalse({"decode_kv_indptr", "decode_page_len"} & set(pool.uploads))

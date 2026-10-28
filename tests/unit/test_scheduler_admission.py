@@ -64,7 +64,7 @@ class SchedulerAdmissionTest(unittest.TestCase):
         self.assertEqual(scheduled_sequences(output.decode_chunks), [running])
         self.assertEqual(scheduled_sequences(output.prefill_chunks), [waiting])
         self.assertEqual(output.prefill_tokens, 3)
-        self.assertEqual(len(scheduler.block_manager.free_block_ids), 1)
+        self.assertEqual(len(scheduler.cache_manager.block_manager.free_block_ids), 1)
 
     def test_admission_counts_shared_kv_blocks_only_once(self):
         scheduler = make_scheduler(
@@ -74,16 +74,16 @@ class SchedulerAdmissionTest(unittest.TestCase):
             block_size=16,
         )
         source = Sequence(list(range(64)) + [200])
-        scheduler.block_manager.ensure_capacity(source, 64)
-        scheduler.block_manager.prefix_cache.publish_many(source, (GDNStateSnapshot(64, ()),))
-        scheduler.block_manager.deallocate(source)
+        scheduler.cache_manager.block_manager.ensure_capacity(source, 64)
+        scheduler.cache_manager.prefix_cache.publish_many(source, (GDNStateSnapshot(64, ()),))
+        scheduler.cache_manager.block_manager.deallocate(source)
 
         for suffix in (list(range(64, 128)), list(range(64, 127)) + [200]):
             scheduler.add(Sequence(list(range(64)) + suffix, SamplingParams(max_tokens=1)))
         scheduled = scheduler.schedule()
         self.assertEqual(len(scheduled.prefill_chunks), 2)
         self.assertEqual([chunk.num_tokens for chunk in scheduled.prefill_chunks], [64, 64])
-        self.assertEqual(len(scheduler.block_manager.free_block_ids), 1)
+        self.assertEqual(len(scheduler.cache_manager.block_manager.free_block_ids), 1)
 
     def test_partial_prefills_resume_before_new_requests(self):
         scheduler = make_scheduler(
