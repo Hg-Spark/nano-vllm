@@ -74,9 +74,13 @@ class FixedDtypeConfigTest(unittest.TestCase):
                 self.assertEqual(calls[0][2]["NANOVLLM_KV_CACHE_K_SCALE"], "0.25")
                 self.assertEqual(calls[0][2]["NANOVLLM_KV_CACHE_V_SCALE"], "0.5")
                 if stage == "check":
-                    targets = [
-                        entry for entry in calls if entry[0] in ("hf-parity", "prefix-parity")
-                    ]
+                    expected = {
+                        "hf-parity",
+                        "prefix-prompt-parity",
+                        "prefix-decode-parity",
+                    }
+                    targets = [entry for entry in calls if entry[0] in expected]
+                    self.assertEqual({name for name, _, _ in targets}, expected)
                 elif stage == "capacity":
                     targets = [entry for entry in calls if entry[0] == "capacity"]
                 else:
@@ -110,6 +114,29 @@ class FixedDtypeConfigTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "kv_cache_block_size must be one of"):
                     Config(model_dir, kv_cache_block_size=128)
                 model_load.assert_not_called()
+
+    def test_bench_mode_rejects_duplicate_tail_or_long_stages(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder, "tests.toml")
+            for mode in ("tail", "long"):
+                path.write_text(
+                    chr(10).join(
+                        (
+                            'model = "model"',
+                            'output_dir = "results"',
+                            'stage = "all"',
+                            "[benchmark]",
+                            f'mode = "{mode}"',
+                            "",
+                        )
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, "benchmark.mode must be smoke/full"):
+                    run_tests.load_config(path, root=Path(folder))
+                self.assertEqual(
+                    run_tests.load_config(path, root=Path(folder), stage=mode)["stage"], mode
+                )
 
     def test_prefix_stage_covers_supported_kv_page_sizes(self):
         config = {

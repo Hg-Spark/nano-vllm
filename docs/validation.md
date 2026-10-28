@@ -425,6 +425,6 @@ python -m scripts.profile_decode "$NANOVLLM_MODEL" \
   → 对固定 batch 的 Eager / CUDA Graph 分别做数值与 TPOT 对照
 ```
 
-GDN 在 SM90/100/120 且 Head K/V Dimension 均为 128 时固定使用 FlashInfer 0.7.0 的 Indexed Prefill/Decode，原地更新 FP32 `[V,K]` State Pool。需要在支持的 GPU 上运行 `tests/integration/test_flashinfer_gdn.py` 验证批次与状态槽一致性；Prefill TTFT、Decode TPOT、Graph Capture 和显存峰值需实测。MoE Prefill/Decode 都使用 FlashInfer CUTLASS Fused MoE，不提供其他后端或回退。后续先用 profile 验证各路径在目标 workload 的收益，再决定是否继续定制 kernel；Attention 占比显著时再评估更深的 FP8/Paged Attention 优化。
+GDN 在 SM90/100/120 且 Head K/V Dimension 均为 128 时使用 FlashInfer 的 Indexed Prefill/Decode，原地更新 FP32 `[V,K]` State Pool。需要在支持的 GPU 上运行 `tests/integration/test_flashinfer_gdn.py` 验证批次与状态槽一致性；Prefill TTFT、Decode TPOT、Graph Capture 和显存峰值需实测。MoE Prefill/Decode 都使用 FlashInfer CUTLASS Fused MoE，不提供其他后端或回退。后续先用 profile 验证各路径在目标 workload 的收益，再决定是否继续定制 kernel；Attention 占比显著时再评估更深的 FP8/Paged Attention 优化。
 
 性能记录应包含真实的 GPU Profile、吞吐量、延迟和显存指标；验收条件见[路线图](../ROADMAP.md)。

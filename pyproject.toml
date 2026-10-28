@@ -11,12 +11,12 @@ license-files = ["LICENSE"]
 readme = "README.md"
 description = "A compact Qwen3.5 hybrid inference runtime"
 requires-python = ">=3.11"
-# Reference environment: Python 3.11-3.12, PyTorch 2.14.0, CUDA 13.0.
-# These versions are documentation guidance, not installation constraints.
+# Reference environment: Python 3.12, PyTorch 2.12.1, CUDA 13.0.
+# Python/CUDA are reference environment guidance; PyTorch is pinned below.
 dependencies = [
-    "torch",
+    "torch==2.12.1",
     "transformers>=5.19.0",
-    "flashinfer-python==0.7.0",
+    "flashinfer-python[cu13]>=0.7.0",
     "causal-conv1d==1.7.0",
     "safetensors",
     "Pillow",

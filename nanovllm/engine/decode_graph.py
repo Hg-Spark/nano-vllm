@@ -195,11 +195,14 @@ class DecodeGraphBucket:
         return self.logits
 
     def release(self) -> None:
-        if self.graph is not None:
-            self.graph.reset()
+        # Pinned buffers must remain alive until their pending H2D copies finish.
         if self._has_pending_host_transfer:
             self._host_transfer_done.synchronize()
+            self._has_pending_host_transfer = False
+        if self.graph is not None:
+            self.graph.reset()
+            self.graph = None
         self._host_buffers = {}
         self._page_table_key = None
         self._host_transfer_done = None
-        self.graph = self.logits = self.wrapper = self.context = self.workspace = None
+        self.logits = self.wrapper = self.context = self.workspace = None
