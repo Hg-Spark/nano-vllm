@@ -101,6 +101,39 @@ def describe_first_output_difference(left, right):
     return "recorded completions match; inspect prompt history or hash inputs"
 
 
+def describe_first_top4_difference(reference, changed):
+    """Display only the first different decision, without mistaking Top-4 for full logits."""
+    reference_tokens = reference["details"].get("output_token_sequences")
+    changed_tokens = changed["details"].get("output_token_sequences")
+    reference_trace = reference["details"].get("top4_trace")
+    changed_trace = changed["details"].get("top4_trace")
+    if not all(x is not None for x in (
+        reference_tokens, changed_tokens, reference_trace, changed_trace
+    )):
+        return ""
+    for request_index, (a, b) in enumerate(zip(reference_tokens, changed_tokens)):
+        for token_index, (a_token, b_token) in enumerate(zip(a, b)):
+            if a_token == b_token:
+                continue
+            def show(trace, name):
+                rows = trace[request_index] if request_index < len(trace) else []
+                entry = next((row for row in rows if row["token_index"] == token_index), None)
+                if entry is None:
+                    return f"{name}: Top-4 unavailable (increase --trace-max-tokens)"
+                candidates = ", ".join(
+                    f"{tid}:{value:.6f}"
+                    for tid, value in zip(entry["token_ids"], entry["logits"])
+                )
+                return (
+                    f"{name}: selected={entry['selected_token_id']}; "
+                    f"Top-4=[{candidates}]; margin={entry['margin_top1_top2']:.6g}"
+                )
+            return "\n  " + show(reference_trace, "reference") + "\n  " + show(
+                changed_trace, "changed"
+            )
+    return ""
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("folder", help="directory of benchmark experiment JSON files")
@@ -166,8 +199,13 @@ def main(argv=None):
                     reference["details"].get("output_token_sequences"),
                     changed["details"].get("output_token_sequences"),
                 )
+                + describe_first_top4_difference(reference, changed)
             )
         raise SystemExit("Output token hashes differ for a supposedly identical workload")
+
+    if any(r["config"].get("trace_top4") for _, r in samples):
+        print("Top-4 diagnostic runs are excluded from formal performance comparisons")
+        return
 
     # An exclusive Decode-first run never uses mixed_prefill_limit: share the
     # budget-matched baseline without re-running it for every Mixed cap.
@@ -255,6 +293,7 @@ def main(argv=None):
                         baseline[0]["details"].get("output_token_sequences"),
                         treatment[0]["details"].get("output_token_sequences"),
                     )
+                    + describe_first_top4_difference(baseline[0], treatment[0])
                 )
             if min(len(baseline), len(treatment)) < args.min_repeats:
                 issues.append(f"too few repeats for {label}, {scenario} batch={p['max_num_seqs']}")

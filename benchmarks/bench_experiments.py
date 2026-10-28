@@ -118,6 +118,17 @@ def arguments(argv=None):
         action="store_true",
         help="retain generated token IDs per request to locate A/B parity failures",
     )
+    p.add_argument(
+        "--trace-top4",
+        action="store_true",
+        help="diagnostic only: record sampled Top-4 logits; timings are not comparable",
+    )
+    p.add_argument(
+        "--trace-max-tokens",
+        type=int,
+        default=16,
+        help="max generated tokens per request to trace when --trace-top4 is enabled",
+    )
     p.add_argument("--out", required=True, help="JSON result path; must not exist")
     a = normalize_paths(p.parse_args(argv), "model", "out")
     if not a.model:
@@ -129,6 +140,12 @@ def arguments(argv=None):
         p.error("--min-graph-coverage requires --scenario throughput and --graph-sizes")
     validate_positive(p, a, "input_len", "num_requests", "max_num_seqs", "budget", "max_model_len")
     validate_gpu_utilization(p, a)
+    if a.trace_max_tokens < 1:
+        p.error("--trace-max-tokens must be positive")
+    if a.trace_top4 and a.scenario not in ("prefix", "interference"):
+        p.error("--trace-top4 supports prefix and interference scenarios only")
+    if a.trace_top4:
+        a.record_output_tokens = True
     if a.mixed_prefill_limit < -1:
         p.error("--mixed-prefill-limit must be -1 or non-negative")
     if a.activation_reserve_mib < 0:
@@ -370,6 +387,32 @@ def run(a):
 
             manager.admit = tracked_admit
         graph_before = graph_counters(engine.model_runner)
+        top4_trace = {}
+        if a.trace_top4:
+            def observe_top4(logits, sampled_seqs, sampled_token_ids):
+                eligible = [
+                    idx for idx, seq in enumerate(sampled_seqs)
+                    if seq.num_completion_tokens < a.trace_max_tokens
+                ]
+                if not eligible:
+                    return
+                # CPU synchronization is intentional only in diagnostic mode.
+                top = logits[eligible].float().topk(k=min(4, logits.shape[-1]), dim=-1)
+                top_ids = top.indices.cpu().tolist()
+                top_values = top.values.cpu().tolist()
+                for row, idx in enumerate(eligible):
+                    seq = sampled_seqs[idx]
+                    values = top_values[row]
+                    top4_trace.setdefault(seq.seq_id, []).append({
+                        "token_index": seq.num_completion_tokens,
+                        "selected_token_id": int(sampled_token_ids[idx]),
+                        "token_ids": top_ids[row],
+                        "logits": values,
+                        "margin_top1_top2": values[0] - values[1] if len(values) > 1 else None,
+                        "margin_top1_top4": values[0] - values[-1],
+                    })
+
+            engine.model_runner.logits_observer = observe_top4
 
         if a.scenario == "decode":
             metrics, details = run_fixed_decode(engine, a)
@@ -574,6 +617,10 @@ def run(a):
             details["output_token_sequences"] = [
                 list(seq.completion_token_ids) for seq in completed
             ]
+            if a.trace_top4:
+                details["top4_trace"] = [
+                    top4_trace.get(seq.seq_id, []) for seq in completed
+                ]
 
         if a.scenario != "decode":
             graph_metrics = measured_graph_usage(
@@ -618,6 +665,8 @@ def main():
 
     result = completed
     metrics = result["metrics"]
+    if a.trace_top4:
+        print("DIAGNOSTIC: Top-4 tracing synchronizes GPU results; timing is not for comparison")
     print(
         f"saved {target} | throughput={metrics['output_throughput_tok_s']:.1f} tok/s "
         f"TPOT={metrics['tpot_seconds']['mean'] * 1000:.2f} ms "

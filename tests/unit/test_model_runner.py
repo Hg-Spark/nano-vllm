@@ -161,6 +161,25 @@ class ModelRunnerTest(unittest.TestCase):
         runner.sampler.assert_not_called()
         runner.metadata_pool.to_cuda.assert_not_called()
 
+    def test_top4_observer_uses_sampled_rows_and_preserves_greedy_tokens(self):
+        runner = object.__new__(ModelRunner)
+        runner.sampler = Mock(side_effect=AssertionError("greedy should not call sampler"))
+        seqs = [
+            Sequence([1], SamplingParams(temperature=0.0)),
+            Sequence([2], SamplingParams(temperature=0.0)),
+            Sequence([3], SamplingParams(temperature=0.0)),
+        ]
+        observed = []
+        runner.logits_observer = lambda logits, selected, ids: observed.append(
+            (logits.tolist(), [seq.seq_id for seq in selected], list(ids))
+        )
+        logits = torch.tensor([[0.0, 0.2, 0.4, 0.6, 0.8], [5.0, 4.0, 3.0, 2.0, 1.0]])
+        result = runner._sample_logits(logits, seqs, [0, 2])
+        self.assertEqual(result, [4, None, 0])
+        self.assertEqual(observed, [
+            (logits.tolist(), [seqs[0].seq_id, seqs[2].seq_id], [4, 0])
+        ])
+
     def test_mixed_sampling_uses_pinned_metadata_indices(self):
         runner = object.__new__(ModelRunner)
         runner.sampler = Mock(return_value=torch.tensor([0, 1], dtype=torch.long))

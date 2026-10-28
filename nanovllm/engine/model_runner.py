@@ -42,6 +42,8 @@ class ModelRunner:
         self._cleanup_complete = False
         self.model = None
         self.sampler = None
+        # Optional benchmark observer; never enabled during formal latency measurements.
+        self.logits_observer = None
         self.kv_cache = None
         self.attention_workspace = None
         self.metadata_pool = PinnedMetadataPool()
@@ -238,6 +240,11 @@ class ModelRunner:
             token_ids = self.sampler(
                 logits, temperatures, sample_positions=sampled_indices
             ).tolist()
+        observer = getattr(self, "logits_observer", None)
+        if observer is not None:
+            # Observe the exact sampling rows, including CUDA Graph replay outputs.
+            # Diagnostic observers may synchronize; keep them strictly opt-in.
+            observer(logits, [seqs[idx] for idx in sample_indices], token_ids)
         for idx, token_id in zip(sample_indices, token_ids):
             results[idx] = token_id
         return results

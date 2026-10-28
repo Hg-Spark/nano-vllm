@@ -33,6 +33,20 @@ class BenchmarkExperimentsTest(unittest.TestCase):
         scheduler.add(Sequence([3, 4], SamplingParams(max_tokens=1)))
         self.assertEqual(scheduler.schedule().prefill_tokens, 2)
 
+    def test_top4_diagnostic_rejects_performance_scenarios(self):
+        def base(*extra):
+            return [
+                "model", "--scenario", "throughput", "--out", "/tmp/top4_probe.json",
+                "--trace-top4", *extra,
+            ]
+        with self.assertRaises(SystemExit):
+            experiments.arguments(base())
+        with self.assertRaises(SystemExit):
+            experiments.arguments([
+                "model", "--scenario", "prefix", "--out", "/tmp/top4_probe.json",
+                "--trace-top4", "--trace-max-tokens", "0",
+            ])
+
     def test_graph_usage_excludes_warmup_and_rejects_inconsistent_counts(self):
         from benchmarks.bench_experiments import graph_counters, measured_graph_usage
 

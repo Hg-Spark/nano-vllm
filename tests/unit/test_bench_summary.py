@@ -25,6 +25,35 @@ class BenchmarkSummaryTest(unittest.TestCase):
         self.assertIn("--record-output-tokens", describe(None, [[1]]))
 
 
+    def test_first_top4_difference_is_reported_at_divergent_token(self):
+        def record(tokens, chosen):
+            return {
+                "details": {
+                    "output_token_sequences": [tokens],
+                    "top4_trace": [[
+                        {"token_index": 0, "selected_token_id": 9,
+                         "token_ids": [9, 8, 7, 6], "logits": [4., 3., 2., 1.],
+                         "margin_top1_top2": 1.},
+                        {"token_index": 1, "selected_token_id": chosen,
+                         "token_ids": [chosen, 15 if chosen == 4 else 4, 7, 6],
+                         "logits": [4., 3.999, 2., 1.],
+                         "margin_top1_top2": 0.001},
+                    ]],
+                }
+            }
+        s = summarize_bench.describe_first_top4_difference(
+            record([9, 4], 4), record([9, 15], 15)
+        )
+        self.assertIn("reference: selected=4", s)
+        self.assertIn("changed: selected=15", s)
+        self.assertIn("margin=0.001", s)
+        self.assertEqual(
+            summarize_bench.describe_first_top4_difference(
+                record([9, 4], 4), record([9, 4], 4)
+            ),
+            "",
+        )
+
     def test_ab_parity_and_speedup(self):
         base = {
             "schema_version": 1,
