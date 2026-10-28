@@ -118,6 +118,15 @@ class PrefixCacheTest(unittest.TestCase):
         self.assertEqual(hit.num_tokens, 8)
         self.assertIsNone(manager.prefix_cache.find(Sequence([1, 2, 3, 4]), max_tokens=3))
 
+    def test_internal_fork_without_joint_snapshot_recomputes(self):
+        manager = make_cache_manager(num_blocks=32, block_size=16, max_prefix_entries=4)
+        history = [1] * 64 + [2] * 32
+        publish_prefix(manager, history + [9], 96)
+        # The new branch shares 64 tokens, but only the 96-token boundary
+        # has a joint KV/GDN checkpoint. A matching KV block is insufficient.
+        fork = Sequence([1] * 64 + [3] * 32 + [9])
+        self.assertIsNone(manager.prefix_cache.find(fork, max_tokens=96))
+
     def test_eviction_releases_blocks_under_entry_and_byte_limits(self):
         for byte_limit in (None, 12):
             with self.subTest(byte_limit=byte_limit):

@@ -35,6 +35,7 @@ def workload_key(result, *, ignore_mixed_prefill_limit=False):
         "shared_prefix_len",
         "suffix_len",
         "target_requests",
+        "conversation_turns",
         "late_input_len",
         "late_after_decode_steps",
         "warmup_steps",
@@ -188,10 +189,12 @@ def main(argv=None):
             matches = [(v, rs) for v, rs in variants.items() if v[0] and v[1] == 0]
             label = "Graph / Eager"
             latency_key = "tpot_seconds"
-        elif scenario == "prefix":
+        elif scenario in ("prefix", "conversation"):
             baseline = variants.get(((), 0, "mixed"))
             matches = [(v, rs) for v, rs in variants.items() if v[1] > 0 and not v[0]]
-            label = "Prefix On / Off"
+            label = (
+                "Conversation Cache On / Off" if scenario == "conversation" else "Prefix On / Off"
+            )
             latency_key = "ttft_seconds"
         elif scenario == "interference":
             baseline = variants.get(((), 0, "exclusive_decode_first"))
@@ -250,6 +253,31 @@ def main(argv=None):
                 print(
                     f"  Peak CUDA allocated: {b_mem:.3f} -> {t_mem:.3f} GiB "
                     f"(reduction {format_percent(percent(b_mem, t_mem, higher_better=False))})"
+                )
+            if scenario == "conversation":
+                followup = treatment[0]["details"]["followup_requests"]
+                restored_fraction = median(
+                    run["details"]["restored_prompt_token_ratio"] for run in treatment
+                )
+                completion_hits = median(
+                    run["details"]["completion_checkpoint_hits"] for run in treatment
+                )
+                prompt_hits = median(run["details"]["prompt_checkpoint_hits"] for run in treatment)
+                print(
+                    f"  Follow-up TTFT ({followup} req/run): "
+                    f"{format_ms(milliseconds(baseline, 'ttft_seconds'))} -> "
+                    f"{format_ms(milliseconds(treatment, 'ttft_seconds'))} ms"
+                )
+                print(
+                    f"  Follow-up restored/input: {restored_fraction:.1%}; "
+                    f"Completion hits: {completion_hits:.0f}; Prompt hits: {prompt_hits:.0f}"
+                )
+                b_elapsed = number(baseline, "elapsed_seconds")
+                t_elapsed = number(treatment, "elapsed_seconds")
+                print(
+                    f"  Accumulated engine execution (all turns): "
+                    f"{b_elapsed:.3f} -> {t_elapsed:.3f} s "
+                    f"(reduction {format_percent(percent(b_elapsed, t_elapsed, higher_better=False))})"
                 )
             if scenario == "prefix":
                 restored = median(
