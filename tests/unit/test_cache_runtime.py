@@ -8,6 +8,7 @@ except ImportError as exc:
     raise unittest.SkipTest(f"requires torch: {exc}")
 
 from nanovllm.engine.cache_runtime import (
+    GDNCompletionBuffer,
     _resolve_kv_cache_dtype,
     _visual_feature_cache_nbytes,
     allocate_runtime_caches,
@@ -106,6 +107,90 @@ class CacheRuntimeTest(unittest.TestCase):
             config.activation_reserve_bytes = 1024
             _, num_blocks = allocate_runtime_caches(model, config)
             self.assertEqual(num_blocks, 1)
+
+    def test_completion_buffer_rolls_without_host_snapshots_until_finish(self):
+        from nanovllm.engine.sequence import Sequence
+
+        class Layer:
+            def __init__(self):
+                self.conv_state = torch.zeros((2, 3, 4), dtype=torch.bfloat16)
+                self.recurrent_state = torch.zeros((2, 2, 4), dtype=torch.float32)
+
+            def slot(self, slot):
+                return self.conv_state[slot], self.recurrent_state[slot]
+
+        layers = [Layer(), Layer()]
+        cache = GDNCompletionBuffer(layers)
+        first = Sequence([1] * 81)
+        first.state_slot = 0
+        for layer in layers:
+            layer.conv_state[0].fill_(1)
+            layer.recurrent_state[0].fill_(2)
+        cache.update(layers, [(first, 64)])
+        self.assertEqual(cache._positions[0], (first.seq_id, 64))
+
+        for layer in layers:
+            layer.conv_state[0].fill_(3)
+            layer.recurrent_state[0].fill_(4)
+        cache.update(layers, [(first, 80)])
+        for layer in layers:
+            layer.conv_state[0].fill_(9)
+            layer.recurrent_state[0].fill_(9)
+
+        captured = cache.take([first])[first.seq_id]
+        self.assertEqual(captured.num_tokens, 80)
+        for conv, recurrent in captured.layers:
+            self.assertTrue(torch.all(conv == 3))
+            self.assertTrue(torch.all(recurrent == 4))
+            self.assertEqual(conv.device.type, "cpu")
+            self.assertEqual(recurrent.device.type, "cpu")
+        self.assertEqual(cache.take([first]), {})
+
+        # Reused state slots must never surface the previous request's snapshot.
+        second = Sequence([2] * 97)
+        second.state_slot = 0
+        self.assertEqual(cache.take([second]), {})
+        for layer in layers:
+            layer.conv_state[0].fill_(5)
+            layer.recurrent_state[0].fill_(6)
+        cache.update(layers, [(second, 96)])
+        self.assertEqual(cache.take([second])[second.seq_id].num_tokens, 96)
+        cache.clear()
+        self.assertEqual(cache._positions, {})
+
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_completion_buffer_uses_device_copies_until_final_export(self):
+        from nanovllm.engine.sequence import Sequence
+
+        class Layer:
+            def __init__(self):
+                self.conv_state = torch.ones((1, 3, 4), device="cuda", dtype=torch.bfloat16)
+                self.recurrent_state = torch.ones((1, 2, 4), device="cuda", dtype=torch.float32)
+
+            def slot(self, slot):
+                return self.conv_state[slot], self.recurrent_state[slot]
+
+        layer = Layer()
+        buffer = GDNCompletionBuffer([layer])
+        seq = Sequence([1] * 49)
+        seq.state_slot = 0
+        buffer.update([layer], [(seq, 32)])
+        self.assertEqual(buffer._conv[0].device.type, "cuda")
+        self.assertEqual(buffer._recurrent[0].device.type, "cuda")
+        layer.conv_state.fill_(7)
+        layer.recurrent_state.fill_(8)
+        buffer.update([layer], [(seq, 48)])
+        layer.conv_state.fill_(9)
+        layer.recurrent_state.fill_(9)
+        snapshot = buffer.take([seq])[seq.seq_id]
+        self.assertEqual(snapshot.num_tokens, 48)
+        self.assertEqual(snapshot.layers[0][0].device.type, "cpu")
+        self.assertEqual(snapshot.layers[0][1].device.type, "cpu")
+        self.assertTrue(torch.all(snapshot.layers[0][0] == 7))
+        self.assertTrue(torch.all(snapshot.layers[0][1] == 8))
+        buffer.clear()
+
 
 
 if __name__ == "__main__":

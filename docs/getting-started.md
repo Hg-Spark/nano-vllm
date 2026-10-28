@@ -150,7 +150,7 @@ finally:
 | `activation_reserve_bytes` | `268435456` | 在静态 KV 定容前额外预留 256 MiB 临时激活余量；可按 GPU 峰值 Profile 调整 |
 | `kv_cache_block_size` | `16` | FlashInfer page size；当前允许 `16/32/64`，基线使用 16；128-token KV 页不再支持 |
 | `max_prefix_cache_entries` | `0` | 联合前缀缓存默认关闭；设为正数后限制缓存条目数，不影响请求自身的 KV/GDN 状态 |
-| `max_prefix_cache_snapshot_bytes` | `None` | 全局已发布 CPU GDN Snapshot 字节上限；活跃请求另最多持有两份独立暂存，`0` 禁止捕获/发布 |
+| `max_prefix_cache_snapshot_bytes` | `None` | 全局已发布 CPU GDN Snapshot 字节上限；活跃请求最多持有 Prompt/Completion 两份 CPU 暂存及一份 GPU Completion 滚动状态，`0` 禁止捕获/发布 |
 | `max_visual_tokens_per_request` | `0` | 显式限制单请求图像视觉 Token 数；准入时检查，并按上限预留特征缓存。`None` 使用 `max_model_len`，`0` 禁用图像请求 |
 | `kv_cache_dtype` | `"auto"` | `auto` 跟随模型 dtype；`fp8_e4m3` 使用 FP8 KV 存储 |
 | `kv_cache_k_scale` | `1.0` | FP8 K 的全局标量缩放系数，必须有限且大于零 |

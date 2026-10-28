@@ -190,7 +190,7 @@ python -m scripts.verify_prefix_resume "$NANOVLLM_MODEL" \
 
 将误差指标记录在独立的本地实验结果中。当前 snapshot 不再主动降精度；恢复验证仍用于发现状态边界、复制或其他执行路径问题。
 
-Prefix Cache 在 GPU KV 静态容量中预留 GDN 状态批量捕获的临时堆叠缓冲，不再预留 FlashInfer 64-token 中间 Checkpoint。Prompt 在最后一个 Token 前的最近完整 KV Page 边界捕获固定状态，Decode 在完整 Page 边界更新一个 Completion 暂存（包括结束步）；请求结束才统一发布两种独立候选。全局条目和 `max_prefix_cache_snapshot_bytes` 限制已发布的 Resident Snapshot；活跃请求的两份暂存额外由 `2 × max_num_seqs × snapshot_nbytes` 硬性槽位上限约束，分别提供 `staging_snapshot_bytes`、`peak_staging_snapshot_bytes` 和 `peak_total_snapshot_bytes` 统计。CPU 快照保持卷积原始 dtype 与循环状态 FP32，临时 D2H 堆叠不在这些逻辑持久驻留指标内。
+Prefix Cache 在 GPU KV 静态容量中预留每个活跃 GDN Slot 的 Completion GPU 滚动缓冲与批量 D2H 临时堆叠缓冲，不再预留 FlashInfer 64-token 中间 Checkpoint。Prompt 在最后一个 Token 前的最近完整 KV Page 边界捕获一次 CPU 状态；Decode 在完整 Page 边界通过 D2D 更新 Completion 状态（包括结束步），仅在请求结束时把最后一份状态 D2H 并统一发布两种独立候选。全局条目和 `max_prefix_cache_snapshot_bytes` 限制已发布的 Resident Snapshot；活动请求最多两份 CPU 暂存由 `2 × max_num_seqs × snapshot_nbytes` 逻辑槽位上限约束。`staging_snapshot_bytes`、`peak_staging_snapshot_bytes` 和 `peak_total_snapshot_bytes` 统计 CPU 快照逻辑大小，不包含 GPU 滚动缓冲与临时 D2H 堆叠。
 
 ## 测量端到端性能
 
