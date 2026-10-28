@@ -1,20 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from nanovllm.engine.sequence import Sequence
-
-GDN_CHECKPOINT_INTERVAL = 64
-
-if TYPE_CHECKING:
-    from nanovllm.engine.state_manager import GDNStateSnapshot
 
 
 @dataclass(slots=True)
 class BatchResult:
     token_ids: list[int | None]
-    prefix_snapshots: dict[int, tuple[GDNStateSnapshot, ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,8 +17,6 @@ class ScheduledChunk:
     seq: Sequence
     start: int
     end: int
-    checkpoint_positions: tuple[int, ...] = ()
-    checkpoint_interval: int = 0
 
     def __post_init__(self) -> None:
         if self.start < 0 or self.end <= self.start:
