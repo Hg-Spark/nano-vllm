@@ -3,8 +3,17 @@ import unittest
 import flashinfer
 import torch
 
-from nanovllm.engine.batch_common import DecodeBatchLayout
+from nanovllm.engine.batch_common import (
+    DecodeBatchLayout,
+    DecodePageTableCache,
+    PinnedMetadataPool,
+    prepare_decode,
+    prepare_prefill,
+)
 from nanovllm.engine.decode_graph import DecodeGraphBucket
+from nanovllm.engine.model_runner import ModelRunner
+from nanovllm.engine.schedule import ScheduledChunk
+from nanovllm.engine.sequence import Sequence
 from nanovllm.layers.attention import Attention, store_kv_cache
 from nanovllm.utils.context import Context, use_context
 
@@ -36,6 +45,66 @@ class FlashInferPagedAttentionIntegrationTest(unittest.TestCase):
             dtype=torch.uint8,
             device="cuda",
         )
+
+    def test_eager_plan_shares_metadata_with_context(self):
+        seq = Sequence([1, 2, 3, 4])
+        seq.block_table = [0]
+        seq.state_slot = 0
+        runner = object.__new__(ModelRunner)
+        runner.block_size = self.PAGE_SIZE
+        runner.attention_spec = (
+            self.NUM_Q_HEADS,
+            self.NUM_KV_HEADS,
+            self.HEAD_DIM,
+            {
+                "q_data_type": self.DTYPE,
+                "kv_data_type": self.DTYPE,
+                "o_data_type": self.DTYPE,
+                "pos_encoding_mode": "NONE",
+                "sm_scale": self.SCALE,
+            },
+        )
+        runner.metadata_pool = PinnedMetadataPool()
+        runner.prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+            self.workspace, kv_layout="NHD", backend="auto"
+        )
+        runner.decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+            self.workspace, kv_layout="NHD", backend="auto"
+        )
+        try:
+            prefill = prepare_prefill((ScheduledChunk(seq, 0, 4),), 16, runner.metadata_pool)
+            prefill_ctx = runner._plan_attention(prefill)
+            self.assertIs(
+                prefill_ctx.paged_kv_indptr, runner.prefill_wrapper._paged_kv_indptr_buf
+            )
+            self.assertIs(
+                prefill_ctx.paged_kv_last_page_len,
+                runner.prefill_wrapper._paged_kv_last_page_len_buf,
+            )
+            self.assertIs(prefill_ctx.qo_indptr, runner.prefill_wrapper._qo_indptr_buf)
+            self.assertEqual(prefill_ctx.qo_indptr.tolist(), [0, 4])
+            self.assertEqual(prefill_ctx.paged_kv_indptr.tolist(), [0, 1])
+            self.assertEqual(prefill_ctx.paged_kv_last_page_len.tolist(), [4])
+
+            seq.append_token(5)
+            decode = prepare_decode(
+                (ScheduledChunk(seq, 4, 5),),
+                16,
+                runner.metadata_pool,
+                DecodePageTableCache(),
+            )
+            decode_ctx = runner._plan_attention(decode)
+            self.assertIs(
+                decode_ctx.paged_kv_indptr, runner.decode_wrapper._paged_kv_indptr_buf
+            )
+            self.assertIs(
+                decode_ctx.paged_kv_last_page_len,
+                runner.decode_wrapper._paged_kv_last_page_len_buf,
+            )
+            self.assertEqual(decode_ctx.paged_kv_indptr.tolist(), [0, 1])
+            self.assertEqual(decode_ctx.paged_kv_last_page_len.tolist(), [5])
+        finally:
+            runner.metadata_pool.clear()
 
     def _new_attention(
         self,
@@ -451,7 +520,7 @@ class FlashInferPagedAttentionIntegrationTest(unittest.TestCase):
 @unittest.skipUnless(_has_cuda_gpu(), "FlashInfer KV append Graph test requires CUDA")
 class FlashInferKVAppendGraphTest(unittest.TestCase):
     def test_graph_replay_updates_logical_positions_and_noncontiguous_pages(self):
-        for cache_dtype in (torch.float16, torch.float8_e4m3fn):
+        for cache_dtype in (torch.bfloat16, torch.float8_e4m3fn):
             with self.subTest(cache_dtype=cache_dtype):
                 self._check_graph_replay(cache_dtype)
 
@@ -459,7 +528,7 @@ class FlashInferKVAppendGraphTest(unittest.TestCase):
         bucket = DecodeGraphBucket(
             2, 64, 16, torch.zeros(1024 * 1024, dtype=torch.uint8, device="cuda")
         )
-        key = torch.randn(2, 1, 128, device="cuda", dtype=torch.float16)
+        key = torch.randn(2, 1, 128, device="cuda", dtype=torch.bfloat16)
         value = torch.randn_like(key)
         k_cache = torch.zeros(4, 16, 1, 128, device="cuda", dtype=cache_dtype)
         v_cache = torch.zeros_like(k_cache)

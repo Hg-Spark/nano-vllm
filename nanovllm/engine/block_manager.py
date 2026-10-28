@@ -72,6 +72,7 @@ class BlockManager:
             raise RuntimeError("invalid shared KV prefix blocks or boundary")
         self.retain_blocks(block_ids)
         seq.block_table.extend(block_ids)
+        seq.block_table_version += 1
 
     def max_schedulable_tokens(self, seq: Sequence, requested_tokens: int) -> int:
         if requested_tokens <= 0:
@@ -87,8 +88,11 @@ class BlockManager:
         if missing > len(self.free_block_ids):
             raise RuntimeError("insufficient KV cache blocks")
         seq.block_table.extend(self._allocate_block() for _ in range(missing))
+        seq.block_table_version += 1
 
     def deallocate(self, seq: Sequence) -> None:
+        self.prefix_cache.unmark_reused(seq)
         if seq.block_table:
             self.release_blocks(seq.block_table)
             seq.block_table.clear()
+            seq.block_table_version += 1

@@ -11,6 +11,11 @@ def _l2norm(x: torch.Tensor) -> torch.Tensor:
     return x * torch.rsqrt(x.square().sum(dim=-1, keepdim=True) + 1e-6)
 
 
+def _align_flashinfer_tensor(x: torch.Tensor) -> torch.Tensor:
+    x = x.contiguous()
+    return x if x.data_ptr() % 16 == 0 else x.clone()
+
+
 class RMSNormGated(nn.Module):
     def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
         super().__init__()
@@ -93,8 +98,27 @@ class GatedDeltaNet(nn.Module):
 
         from causal_conv1d import causal_conv1d_fn
 
-        # An explicit history window before every chunk isolates the sequences
-        # while allowing one convolution over the packed, variable-length input.
+        lengths = [q_offsets[index + 1] - q_offsets[index] for index in range(len(conv_states))]
+        if len(set(lengths)) == 1:
+            # Use the kernel's native batched initial/final states for equal-size
+            # chunks. Unlike the packed fallback, this does not materialize
+            # history tokens in the convolution input or repack its output.
+            x = mixed_qkv.contiguous().view(len(conv_states), lengths[0], self.conv_dim)
+            initial_states = torch.stack([state.T for state in conv_states]).transpose(1, 2)
+            out, final_states = causal_conv1d_fn(
+                x.transpose(1, 2),
+                self.conv1d.weight.squeeze(1),
+                None,
+                initial_states=initial_states,
+                return_final_states=True,
+                activation="silu",
+            )
+            for state, final_state in zip(conv_states, final_states):
+                state.copy_(final_state)
+            return out.transpose(1, 2).reshape(-1, self.conv_dim)
+
+        # Variable-size chunks retain the packed single-kernel fallback.
+        # Explicit history windows isolate their convolution state.
         history = self.conv_kernel_size - 1
         segments = []
         for index, state in enumerate(conv_states):
@@ -260,25 +284,23 @@ class GatedDeltaNet(nn.Module):
             conv_state_indices=state_slot_ids,
         )
         query, key, value = self._split_qkv(mixed_qkv)
-        # FlashInfer 0.7.0 FP32-state decode loads Q/K/V through BF16 registers.
-        if query.dtype == torch.float16:
-            query = query.to(torch.bfloat16)
-            key = key.to(torch.bfloat16)
-            value = value.to(torch.bfloat16)
+        a = _align_flashinfer_tensor(a.unsqueeze(1))
+        b = _align_flashinfer_tensor(b.unsqueeze(1))
+        aligned_slot_ids = _align_flashinfer_tensor(state_slot_ids.to(torch.int32))
         with record_function("nanovllm::gdn_decode_flashinfer"):
             core, _ = gated_delta_rule_decode_pretranspose(
                 query.unsqueeze(1).contiguous(),
                 key.unsqueeze(1).contiguous(),
                 value.unsqueeze(1).contiguous(),
                 None,
-                self.A_log.float(),
-                a.unsqueeze(1).contiguous(),
-                self.dt_bias.float(),
-                b.unsqueeze(1).contiguous(),
+                self.A_log.detach().float(),
+                a,
+                self.dt_bias.detach().float(),
+                b,
                 scale=self.head_k_dim**-0.5,
                 use_qk_l2norm=True,
                 initial_state=self.state_pool.recurrent_state,
-                initial_state_indices=state_slot_ids,
+                initial_state_indices=aligned_slot_ids,
                 backend="flashinfer",
             )
         return self._finalize_output(core.squeeze(1).to(hidden_states.dtype), z)

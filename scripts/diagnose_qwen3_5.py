@@ -10,7 +10,6 @@ if TYPE_CHECKING:
 
 from scripts._common import (
     ValidationFailure,
-    add_dtype_argument,
     add_hf_experts_backend_argument,
     add_model_argument,
     add_result_argument,
@@ -48,7 +47,7 @@ def _complete_capture(captured, expected, label):
     return captured
 
 
-def capture_hf_layers(model_path, input_ids, dtype: str, hf_experts_backend: str | None = "eager"):
+def capture_hf_layers(model_path, input_ids, hf_experts_backend: str | None = "eager"):
     import torch
     from transformers import AutoModelForCausalLM
 
@@ -60,15 +59,14 @@ def capture_hf_layers(model_path, input_ids, dtype: str, hf_experts_backend: str
             model(input_ids=ids, use_cache=False, return_dict=True)
         return _complete_capture(captured, len(layers), "HF")
 
-    return run_hf_reference(AutoModelForCausalLM, model_path, dtype, hf_experts_backend, probe)
+    return run_hf_reference(AutoModelForCausalLM, model_path, hf_experts_backend, probe)
 
 
-def capture_nano_layers(model_path, input_ids, max_model_len, dtype: str):
+def capture_nano_layers(model_path, input_ids, max_model_len):
     from nanovllm import LLM, SamplingParams
 
     llm = LLM(
         model_path,
-        dtype=dtype,
         max_model_len=max_model_len,
         max_num_batched_tokens=max(256, len(input_ids)),
         max_num_seqs=1,
@@ -178,7 +176,6 @@ def parse_args(argv=None):
         description="Compare decoder-layer hidden states between Transformers and nano-vLLM."
     )
     add_model_argument(parser, required=True)
-    add_dtype_argument(parser)
     add_hf_experts_backend_argument(parser)
     parser.add_argument(
         "--prompt", default="Explain why recurrent state must align with the KV prefix."
@@ -209,8 +206,8 @@ def run(args):
     effective_max_len = min(args.max_model_len, text_config.max_position_embeddings)
     if len(input_ids) + 1 > effective_max_len:
         raise ValueError("probe prompt and sampled token exceed effective max_model_len")
-    hf_layers = capture_hf_layers(args.model, input_ids, args.dtype, hf_experts_backend=hf_backend)
-    nano_layers = capture_nano_layers(args.model, input_ids, args.max_model_len, args.dtype)
+    hf_layers = capture_hf_layers(args.model, input_ids, hf_experts_backend=hf_backend)
+    nano_layers = capture_nano_layers(args.model, input_ids, args.max_model_len)
 
     details = []
     first_divergent = compare_layers(hf_layers, nano_layers, args.relative_rms_threshold, details)

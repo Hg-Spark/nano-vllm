@@ -31,12 +31,12 @@ def _normalize_eos_token_ids(value) -> tuple[int, ...]:
 
 
 class LLMEngine:
-    def __init__(self, model, *, dtype: str, **kwargs) -> None:
+    def __init__(self, model, **kwargs) -> None:
         from transformers import AutoTokenizer, GenerationConfig
 
         from nanovllm.engine.model_runner import ModelRunner
 
-        config = Config(model, dtype=dtype, **kwargs)
+        config = Config(model, **kwargs)
         self.config = config
         self.max_model_len = config.max_model_len
         self.model_runner = None

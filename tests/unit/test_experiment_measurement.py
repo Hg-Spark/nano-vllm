@@ -52,6 +52,9 @@ class MeasurementTest(unittest.TestCase):
         self.assertEqual(result["tpot_seconds"]["mean"], 0.5)
         self.assertEqual(result["prefill_host_call_tok_s"], 2)
         self.assertEqual(result["decode_host_call_tok_s"], 2)
+        self.assertEqual(result["decode_forward_calls"], 1)
+        self.assertEqual(result["ttft_samples"], 1)
+        self.assertIsNone(result["ttft_seconds"]["p99"])
         self.assertEqual(cuda.synchronize.call_count, 3)
 
     def test_long_prompt_interference_records_arrival_relative_latency(self):
@@ -107,7 +110,9 @@ class MeasurementTest(unittest.TestCase):
         interference = result["long_prompt_interference"]
         self.assertEqual(interference["injected_after_decode_steps"], 1)
         self.assertGreater(interference["long_ttft_seconds"], 0)
-        self.assertGreater(interference["short_token_gap_after_seconds"]["p99"], 0)
+        self.assertGreater(interference["short_token_gap_after_seconds"]["mean"], 0)
+        self.assertIsNone(interference["short_token_gap_after_seconds"]["p99"])
+        self.assertLess(interference["short_token_gap_after_samples"], 1000)
 
     def test_require_greedy_parity_rejects_short_generations(self):
         with self.assertRaisesRegex(ValidationFailure, "expected 4 greedy tokens"):
@@ -174,6 +179,8 @@ class MeasurementTest(unittest.TestCase):
         self.assertEqual(summary["p50"], 5)
         self.assertEqual(summary["p99"], 9.9)
         self.assertEqual(bench.summarize([7]), {"mean": 7, "p50": 7, "p99": 7})
+        self.assertIsNone(bench.summarize([0, 10], p99_min_samples=1000)["p99"])
+        self.assertEqual(bench.summarize([1.0] * 1000, p99_min_samples=1000)["p99"], 1.0)
 
 
 if __name__ == "__main__":

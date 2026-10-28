@@ -58,7 +58,21 @@ class ModelRunnerTest(unittest.TestCase):
                     qo_indptr=object() if prefill else None,
                     paged_kv_indices=indices,
                 )
+                # Simulate buffers populated by FlashInfer 0.7.0 plan().
+                wrapper._qo_indptr_buf = torch.tensor(q_offsets, dtype=torch.int32)
+                wrapper._paged_kv_indptr_buf = torch.tensor(indptr, dtype=torch.int32)
+                wrapper._paged_kv_last_page_len_buf = torch.tensor(
+                    last_page_len, dtype=torch.int32
+                )
                 result = runner._plan_attention(SimpleNamespace(context=context, layout=layout))
+                self.assertIs(result.paged_kv_indptr, wrapper._paged_kv_indptr_buf)
+                self.assertIs(
+                    result.paged_kv_last_page_len, wrapper._paged_kv_last_page_len_buf
+                )
+                if prefill:
+                    self.assertIs(result.qo_indptr, wrapper._qo_indptr_buf)
+                else:
+                    self.assertIsNone(result.qo_indptr)
                 args = wrapper.plan.call_args.args
                 offsets = (
                     ((0, q_offsets), (1, indptr), (3, last_page_len))
@@ -146,6 +160,54 @@ class ModelRunnerTest(unittest.TestCase):
                 )
         self.assertEqual(bucket._host_transfer_done.synchronize.call_count, 1)
         self.assertEqual(bucket._host_transfer_done.record.call_count, 2)
+
+    def test_decode_graph_reuses_unchanged_page_index_buffer(self):
+        bucket = object.__new__(DecodeGraphBucket)
+        bucket.batch_size = 1
+        bucket.max_page_indices = 2
+        bucket._has_pending_host_transfer = False
+        bucket._page_table_key = None
+        bucket._copy_layout = Mock()
+        bucket._host_buffers = {
+            "paged_kv_indptr": torch.empty(2, dtype=torch.int32),
+            "paged_kv_last_page_len": torch.empty(1, dtype=torch.int32),
+        }
+        layout = SimpleNamespace(
+            input_ids=(1,),
+            rope_positions=((0,),),
+            kv_positions=(7,),
+            state_slots=(0,),
+            paged_kv_indptr=(0, 1),
+            paged_kv_indices=(9,),
+            paged_kv_last_page_len=(8,),
+            page_table_key=(16, ((42, 1, 1, 1),)),
+        )
+        bucket.load(layout)
+        bucket.load(layout)
+        uploads = [
+            call.args[0]
+            for call in bucket._copy_layout.call_args_list
+        ]
+        self.assertEqual(uploads.count("paged_kv_indices"), 1)
+        changed = SimpleNamespace(**vars(layout))
+        changed.page_table_key = (16, ((42, 2, 1, 1),))
+        bucket.load(changed)
+        uploads = [call.args[0] for call in bucket._copy_layout.call_args_list]
+        self.assertEqual(uploads.count("paged_kv_indices"), 2)
+
+    def test_decode_graph_fallback_counters(self):
+        runner = object.__new__(ModelRunner)
+        runner.block_size = 16
+        runner.decode_graph_buckets = {}
+        runner.decode_graph_fallbacks = {"missing_bucket": 0, "layout_exceeded": 0}
+        chunks = (object(),)
+        self.assertIsNone(runner._run_decode_graph(chunks, []))
+        self.assertEqual(runner.decode_graph_fallbacks["missing_bucket"], 1)
+
+        runner.decode_graph_buckets = {1: SimpleNamespace(can_run=lambda _: False)}
+        with patch("nanovllm.engine.model_runner.build_decode_batch_layout", return_value=object()):
+            self.assertIsNone(runner._run_decode_graph(chunks, []))
+        self.assertEqual(runner.decode_graph_fallbacks["layout_exceeded"], 1)
 
     def test_all_greedy_batch_avoids_temperature_upload(self):
         runner = object.__new__(ModelRunner)

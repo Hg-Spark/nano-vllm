@@ -9,8 +9,10 @@ from collections import defaultdict
 from pathlib import Path
 from statistics import median
 
+from scripts.bench import P99_MIN_SAMPLES
 
-def workload_key(result):
+
+def workload_key(result, *, ignore_mixed_prefill_limit=False):
     p = result["config"]
     # A/B toggles deliberately excluded: graph_sizes, cache_entries, schedule_mode.
     names = (
@@ -20,6 +22,8 @@ def workload_key(result):
         "scenario",
         "seed",
         "budget",
+        "mixed_prefill_limit",
+        "activation_reserve_mib",
         "max_num_seqs",
         "num_requests",
         "input_len",
@@ -39,7 +43,10 @@ def workload_key(result):
         tuple(result["compute_capability"]),
         result.get("torch_version"),
         result.get("torch_cuda_version"),
-        *[p.get(n) for n in names],
+        *[
+            None if ignore_mixed_prefill_limit and n == "mixed_prefill_limit" else p.get(n)
+            for n in names
+        ],
     )
 
 
@@ -77,10 +84,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("folder", help="directory of benchmark experiment JSON files")
     ap.add_argument("--min-repeats", type=int, default=5)
-    ap.add_argument("--min-itl-samples", type=int, default=1000)
+    ap.add_argument("--min-itl-samples", type=int, default=P99_MIN_SAMPLES)
     args = ap.parse_args(argv)
-    if args.min_repeats < 1 or args.min_itl_samples < 1:
-        ap.error("--min-repeats and --min-itl-samples must be positive")
+    if args.min_repeats < 1:
+        ap.error("--min-repeats must be positive")
+    if args.min_itl_samples < P99_MIN_SAMPLES:
+        ap.error(f"--min-itl-samples must be at least {P99_MIN_SAMPLES} for P99 reporting")
 
     samples = []
     failed = []
@@ -114,8 +123,21 @@ def main(argv=None):
             print("PARITY FAILURE", key, values)
         raise SystemExit("Output token hashes differ for a supposedly identical workload")
 
+    # An exclusive Decode-first run never uses mixed_prefill_limit: share the
+    # budget-matched baseline without re-running it for every Mixed cap.
+    exclusive_baselines = {}
+    for (_, v), runs in grouped.items():
+        if (
+            v == ((), 0, "exclusive_decode_first")
+            and runs[0]["config"]["scenario"] == "interference"
+        ):
+            key = workload_key(runs[0], ignore_mixed_prefill_limit=True)
+            cap = runs[0]["config"].get("mixed_prefill_limit")
+            if key not in exclusive_baselines or cap == -1:
+                exclusive_baselines[key] = runs
+
     print(
-        "scenario            batch budget graph       cache mode                    runs tok/s  TPOT_ms TTFT_ms  hits replays"
+        "scenario            batch budget cap  graph       cache mode                    runs tok/s  TPOT_ms TTFT_ms  hits replays"
     )
     for (w, v), runs in sorted(grouped.items(), key=lambda item: str(item[0])):
         p = runs[0]["config"]
@@ -124,6 +146,7 @@ def main(argv=None):
         ttft = milliseconds(runs, "ttft_seconds")
         print(
             f"{p['scenario']:19} {p['max_num_seqs']:5} {p['budget']:6} "
+            f"{str(p.get('mixed_prefill_limit', '-')):4} "
             f"{','.join(map(str, v[0])) or '-':11} {v[1]:5} {v[2]:23} "
             f"{len(runs):4} {number(runs, 'output_throughput_tok_s'):6.1f} "
             f"{format_ms(milliseconds(runs, 'tpot_seconds'), 8)} "
@@ -150,6 +173,10 @@ def main(argv=None):
             latency_key = "ttft_seconds"
         elif scenario == "interference":
             baseline = variants.get(((), 0, "exclusive_decode_first"))
+            if baseline is None:
+                baseline = exclusive_baselines.get(
+                    workload_key(sample, ignore_mixed_prefill_limit=True)
+                )
             matches = [(v, rs) for v, rs in variants.items() if v == ((), 0, "mixed")]
             label = "Mixed / Exclusive decode-first"
             latency_key = None
@@ -161,6 +188,14 @@ def main(argv=None):
             )
             continue
         for v, treatment in matches:
+            # The shared exclusive baseline can be from a different cap group.
+            # Preserve strict token-output parity across that reuse boundary.
+            if {r["details"]["token_hash"] for r in baseline} != {
+                r["details"]["token_hash"] for r in treatment
+            }:
+                raise SystemExit(
+                    "PARITY FAILURE: shared exclusive baseline differs from Mixed output"
+                )
             if min(len(baseline), len(treatment)) < args.min_repeats:
                 issues.append(f"too few repeats for {label}, {scenario} batch={p['max_num_seqs']}")
                 continue
@@ -169,9 +204,63 @@ def main(argv=None):
                 number(treatment, "output_throughput_tok_s"),
             )
             print(
-                f"\n{label}: {scenario}, batch={p['max_num_seqs']}, budget={p['budget']}, variant={v}"
+                f"\n{label}: {scenario}, batch={p['max_num_seqs']}, budget={p['budget']}, "
+                f"cap={p.get('mixed_prefill_limit', '-')}, variant={v}"
             )
             print(f"  Output throughput improvement: {format_percent(throughput)}")
+            if scenario in ("throughput", "decode") and all(
+                "graph_coverage" in r["metrics"] for r in treatment
+            ):
+                graph_coverage = median(r["metrics"]["graph_coverage"] for r in treatment)
+                eager_calls = median(r["metrics"]["eager_decode_forward_calls"] for r in treatment)
+                print(
+                    f"  Graph coverage: {graph_coverage:.1%}; eager fallback calls: {eager_calls:.0f}"
+                )
+                reasons = ("missing_bucket", "layout_exceeded")
+                for reason in reasons:
+                    count = median(
+                        r["metrics"]["graph_fallback_reasons"][reason] for r in treatment
+                    )
+                    print(f"    {reason}: {count:.0f}")
+            if all("peak_cuda_memory_gib" in run["metrics"] for run in [*baseline, *treatment]):
+                b_mem = number(baseline, "peak_cuda_memory_gib")
+                t_mem = number(treatment, "peak_cuda_memory_gib")
+                print(
+                    f"  Peak CUDA allocated: {b_mem:.3f} -> {t_mem:.3f} GiB "
+                    f"(reduction {format_percent(percent(b_mem, t_mem, higher_better=False))})"
+                )
+            if scenario == "prefix":
+                restored = median(
+                    run["details"]["total_restored_prefix_tokens"] for run in treatment
+                )
+                hits = median(run["details"]["prefix_hit_rate"] for run in treatment)
+                print(f"  Prefix restored tokens: {restored:.0f}, hit rate: {hits:.2f}")
+                if all(
+                    "target_scheduled_checkpoint_stats" in run["details"]
+                    for run in [*baseline, *treatment]
+                ):
+                    b_cps = median(
+                        run["details"]["target_scheduled_checkpoint_stats"]["checkpoint_positions"]
+                        for run in baseline
+                    )
+                    t_cps = median(
+                        run["details"]["target_scheduled_checkpoint_stats"]["checkpoint_positions"]
+                        for run in treatment
+                    )
+                    print(
+                        f"  Target scheduled checkpoints (not confirmed retained): "
+                        f"{b_cps:.0f} -> {t_cps:.0f}"
+                    )
+                if all("published_checkpoints_during_target" in r["details"] for r in treatment):
+                    fields = (
+                        "published_checkpoints_during_target",
+                        "evicted_checkpoints_during_target",
+                        "retained_checkpoints_after_target",
+                        "peak_snapshot_bytes_including_setup",
+                    )
+                    for field in fields:
+                        value = median(r["details"][field] for r in treatment)
+                        print(f"  {field}: {value:.0f}")
             if latency_key:
                 improvement = percent(
                     milliseconds(baseline, latency_key),
@@ -202,26 +291,31 @@ def main(argv=None):
                         * 1000
                         for r in runs
                     )
-                    p99 = median(
-                        r["metrics"]["long_prompt_interference"]["short_token_gap_after_seconds"][
-                            "p99"
-                        ]
-                        * 1000
-                        for r in runs
-                    )
                     samples = min(
                         r["metrics"]["long_prompt_interference"].get(
                             "short_token_gap_after_samples", 0
                         )
                         for r in runs
                     )
+                    p99_values = [
+                        r["metrics"]["long_prompt_interference"][
+                            "short_token_gap_after_seconds"
+                        ].get("p99")
+                        for r in runs
+                    ]
+                    p99 = (
+                        median(value * 1000 for value in p99_values)
+                        if samples >= args.min_itl_samples
+                        and all(value is not None for value in p99_values)
+                        else None
+                    )
                     tail_stats.append((p99, samples))
                     print(
                         f"  Post-arrival observed token gap ({label2}): "
-                        f"mean={gap:.2f} ms, p99={p99:.2f} ms, "
+                        f"mean={gap:.2f} ms, p99={format_ms(p99).strip()} ms, "
                         f"min samples/run={samples} (synthetic workload)"
                     )
-                if min(samples for _, samples in tail_stats) >= args.min_itl_samples:
+                if all(p99 is not None for p99, _ in tail_stats):
                     reduction = percent(tail_stats[0][0], tail_stats[1][0], higher_better=False)
                     print(f"  Synthetic P99 ITL reduction: {format_percent(reduction)}")
                 else:

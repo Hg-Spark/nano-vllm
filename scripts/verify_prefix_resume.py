@@ -6,7 +6,6 @@ from unittest.mock import patch
 
 from scripts._common import (
     ValidationFailure,
-    add_dtype_argument,
     add_model_argument,
     add_result_argument,
     compare_tokens,
@@ -31,7 +30,7 @@ def _build_prefix_probe_prompts(tokenizer, block_size: int) -> tuple[list[int], 
 
 
 def run_prefix_resume_probe(
-    model_path: str, max_new_tokens: int, max_model_len: int, block_size: int, dtype: str
+    model_path: str, max_new_tokens: int, max_model_len: int, block_size: int
 ) -> dict:
     import torch
     from transformers import AutoTokenizer
@@ -44,7 +43,6 @@ def run_prefix_resume_probe(
 
     baseline = LLM(
         model_path,
-        dtype=dtype,
         max_model_len=max_model_len,
         max_num_batched_tokens=block_size,
         max_num_seqs=1,
@@ -147,7 +145,6 @@ def parse_args(argv=None):
         description="Compare uncached and prefix-restored greedy generation."
     )
     add_model_argument(parser, required=True)
-    add_dtype_argument(parser)
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--prefix-block-size", type=int, choices=(16, 32, 64, 128), default=16)
@@ -162,7 +159,7 @@ def parse_args(argv=None):
 def run(args):
     validate_model_family(args.model)
     return run_prefix_resume_probe(
-        args.model, args.max_new_tokens, args.max_model_len, args.prefix_block_size, args.dtype
+        args.model, args.max_new_tokens, args.max_model_len, args.prefix_block_size
     )
 
 

@@ -31,7 +31,7 @@ class PreparedBatch:
 @dataclass(frozen=True, slots=True)
 class PrefillBatchLayout:
     input_ids: tuple[int, ...]
-    rope_positions: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]
+    rope_positions: tuple[tuple[int, ...], ...]
     q_offsets: tuple[int, ...]
     image_copy_spans: tuple[ImageCopySpan, ...]
     kv_batch_indices: tuple[int, ...]
@@ -53,6 +53,41 @@ class DecodeBatchLayout:
     paged_kv_indptr: tuple[int, ...]
     paged_kv_indices: tuple[int, ...]
     paged_kv_last_page_len: tuple[int, ...]
+    # Opaque identity for reusable physical page indices; length metadata is dynamic.
+    page_table_key: tuple | None = None
+
+
+class DecodePageTableCache:
+    """Reuse packed Decode CSR page indices while request-to-page maps are unchanged."""
+
+    def __init__(self) -> None:
+        self._key: tuple | None = None
+        self._indptr: tuple[int, ...] = ()
+        self._indices: tuple[int, ...] = ()
+
+    def clear(self) -> None:
+        self._key = None
+        self._indptr = ()
+        self._indices = ()
+
+    def get(self, seqs: list[Sequence], kv_lens: list[int], block_size: int):
+        key = (block_size, tuple(
+            (
+                seq.seq_id,
+                seq.block_table_version,
+                len(seq.block_table),
+                (kv_len + block_size - 1) // block_size,
+            )
+            for seq, kv_len in zip(seqs, kv_lens)
+        ))
+        if key != self._key:
+            indptr, indices, _ = _paged_kv_metadata(seqs, kv_lens, block_size)
+            self._key = key
+            self._indptr = indptr
+            self._indices = indices
+        # The final page length is token-dependent even if no page was added.
+        last_page_len = tuple((length - 1) % block_size + 1 for length in kv_lens)
+        return self._indptr, self._indices, last_page_len, key
 
 
 def _paged_kv_metadata(
@@ -115,6 +150,8 @@ class PinnedMetadataPool:
         self._transfer_done = None
         self._pending = False
         self._batching = False
+        self._cached_indices_key = None
+        self._cached_indices_device = None
 
     def _wait_for_transfers(self) -> None:
         if self._pending:
@@ -136,7 +173,8 @@ class PinnedMetadataPool:
                 self._transfer_done.record(torch.cuda.current_stream())
                 self._pending = True
 
-    def to_cuda(self, name: str, values, dtype: str) -> torch.Tensor:
+    def stage_host(self, name: str, values, dtype: str) -> torch.Tensor:
+        """Prepare CPU metadata for FlashInfer.plan without an eager H2D copy."""
         import torch
 
         if not self._batching:
@@ -149,6 +187,12 @@ class PinnedMetadataPool:
             self.buffers[name] = host
         staged = host[:required].view(source.shape)
         staged.copy_(source)
+        return staged
+
+    def to_cuda(self, name: str, values, dtype: str) -> torch.Tensor:
+        import torch
+
+        staged = self.stage_host(name, values, dtype)
         result = staged.cuda(non_blocking=True)
         if self._transfer_done is None:
             self._transfer_done = torch.cuda.Event()
@@ -156,6 +200,15 @@ class PinnedMetadataPool:
             self._transfer_done.record(torch.cuda.current_stream())
             self._pending = True
         return result
+
+    def to_cuda_cached(self, name: str, values, dtype: str, key: tuple | None) -> torch.Tensor:
+        """Reuse immutable Eager Decode page indices across steps of the same batch."""
+        if key is not None and getattr(self, "_cached_indices_key", None) == (name, key):
+            return self._cached_indices_device
+        device = self.to_cuda(name, values, dtype)
+        self._cached_indices_key = (name, key) if key is not None else None
+        self._cached_indices_device = device if key is not None else None
+        return device
 
     def host_view(self, name: str, length: int) -> torch.Tensor:
         return self.buffers[name][:length]
@@ -171,6 +224,8 @@ class PinnedMetadataPool:
         self._wait_for_transfers()
         self._transfer_done = None
         self.buffers.clear()
+        self._cached_indices_key = None
+        self._cached_indices_device = None
 
 
 def build_prefill_batch_layout(
@@ -181,7 +236,10 @@ def build_prefill_batch_layout(
         raise ValueError("prefill batch must be non-empty with positive block_size")
 
     input_ids: list[int] = []
-    rope_positions: list[list[int]] = [[], [], []]
+    # Only multimodal batches need distinct spatial/temporal RoPE axes.
+    rope_positions: list[list[int]] = (
+        [[], [], []] if any(chunk.seq.image_state is not None for chunk in chunks) else [[]]
+    )
     q_offsets = [0]
     image_copy_spans: list[ImageCopySpan] = []
     kv_lens: list[int] = []
@@ -237,6 +295,7 @@ def build_prefill_batch_layout(
 def build_decode_batch_layout(
     chunks: tuple[ScheduledChunk, ...],
     block_size: int,
+    page_cache: DecodePageTableCache | None = None,
 ) -> DecodeBatchLayout:
     if not chunks:
         raise ValueError("decode batch must not be empty")
@@ -247,15 +306,22 @@ def build_decode_batch_layout(
         for seq in seqs
     )
     kv_lens = [len(seq) for seq in seqs]
-    paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len = _paged_kv_metadata(
-        seqs, kv_lens, block_size
-    )
+    if page_cache is None:
+        paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len = _paged_kv_metadata(
+            seqs, kv_lens, block_size
+        )
+        page_table_key = None
+    else:
+        paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len, page_table_key = (
+            page_cache.get(seqs, kv_lens, block_size)
+        )
     return DecodeBatchLayout(
         input_ids=tuple(seq[-1] for seq in seqs),
         rope_positions=(rope_positions,),
         kv_batch_indices=tuple(range(len(seqs))),
         kv_positions=tuple(len(seq) - 1 for seq in seqs),
         state_slots=tuple(seq.state_slot for seq in seqs),
+        page_table_key=page_table_key,
         paged_kv_indptr=paged_kv_indptr,
         paged_kv_indices=paged_kv_indices,
         paged_kv_last_page_len=paged_kv_last_page_len,
@@ -276,6 +342,9 @@ def prepare_prefill(
         for chunk in chunks:
             count = chunk.num_tokens // checkpoint_interval if checkpoint_interval else 0
             checkpoint_offsets.append(checkpoint_offsets[-1] + count)
+        host_pool.stage_host("prefill_q_offsets", layout.q_offsets, "int32")
+        host_pool.stage_host("prefill_kv_indptr", layout.paged_kv_indptr, "int32")
+        host_pool.stage_host("prefill_page_len", layout.paged_kv_last_page_len, "int32")
         context = Context(
             is_prefill=True,
             prefill_checkpoint_interval=checkpoint_interval,
@@ -288,12 +357,9 @@ def prepare_prefill(
             ),
             kv_batch_indices=upload("prefill_kv_batch_indices", layout.kv_batch_indices, "int32"),
             kv_positions=upload("prefill_kv_positions", layout.kv_positions, "int32"),
-            qo_indptr=upload("prefill_q_offsets", layout.q_offsets, "int32"),
-            paged_kv_indptr=upload("prefill_kv_indptr", layout.paged_kv_indptr, "int32"),
+            # FlashInfer.plan owns the GPU copies of offsets/indptr/page len.
+            # ModelRunner attaches those same buffers to Context after planning.
             paged_kv_indices=upload("prefill_kv_indices", layout.paged_kv_indices, "int32"),
-            paged_kv_last_page_len=upload(
-                "prefill_page_len", layout.paged_kv_last_page_len, "int32"
-            ),
             state_slots=layout.state_slots,
             state_slot_ids=upload("prefill_state_slots", layout.state_slots, "int32"),
             state_prefix_lens=layout.state_prefix_lens,
@@ -301,13 +367,7 @@ def prepare_prefill(
         )
         return PreparedBatch(
             input_ids=upload("prefill_input_ids", layout.input_ids, "int64"),
-            positions=upload(
-                "prefill_positions",
-                layout.rope_positions[:1]
-                if all(chunk.seq.image_state is None for chunk in chunks)
-                else layout.rope_positions,
-                "int64",
-            ),
+            positions=upload("prefill_positions", layout.rope_positions, "int64"),
             context=context,
             layout=layout,
         )
@@ -317,17 +377,19 @@ def prepare_decode(
     chunks: tuple[ScheduledChunk, ...],
     block_size: int,
     host_pool: PinnedMetadataPool,
+    page_cache: DecodePageTableCache | None = None,
 ) -> PreparedBatch:
-    layout = build_decode_batch_layout(chunks, block_size)
+    layout = build_decode_batch_layout(chunks, block_size, page_cache)
     with host_pool.batch() as upload:
+        host_pool.stage_host("decode_kv_indptr", layout.paged_kv_indptr, "int32")
+        host_pool.stage_host("decode_page_len", layout.paged_kv_last_page_len, "int32")
         context = Context(
             is_prefill=False,
             kv_batch_indices=upload("decode_kv_batch_indices", layout.kv_batch_indices, "int32"),
             kv_positions=upload("decode_kv_positions", layout.kv_positions, "int32"),
-            paged_kv_indptr=upload("decode_kv_indptr", layout.paged_kv_indptr, "int32"),
-            paged_kv_indices=upload("decode_kv_indices", layout.paged_kv_indices, "int32"),
-            paged_kv_last_page_len=upload(
-                "decode_page_len", layout.paged_kv_last_page_len, "int32"
+            # The indptr and last-page-len GPU copies come from FlashInfer.plan.
+            paged_kv_indices=host_pool.to_cuda_cached(
+                "decode_kv_indices", layout.paged_kv_indices, "int32", layout.page_table_key
             ),
             state_slot_ids=upload("decode_state_slots", layout.state_slots, "int32"),
         )
