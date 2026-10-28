@@ -35,7 +35,7 @@ Qwen3.5 Hybrid Model → Full Attention KV + GDN Conv/Recurrent State
 | 循环状态恢复 | Hybrid 的 Mamba/循环缓存需满足对应的 checkpoint、对齐与保留规则 | 循环态在安全前缀边界需要 checkpoint，多个组件共同决定可恢复边界 | 仅完整 KV 页边界捕获 GDN 状态；KV 命中但缺少对应 GDN 快照时**不能单独复用 KV** |
 | 抢占与故障 | 生产引擎具有更完整的资源回收、请求重排及扩展缓存/通信路径 | 与 Cache/Allocator、请求生命周期和缓存复用协同 | 接纳前预留完整生命周期 KV 额度；运行中只淘汰 Prefix Cache；失败则抛错并关闭引擎 |
 | Full Attention | 支持多种 Attention 后端及针对模型/硬件的优化 | 支持多后端，也可按阶段组合后端 | 固定 FlashInfer Paged Prefill/Decode 与 KV Append；FP8 缩放及转换使用 PyTorch，避免自行维护写入 kernel |
-| GDN / MoE | 对不同架构集成专用层、backend、融合/编译等优化 | 具备多种推理 kernel 及 MoE/混合 Attention 后端 | GDN 固定 FlashInfer 0.7.0（SM90/100/120 且 K/V head_dim=128），MoE Prefill/Decode 使用 FlashInfer CUTLASS；不维护 PyTorch GDN 后端 |
+| GDN / MoE | 对不同架构集成专用层、backend、融合/编译等优化 | 具备多种推理 kernel 及 MoE/混合 Attention 后端 | GDN 固定 FlashInfer >=0.7.0（SM90/100/120 且 K/V head_dim=128），MoE Prefill/Decode 使用 FlashInfer CUTLASS；不维护 PyTorch GDN 后端 |
 | CUDA Graph | 有后端能力协商与多种 Graph 捕获模式 | 与执行批次及 Attention Backend 的 Graph 支持共同设计 | 只为显式指定的 Decode Batch size 做 exact bucket；不做 padding，未命中走 Eager |
 | 多模态与并行 | 成熟的模型适配、服务/并行能力 | 成熟的模型适配、服务/并行能力 | 只支持单图、单 GPU，暂缓多图/视频及 TP/EP；保持请求状态问题的实验范围明确 |
 

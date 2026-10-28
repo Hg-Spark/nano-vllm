@@ -9,14 +9,14 @@
 | 项目 | 参考版本、依赖声明或运行要求 |
 | --- | --- |
 | Python | 推荐 `3.12`；项目不增加运行时版本检查 |
-| PyTorch | 参考 `2.14.0`；依赖不固定版本 |
+| PyTorch | `torch==2.12.1`，使用 CUDA 13.0 Wheel |
 | CUDA | 参考 `13.0`（PyTorch `cu130` 构建）；启动时不检查版本 |
 | Transformers | `>=5.19.0`，须包含所用 Qwen3.5 稠密/MoE 配置与参考模型接口 |
-| FlashInfer | `flashinfer-python==0.7.0`；Full Attention 统一使用分页 prefill/decode wrapper |
+| FlashInfer | `flashinfer-python[cu13]>=0.7.0`；Full Attention 统一使用分页 prefill/decode wrapper |
 | 权重 | 本地非量化 Qwen3.5 稠密/MoE 完整 safetensors（文本 + visual），推理统一使用 BF16 |
 | 设备 | 单 GPU，显存须容纳全部已加载权重、KV、GDN 状态和临时张量 |
 
-统一使用 Python 3.12 作为开发、CI 与基准测试参考环境，不额外添加运行时 Python 版本检查。PyTorch 和 CUDA 的参考版本仅供安装和复现参考，不表示这组环境已经完成全部真实 GPU 验证。所选环境仍需满足依赖包自身的要求；应在本地实验输出中记录实际安装的版本。
+统一使用 Python 3.12 作为开发、CI 与基准测试参考环境，不额外添加运行时 Python 版本检查。CUDA 13.0 为参考版本，PyTorch 2.12.1 已固定在依赖中；该环境尚未完成全部真实 GPU 验证。所选环境仍需满足依赖包自身的要求；应在本地实验输出中记录实际安装的版本。
 
 以下 shell 示例使用 Bash，适用于具备上述依赖的环境。Windows 用户需要自行准备能够运行这些 CUDA 依赖的 Linux/WSL2 环境；本分支没有提供原生 Windows 安装流程。
 
@@ -48,7 +48,7 @@ flashinfer download-kernels
 python -c 'import torch, flashinfer, transformers; print("PyTorch:", torch.__version__); print("PyTorch CUDA:", torch.version.cuda); print("FlashInfer:", flashinfer.__version__); print("Transformers:", transformers.__version__)'
 ```
 
-运行时固定 FlashInfer 0.7.0 GDN Packed Prefill 和 State-Indexed Decode，复用 FP32 `[V,K]` State Pool。初始化时要求 SM90/SM100/SM120 且 K/V head_dim 均为 128，否则直接报错；RTX 2080 Ti / SM75 不再支持。仍须完成真实权重对齐与 GPU Profile。
+运行时使用 FlashInfer GDN Packed Prefill 和 State-Indexed Decode，复用 FP32 `[V,K]` State Pool。初始化时要求 SM90/SM100/SM120 且 K/V head_dim 均为 128，否则直接报错；RTX 2080 Ti / SM75 不再支持。仍须完成真实权重对齐与 GPU Profile。
 
 ## 准备本地模型目录
 
