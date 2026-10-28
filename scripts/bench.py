@@ -53,6 +53,7 @@ def run_benchmark(
     finished_at: dict[int, float] = {}
     prefill_tokens = decode_tokens = max_prefill_step_tokens = max_decode_step_tokens = steps = 0
     prefill_seconds = decode_seconds = snapshot_capture_seconds = 0.0
+    post_arrival_mixed_steps = post_arrival_mixed_prefill_tokens = 0
 
     def record_request_times(now: float) -> None:
         for seq in all_sequences:
@@ -81,6 +82,9 @@ def run_benchmark(
         decode_seconds += stats.decode_seconds
         prefill_seconds += stats.prefill_seconds
         snapshot_capture_seconds += stats.snapshot_capture_seconds
+        if late_added and stats.decode_tokens and stats.prefill_tokens:
+            post_arrival_mixed_steps += 1
+            post_arrival_mixed_prefill_tokens += stats.prefill_tokens
         max_prefill_step_tokens = max(max_prefill_step_tokens, stats.prefill_tokens)
         max_decode_step_tokens = max(max_decode_step_tokens, stats.decode_tokens)
         if stats.decode_tokens:
@@ -132,6 +136,8 @@ def run_benchmark(
     if late_sequence is not None:
         result["long_prompt_interference"] = {
             "injected_after_decode_steps": late_after_decode_steps,
+            "post_arrival_mixed_steps": post_arrival_mixed_steps,
+            "post_arrival_mixed_prefill_tokens": post_arrival_mixed_prefill_tokens,
             "long_prompt_tokens": late_sequence.num_prompt_tokens,
             "long_ttft_seconds": first_token_at[late_sequence.seq_id]
             - arrival_at[late_sequence.seq_id],

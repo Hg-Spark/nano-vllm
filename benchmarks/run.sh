@@ -24,7 +24,7 @@ KV_CACHE_DTYPE="${NANOVLLM_KV_CACHE_DTYPE:-auto}"
 KV_CACHE_K_SCALE="${NANOVLLM_KV_CACHE_K_SCALE:-1.0}"
 KV_CACHE_V_SCALE="${NANOVLLM_KV_CACHE_V_SCALE:-1.0}"
 COMMON=(
-  "$NANOVLLM_MODEL" --seed 0
+  "$NANOVLLM_MODEL" --seed 0 --record-output-tokens
   --kv-cache-dtype "$KV_CACHE_DTYPE"
   --kv-cache-k-scale "$KV_CACHE_K_SCALE"
   --kv-cache-v-scale "$KV_CACHE_V_SCALE"

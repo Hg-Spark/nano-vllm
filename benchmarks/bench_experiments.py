@@ -113,6 +113,11 @@ def arguments(argv=None):
     p.add_argument("--late-input-len", type=int, default=2048, help="interference scenario")
     p.add_argument("--late-after-decode-steps", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--record-output-tokens",
+        action="store_true",
+        help="retain generated token IDs per request to locate A/B parity failures",
+    )
     p.add_argument("--out", required=True, help="JSON result path; must not exist")
     a = normalize_paths(p.parse_args(argv), "model", "out")
     if not a.model:
@@ -280,11 +285,14 @@ def run_fixed_decode(engine, a):
         **cuda_memory_stats(),
         **graph_metrics,
     }
-    return metrics, {
+    details = {
         "token_hash": tokens_hash(seqs),
         "fixed_batch_size": a.max_num_seqs,
         "context_len": a.input_len,
     }
+    if a.record_output_tokens:
+        details["output_token_sequences"] = [list(seq.completion_token_ids) for seq in seqs]
+    return metrics, details
 
 
 def enable_exclusive_decode_first(scheduler):
@@ -399,6 +407,7 @@ def run(a):
             ]
             records = []
             trace = []
+            completion_trace = []
             followup_ttft = []
             all_tpot = []
             elapsed = 0.0
@@ -425,6 +434,8 @@ def run(a):
                     if start and kind not in hits:
                         raise RuntimeError("unknown checkpoint type")
                     trace.append((seq.num_prompt_tokens, seq.token_ids))
+                    if a.record_output_tokens:
+                        completion_trace.append(list(seq.completion_token_ids))
                     records.append(
                         {
                             "session": session,
@@ -486,6 +497,8 @@ def run(a):
                 "retained_snapshots_after_session": len(cache),
                 "per_request": records,
             }
+            if a.record_output_tokens:
+                details["output_token_sequences"] = completion_trace
 
         else:
             shared = [rng.randrange(vocab) for _ in range(a.shared_prefix_len)]
@@ -551,6 +564,16 @@ def run(a):
                 / (a.shared_prefix_len + a.suffix_len),
                 "token_hash": tokens_hash(target),
             }
+
+        if a.record_output_tokens and a.scenario in ("throughput", "interference", "prefix"):
+            completed = (
+                seqs if a.scenario == "throughput"
+                else [*short, late] if a.scenario == "interference"
+                else target
+            )
+            details["output_token_sequences"] = [
+                list(seq.completion_token_ids) for seq in completed
+            ]
 
         if a.scenario != "decode":
             graph_metrics = measured_graph_usage(

@@ -83,6 +83,24 @@ def percent(base, changed, higher_better=True):
     return 100.0 * ((changed / base - 1.0) if higher_better else (1.0 - changed / base))
 
 
+def describe_first_output_difference(left, right):
+    """Locate the first different generated token using optional benchmark diagnostics."""
+    if left is None or right is None:
+        return "rerun with --record-output-tokens to locate the first mismatch"
+    for request_index, (a, b) in enumerate(zip(left, right)):
+        for token_index, (token_a, token_b) in enumerate(zip(a, b)):
+            if token_a != token_b:
+                return (
+                    f"request={request_index}, token={token_index}: "
+                    f"reference={token_a}, changed={token_b}"
+                )
+        if len(a) != len(b):
+            return f"request={request_index}: output length {len(a)} vs {len(b)}"
+    if len(left) != len(right):
+        return f"request count {len(left)} vs {len(right)}"
+    return "recorded completions match; inspect prompt history or hash inputs"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("folder", help="directory of benchmark experiment JSON files")
@@ -127,15 +145,28 @@ def main(argv=None):
     grouped = defaultdict(list)
     for filename, r in samples:
         w, v = workload_key(r), variant(r)
-        by_workload[w].append((filename, r["details"]["token_hash"]))
+        by_workload[w].append((filename, r))
         grouped[(w, v)].append(r)
 
     mismatches = [
-        (str(k), v) for k, v in by_workload.items() if len({token_hash for _, token_hash in v}) > 1
+        (str(k), v) for k, v in by_workload.items()
+        if len({r["details"]["token_hash"] for _, r in v}) > 1
     ]
     if mismatches:
         for key, values in mismatches:
-            print("PARITY FAILURE", key, values)
+            reference_name, reference = values[0]
+            changed_name, changed = next(
+                (name, r) for name, r in values
+                if r["details"]["token_hash"] != reference["details"]["token_hash"]
+            )
+            print("PARITY FAILURE", key, [(name, r["details"]["token_hash"]) for name, r in values])
+            print(
+                f"  First mismatch {reference_name} vs {changed_name}: "
+                + describe_first_output_difference(
+                    reference["details"].get("output_token_sequences"),
+                    changed["details"].get("output_token_sequences"),
+                )
+            )
         raise SystemExit("Output token hashes differ for a supposedly identical workload")
 
     # An exclusive Decode-first run never uses mixed_prefill_limit: share the
@@ -219,7 +250,11 @@ def main(argv=None):
                 r["details"]["token_hash"] for r in treatment
             }:
                 raise SystemExit(
-                    "PARITY FAILURE: shared exclusive baseline differs from Mixed output"
+                    "PARITY FAILURE: shared exclusive baseline differs from Mixed output; "
+                    + describe_first_output_difference(
+                        baseline[0]["details"].get("output_token_sequences"),
+                        treatment[0]["details"].get("output_token_sequences"),
+                    )
                 )
             if min(len(baseline), len(treatment)) < args.min_repeats:
                 issues.append(f"too few repeats for {label}, {scenario} batch={p['max_num_seqs']}")
@@ -337,6 +372,21 @@ def main(argv=None):
                     f"  Late long request TTFT: {b:.2f} -> {t:.2f} ms "
                     f"(reduction {format_percent(percent(b, t, higher_better=False))})"
                 )
+                # Count actual Decode+Prefill steps after injection, not just the configured cap.
+                if all(
+                    "post_arrival_mixed_steps" in r["metrics"]["long_prompt_interference"]
+                    for r in [*baseline, *treatment]
+                ):
+                    print(
+                        "  Mixed steps after injection: "
+                        f"{median(r['metrics']['long_prompt_interference']['post_arrival_mixed_steps'] for r in baseline):.0f}"
+                        " -> "
+                        f"{median(r['metrics']['long_prompt_interference']['post_arrival_mixed_steps'] for r in treatment):.0f}; "
+                        "Prefill tokens alongside Decode: "
+                        f"{median(r['metrics']['long_prompt_interference']['post_arrival_mixed_prefill_tokens'] for r in baseline):.0f}"
+                        " -> "
+                        f"{median(r['metrics']['long_prompt_interference']['post_arrival_mixed_prefill_tokens'] for r in treatment):.0f}"
+                    )
                 # Small synthetic samples: mean only; do not label tail latency as production P99.
                 tail_stats = []
                 for label2, runs in (("exclusive", baseline), ("mixed", treatment)):

@@ -11,6 +11,20 @@ from benchmarks import summarize_bench
 
 
 class BenchmarkSummaryTest(unittest.TestCase):
+    def test_first_output_difference_diagnostics(self):
+        describe = summarize_bench.describe_first_output_difference
+        self.assertEqual(
+            describe([[1, 2], [3, 4]], [[1, 2], [3, 5]]),
+            "request=1, token=1: reference=4, changed=5",
+        )
+        self.assertEqual(
+            describe([[1, 2]], [[1]]),
+            "request=0: output length 2 vs 1",
+        )
+        self.assertEqual(describe([[1]], [[1], [2]]), "request count 1 vs 2")
+        self.assertIn("--record-output-tokens", describe(None, [[1]]))
+
+
     def test_ab_parity_and_speedup(self):
         base = {
             "schema_version": 1,
