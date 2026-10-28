@@ -1,12 +1,10 @@
 """Logical ownership of paged KV, recurrent state slots, and joint prefix cache."""
 
 from collections.abc import Iterable
-from math import lcm
 
 from nanovllm.config import Config
 from nanovllm.engine.block_manager import BlockManager
 from nanovllm.engine.prefix_cache import PrefixCache, PrefixEntry
-from nanovllm.engine.schedule import GDN_CHECKPOINT_INTERVAL
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot, StateSlotManager
 
@@ -30,7 +28,7 @@ class HybridCacheManager:
             self.block_manager.release_blocks,
             max_snapshot_bytes=config.max_prefix_cache_snapshot_bytes,
             snapshot_nbytes=snapshot_nbytes,
-            max_checkpoints_per_path=config.max_gdn_checkpoints,
+            max_active_requests=config.max_num_seqs,
         )
 
     @property
@@ -80,6 +78,8 @@ class HybridCacheManager:
                 self.prefix_cache.mark_reused(seq, entry)
                 seq.committed_tokens = entry.num_tokens
                 seq.pending_state_snapshot = entry.state_snapshot
+                # The published snapshot is immutable. Rolling staging owns
+                # separate CPU tensors and may never overwrite cache entries.
             self.state_manager.allocate(seq)
         except Exception:
             # Never retain shared KV refs if GDN slot admission fails.
@@ -88,82 +88,36 @@ class HybridCacheManager:
             self.state_manager.deallocate(seq)
             seq.committed_tokens = 0
             seq.pending_state_snapshot = None
+            seq.prompt_snapshot = None
+            seq.completion_snapshot = None
             raise
 
     def fit_prefill(self, seq: Sequence, requested_tokens: int) -> int:
         """Evict expendable checkpoints until a reserved prefill can progress."""
         scheduled = self.block_manager.max_schedulable_tokens(seq, requested_tokens)
-        while scheduled < requested_tokens and self.prefix_cache.evict(
-            self.block_manager.block_refcounts
-        ):
+        while scheduled == 0 and self.prefix_cache.evict(self.block_manager.block_refcounts):
             scheduled = self.block_manager.max_schedulable_tokens(seq, requested_tokens)
         if scheduled == 0:
             raise RuntimeError("admitted prefill cannot acquire reserved KV blocks")
         return scheduled
 
-    def plan_prefill_checkpoints(
-        self,
-        seq: Sequence,
-        start: int,
-        end: int,
-        planned_prefixes: set[bytes],
-    ) -> tuple[int, tuple[int, ...], int]:
-        """Choose valid joint KV/GDN checkpoint boundaries for a prefill chunk."""
-        step = lcm(GDN_CHECKPOINT_INTERVAL, self.block_manager.block_size)
-        if not self.prefix_cache.enabled:
-            return end, (), 0
-
-        interval = GDN_CHECKPOINT_INTERVAL
-        candidates, cached = self.prefix_cache.candidates(seq, start, end)
-        candidates = [pair for pair in candidates if pair[1] not in planned_prefixes]
-        scheduled = end - start
-
-        if end < len(seq):
-            # Intermediate FlashInfer GDN checkpoints require an aligned start.
-            # Recover an off-grid chunk at a useful joint boundary, while
-            # avoiding tiny chunks at every subsequent checkpoint position.
-            selected = self.prefix_cache.select_checkpoints(
-                candidates, cached, max_reusable_tokens=seq.num_prompt_tokens - 1
-            )
-            max_trim = min(
-                step - 1,
-                scheduled // 4,
-                max(16, scheduled // 8),
-            )
-            target = None
-            if (
-                start % step
-                and selected
-                and (
-                    not cached
-                    or start - cached[-1] >= step * self.prefix_cache.max_checkpoints_per_path
-                )
-            ):
-                target = selected[-1][0]
-            else:
-                target = next(
-                    (
-                        position
-                        for position, _ in reversed(selected)
-                        if position < end and end - position <= max_trim
-                    ),
-                    None,
-                )
-            if target is not None and target < end:
-                end = target
-
-        candidates = [pair for pair in candidates if pair[0] <= end]
-        if start % step:
-            # An off-grid chunk can only publish its final live state,
-            # and only when that endpoint lies on the joint grid.
-            candidates = [pair for pair in candidates if pair[0] == end]
-        candidates = self.prefix_cache.select_checkpoints(
-            candidates, cached, max_reusable_tokens=seq.num_prompt_tokens - 1
-        )
-        positions = tuple(position for position, _ in candidates)
-        planned_prefixes.update(digest for _, digest in candidates)
-
-        return end, positions, interval if any(position < end for position in positions) else 0
+    def prepare_prefill(self, seq: Sequence, start: int, requested: int) -> int:
+        """Schedule the available token budget, only evicting if progress is blocked."""
+        fitted = self.block_manager.max_schedulable_tokens(seq, requested)
+        if fitted == 0:
+            fitted = self.fit_prefill(seq, requested)
+        end = start + fitted
+        # Only one prefill checkpoint is needed: stop once just before the
+        # prompt's final token, at the last complete KV page. A chunk crossing
+        # this boundary must end here so that the GDN final state is exact.
+        if self.prefix_cache._can_capture() and seq.image_state is None:
+            boundary = (
+                (seq.num_prompt_tokens - 1) // self.block_manager.block_size
+            ) * self.block_manager.block_size
+            if start < boundary < end:
+                end = boundary
+        self.reserve_prefill(seq, end)
+        return end
 
     def reserve_prefill(self, seq: Sequence, end: int) -> None:
         self.block_manager.ensure_capacity(seq, end)
@@ -174,11 +128,21 @@ class HybridCacheManager:
                 raise RuntimeError("admitted decode cannot acquire reserved KV blocks")
         self.block_manager.ensure_capacity(seq, len(seq))
 
-    def publish_prefixes(self, seq: Sequence, snapshots: tuple[GDNStateSnapshot, ...]) -> None:
-        self.prefix_cache.publish_many(seq, snapshots)
+    def publish_batch(self, candidates: list[tuple[Sequence, GDNStateSnapshot]]) -> None:
+        # Completed requests no longer need cache-entry reuse protection:
+        # the live request still owns all its KV pages until postprocess().
+        for seq in {seq.seq_id: seq for seq, _ in candidates}.values():
+            self.prefix_cache.unmark_reused(seq)
+            # The snapshot tensors change ownership from request staging to
+            # the global cache, or become disposable when capacity is full.
+            self.prefix_cache.unstage(seq)
+        self.prefix_cache.publish_batch(candidates)
 
     def release(self, seq: Sequence) -> None:
         seq.pending_state_snapshot = None
+        seq.prompt_snapshot = None
+        seq.completion_snapshot = None
+        self.prefix_cache.unstage(seq)
         self.prefix_cache.unmark_reused(seq)
         self.block_manager.deallocate(seq)
         self.state_manager.deallocate(seq)

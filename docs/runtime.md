@@ -154,11 +154,11 @@ flowchart TD
 | --- | --- |
 | [llm_engine.py](../nanovllm/engine/llm_engine.py) | API、请求校验、生成循环和执行失败后的关闭 |
 | [scheduler.py](../nanovllm/engine/scheduler.py) | 调度预算、请求队列及调用资源接口完成状态提交 |
-| [schedule.py](../nanovllm/engine/schedule.py) | 保存本轮执行区间和快照需求 |
-| [hybrid_cache_manager.py](../nanovllm/engine/hybrid_cache_manager.py) | 统一 KV/GDN 准入、共享前缀恢复、Checkpoint 规划与引用释放 |
+| [schedule.py](../nanovllm/engine/schedule.py) | 保存本轮执行区间及执行结果 |
+| [hybrid_cache_manager.py](../nanovllm/engine/hybrid_cache_manager.py) | 统一 KV/GDN 准入、生命周期 Snapshot 发布与引用释放 |
 | [block_manager.py](../nanovllm/engine/block_manager.py) | KV Block 分配与共享前缀引用 |
 | [state_manager.py](../nanovllm/engine/state_manager.py) | GDN 状态槽分配 |
-| [prefix_cache.py](../nanovllm/engine/prefix_cache.py) | KV Block Hash 与 GDN Checkpoint 联合匹配、路径内优先裁剪中间 Checkpoint、全局 FIFO 淘汰 |
+| [prefix_cache.py](../nanovllm/engine/prefix_cache.py) | KV Block Hash 与 GDN 状态联合匹配、全局冷优先 FIFO 淘汰 |
 | [decode_graph.py](../nanovllm/engine/decode_graph.py) | Decode CUDA Graph bucket |
 | [batch_common.py](../nanovllm/engine/batch_common.py) | 统一准备 Prefill / Decode 的元数据与输入张量 |
 | [context.py](../nanovllm/utils/context.py) | 将单次 forward 的元数据传给模型层 |
@@ -211,12 +211,12 @@ KV 的逻辑位置与 mRoPE 三轴位置分别维护：图片展开可能改变 
 
 ## 启动时怎样分配缓存
 
-[ModelRunner](../nanovllm/engine/model_runner.py)先加载模型并调用 `eval()`，由 [allocate_runtime_caches()](../nanovllm/engine/cache_runtime.py)根据 `gpu_memory_utilization` 和当下已使用显存计算静态 KV 预算，同时扣除 `max_num_seqs` 个 GDN 槽位、启用前缀缓存且快照预算充足时的 GDN Checkpoint 工作区，以及启用视觉模式时的视觉特征预留、每个 Decode Graph Bucket 的固定空间估算及额外 `activation_reserve_bytes`（默认 256 MiB）。不再运行模型来测量历史激活峰值，剩余显存作为 Prefill、MoE、Vision 临时激活和 Graph Capture 的余量；这不是 OOM 安全证明。
+[ModelRunner](../nanovllm/engine/model_runner.py)先加载模型并调用 `eval()`，由 [allocate_runtime_caches()](../nanovllm/engine/cache_runtime.py)根据 `gpu_memory_utilization` 和当下已使用显存计算静态 KV 预算，同时扣除 `max_num_seqs` 个 GDN 槽位、启用前缀缓存且快照预算充足时的 GDN Snapshot Staging 工作区，以及启用视觉模式时的视觉特征预留、每个 Decode Graph Bucket 的固定空间估算及额外 `activation_reserve_bytes`（默认 256 MiB）。不再运行模型来测量历史激活峰值，剩余显存作为 Prefill、MoE、Vision 临时激活和 Graph Capture 的余量；这不是 OOM 安全证明。
 
 ```text
 GPU_used = total_GPU_memory - CUDA_free_at_allocation
 KV_budget = floor(total_GPU_memory × gpu_memory_utilization)
-            - GPU_used - GDN_pool_bytes - checkpoint_workspace_bytes
+            - GPU_used - GDN_pool_bytes - snapshot_staging_bytes
             - visual_feature_reserve_bytes - graph_reserve_bytes
             - activation_reserve_bytes
 KV_blocks = floor(KV_budget / KV_block_bytes)
@@ -309,7 +309,7 @@ generate(prompts, sampling_params) 或 add_request(prompt, params)
 
 ### 4. ModelRunner 每次 forward 具体准备什么
 
-[ScheduledChunk](../nanovllm/engine/schedule.py) 是不可变的 `(seq,start,end,checkpoint_positions,checkpoint_interval)`，把本轮计划与请求的长期状态分开。两条 Batch 路径有不同的张量契约：
+[ScheduledChunk](../nanovllm/engine/schedule.py) 是不可变的 `(seq,start,end)`，把本轮计划与请求的长期状态分开。两条 Batch 路径有不同的张量契约：
 
 | 数据 | Prefill：`prepare_prefill()` | Decode：`prepare_decode()` |
 | --- | --- | --- |

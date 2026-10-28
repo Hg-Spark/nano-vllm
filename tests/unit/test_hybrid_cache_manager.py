@@ -14,7 +14,7 @@ class HybridCacheManagerTest(unittest.TestCase):
         source = Sequence(list(range(65)))
         cache.block_manager.ensure_capacity(source, 64)
         snapshot = GDNStateSnapshot(64, ())
-        cache.publish_prefixes(source, (snapshot,))
+        cache.publish_batch([(source, snapshot)])
         cache.block_manager.deallocate(source)
 
         seq = Sequence(list(range(64)) + [101], SamplingParams(max_tokens=1))
@@ -68,7 +68,7 @@ class HybridCacheManagerTest(unittest.TestCase):
         cache = scheduler.cache_manager
         source = Sequence(list(range(65)))
         cache.block_manager.ensure_capacity(source, 64)
-        cache.publish_prefixes(source, (GDNStateSnapshot(64, ()),))
+        cache.publish_batch([(source, GDNStateSnapshot(64, ()))])
         cache.block_manager.deallocate(source)
 
         first = Sequence([500], SamplingParams(max_tokens=1))
@@ -87,14 +87,36 @@ class HybridCacheManagerTest(unittest.TestCase):
         )
         cache.release(first)
 
-    def test_checkpoint_planning_recovers_off_grid_endpoint(self):
+    def test_cache_admission_checks_aligned_processed_state(self):
         scheduler = make_scheduler(num_blocks=32, block_size=16)
         cache = scheduler.cache_manager
-        seq = Sequence(list(range(256)), SamplingParams(max_tokens=1))
-        planned: set[bytes] = set()
-        end, positions, interval = cache.plan_prefill_checkpoints(seq, 63, 126, planned)
-        self.assertEqual((end, positions, interval), (64, (64,), 0))
-        self.assertEqual(len(planned), 1)
+        seq = Sequence(list(range(30)), SamplingParams(max_tokens=3))
+        cache.block_manager.ensure_capacity(seq, 32)
+        with self.assertRaisesRegex(RuntimeError, "invalid GDN snapshot"):
+            cache.publish_batch([(seq, GDNStateSnapshot(30, ()))])
+        seq.append_token(30)
+        seq.append_token(31)
+        cache.publish_batch([(seq, GDNStateSnapshot(32, ()))])
+        before = cache.prefix_cache.published_count
+        cache.publish_batch([(seq, GDNStateSnapshot(32, ()))])
+        self.assertEqual(cache.prefix_cache.published_count, before)
+
+    def test_prefill_evicts_only_enough_checkpoints_to_make_progress(self):
+        scheduler = make_scheduler(num_blocks=16, block_size=16, max_prefix_cache_entries=4)
+        manager = scheduler.cache_manager
+        for token in (11, 12, 13, 14):
+            source = Sequence([token] * 65)
+            manager.block_manager.ensure_capacity(source, 64)
+            manager.publish_batch([(source, GDNStateSnapshot(64, ()))])
+            manager.release(source)
+        self.assertEqual(len(manager.block_manager.free_block_ids), 0)
+        self.assertEqual(len(manager.prefix_cache), 4)
+
+        seq = Sequence(list(range(129)), SamplingParams(max_tokens=1))
+        end = manager.prepare_prefill(seq, 0, 128)
+        self.assertEqual(end, 64)
+        self.assertEqual(manager.prefix_cache.evicted_count, 1)
+        self.assertEqual(len(manager.prefix_cache), 3)
 
 
 if __name__ == "__main__":

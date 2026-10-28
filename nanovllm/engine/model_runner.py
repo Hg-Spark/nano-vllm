@@ -54,7 +54,12 @@ class ModelRunner:
         try:
             if torch.cuda.get_device_capability()[0] not in (9, 10, 12):
                 raise RuntimeError("FlashInfer GDN requires SM90/SM100/SM120")
-            with torch.device("cuda"):
+            from transformers.initialization import no_init_weights
+
+            # Every registered parameter is replaced by load_model(), which
+            # rejects missing weights. Avoid initializing large GPU parameter
+            # tensors only to overwrite them immediately from the checkpoint.
+            with no_init_weights(), torch.device("cuda"):
                 self.model = Qwen3_5ForCausalLM(
                     config.root_config,
                     load_vision=config.max_visual_tokens_per_request != 0,
@@ -178,12 +183,16 @@ class ModelRunner:
             token_ids = logits.argmax(dim=-1).tolist()
         else:
             values = [seqs[idx].temperature for idx in sample_indices]
-            temperatures = self.metadata_pool.to_cuda("sample_temperatures", values, "float32")
             positions = [index for index, value in enumerate(values) if value > 1e-10]
+            with self.metadata_pool.batch() as upload:
+                temperatures = upload("sample_temperatures", values, "float32")
+                sampled_indices = (
+                    upload("sample_positions", positions, "int64")
+                    if len(positions) < len(values)
+                    else None
+                )
             token_ids = self.sampler(
-                logits,
-                temperatures,
-                sample_positions=positions if len(positions) < len(values) else None,
+                logits, temperatures, sample_positions=sampled_indices
             ).tolist()
         for idx, token_id in zip(sample_indices, token_ids):
             results[idx] = token_id
@@ -193,20 +202,22 @@ class ModelRunner:
         self,
         chunks: tuple[ScheduledChunk, ...],
         seqs: list[Sequence],
+        layout=None,
     ) -> BatchResult | None:
         bucket = self.decode_graph_buckets.get(len(chunks))
         if bucket is None:
             self.decode_graph_fallbacks["missing_bucket"] += 1
             return None
-        layout = build_decode_batch_layout(
-            chunks, self.block_size, getattr(self, "decode_page_table_cache", None)
-        )
+        if layout is None:
+            layout = build_decode_batch_layout(
+                chunks, self.block_size, getattr(self, "decode_page_table_cache", None)
+            )
         if not bucket.can_run(layout):
             self.decode_graph_fallbacks["layout_exceeded"] += 1
             return None
         bucket.prepare(layout)
         logits = bucket.replay()
-        return BatchResult(self._sample_logits(logits, seqs, list(range(len(chunks)))), {})
+        return BatchResult(self._sample_logits(logits, seqs, list(range(len(chunks)))))
 
     @torch.inference_mode()
     def run(
@@ -217,10 +228,15 @@ class ModelRunner:
         seqs = [chunk.seq for chunk in chunks]
         if not is_prefill and any(seq.pending_state_snapshot is not None for seq in seqs):
             raise RuntimeError("pending GDN prefix restore is valid only for prefill")
+        decode_layout = None
         if is_prefill:
             restore_pending_states(self.model, seqs, self.gdn_restore_staging)
         elif self.decode_graph_buckets:
-            graph_result = self._run_decode_graph(chunks, seqs)
+            if len(chunks) in self.decode_graph_buckets:
+                decode_layout = build_decode_batch_layout(
+                    chunks, self.block_size, self.decode_page_table_cache
+                )
+            graph_result = self._run_decode_graph(chunks, seqs, decode_layout)
             if graph_result is not None:
                 return graph_result
         else:
@@ -231,7 +247,11 @@ class ModelRunner:
             prepare_prefill(chunks, self.block_size, self.metadata_pool)
             if is_prefill
             else prepare_decode(
-                chunks, self.block_size, self.metadata_pool, self.decode_page_table_cache
+                chunks,
+                self.block_size,
+                self.metadata_pool,
+                self.decode_page_table_cache,
+                layout=decode_layout,
             )
         )
         context = plan_flashinfer_attention(
@@ -265,48 +285,61 @@ class ModelRunner:
                 else list(range(len(chunks)))
             )
             if sample_indices:
-                logits = self.model.compute_logits(
-                    hidden_states, None if len(sample_indices) == len(chunks) else sample_indices
-                )
+                if is_prefill:
+                    # Reuse the pinned metadata pool instead of creating a
+                    # fresh CUDA tensor from a Python list on each prefill.
+                    last_indices = [
+                        batch.layout.q_offsets[index + 1] - 1 for index in sample_indices
+                    ]
+                    indices = self.metadata_pool.to_cuda(
+                        "logit_token_indices", last_indices, "int64"
+                    )
+                    logits = self.model.compute_logits(hidden_states, token_indices=indices)
+                else:
+                    logits = self.model.compute_logits(hidden_states)
                 results = self._sample_logits(logits, seqs, sample_indices)
             else:
                 results = [None for _ in seqs]
 
-        prefix_snapshots: dict[int, tuple[GDNStateSnapshot, ...]] = {}
-        if is_prefill:
-            state_modules = self.model.state_cache_modules()
-            captured = [
-                (
-                    chunk.seq.seq_id,
-                    position,
-                    tuple(
-                        module.slot(chunk.seq.state_slot)
-                        if position == chunk.end
-                        else module.checkpoint_state_slot(chunk.seq.state_slot, position)
-                        for module in state_modules
-                    ),
+        return BatchResult(results)
+
+    @torch.inference_mode()
+    def capture_live_states(
+        self, candidates: list[tuple[Sequence, int]]
+    ) -> dict[int, GDNStateSnapshot]:
+        """Capture one live GDN state per request before its slot is released."""
+        modules = self.model.state_cache_modules()
+        if not candidates:
+            return {}
+        states = [
+            (seq.seq_id, position, tuple(module.slot(seq.state_slot) for module in modules))
+            for seq, position in candidates
+        ]
+        # One D2H copy per tensor family, avoiding per-layer synchronizations.
+        conv_cpu = torch.stack([conv for _, _, layers in states for conv, _ in layers]).cpu()
+        recurrent_cpu = torch.stack(
+            [recurrent for _, _, layers in states for _, recurrent in layers]
+        ).cpu()
+        layer_count = len(modules)
+        snapshots = {}
+        for index, (seq_id, position, _) in enumerate(states):
+            offset = index * layer_count
+            seq = candidates[index][0]
+            prompt_boundary = ((seq.num_prompt_tokens - 1) // self.block_size) * self.block_size
+            previous = (
+                seq.prompt_snapshot if position == prompt_boundary else seq.completion_snapshot
+            )
+            if previous is not None and len(previous.layers) == layer_count:
+                # Roll completion state in its private CPU tensors. Never
+                # mutate the immutable prompt state or a published entry.
+                for j, (conv, recurrent) in enumerate(previous.layers):
+                    conv.copy_(conv_cpu[offset + j])
+                    recurrent.copy_(recurrent_cpu[offset + j])
+                layers = previous.layers
+            else:
+                layers = tuple(
+                    (conv_cpu[offset + j].clone(), recurrent_cpu[offset + j].clone())
+                    for j in range(layer_count)
                 )
-                for chunk in chunks
-                for position in chunk.checkpoint_positions
-            ]
-            if captured:
-                # Collect all layers and boundaries in two contiguous D2H transfers.
-                conv_cpu = torch.stack(
-                    [conv for _, _, layers in captured for conv, _ in layers]
-                ).cpu()
-                recurrent_cpu = torch.stack(
-                    [state for _, _, layers in captured for _, state in layers]
-                ).cpu()
-                num_layers = len(state_modules)
-                collected: dict[int, list[GDNStateSnapshot]] = {}
-                for index, (seq_id, position, _) in enumerate(captured):
-                    offset = index * num_layers
-                    layers = tuple(
-                        (conv_cpu[offset + i].clone(), recurrent_cpu[offset + i].clone())
-                        for i in range(num_layers)
-                    )
-                    collected.setdefault(seq_id, []).append(GDNStateSnapshot(position, layers))
-                prefix_snapshots = {
-                    seq_id: tuple(snapshots) for seq_id, snapshots in collected.items()
-                }
-        return BatchResult(results, prefix_snapshots)
+            snapshots[seq_id] = GDNStateSnapshot(position, layers)
+        return snapshots

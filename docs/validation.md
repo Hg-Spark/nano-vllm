@@ -4,7 +4,7 @@
 
 ## 顺序测试脚本
 
-本地模型和 CUDA 环境准备好后，先准备 Python 环境，再通过 [TOML 配置](../configs/tests.toml) 调用 [run_tests.sh](../benchmarks/run_tests.sh)。先修改配置中的 `model` 路径。以下以系统 Python 3.12 为例：
+本地模型和 CUDA 环境准备好后，先准备 Python 环境，再通过 [TOML 配置](../configs/tests.toml) 调用 [run_tests.py](../benchmarks/run_tests.py)。先修改配置中的 `model` 路径。以下以系统 Python 3.12 为例：
 
 ```bash
 uv pip install --system --python 3.12 --break-system-packages -r pyproject.toml --extra dev
@@ -15,37 +15,37 @@ flashinfer download-kernels
 ```
 
 ```bash
-bash benchmarks/run_tests.sh configs/tests.toml
+python -m benchmarks.run_tests --config configs/tests.toml
 ```
 
 测试启动器复用已安装依赖的 `python3`（也可通过 `PYTHON` 指定解释器），不重复安装依赖。[pyproject.toml](../pyproject.toml) 指定依赖和 Linux x86_64 的 PyTorch CUDA 13.0 包源；`--break-system-packages` 仅用于上面的系统 Python 安装示例。模型和匹配的 NVIDIA 驱动需预先准备。
 
 普通依赖默认使用[清华 PyPI 镜像](https://mirrors.tuna.tsinghua.edu.cn/help/pypi/)，PyTorch 使用官方 CUDA 源。临时切换普通依赖的镜像可在运行前设置 `export UV_DEFAULT_INDEX=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple`。
 
-默认执行 `check`：GPU 信息采集、单元/集成测试、32-token HF 贪心对齐和前缀恢复对齐。性能测试需显式选择 `bench`、`tail`、`long` 或 `capacity`；正式 A/B 对照将 `[benchmark].repeats` 设置为至少 5。各阶段失败即停止，配置、原始 JSON、日志与 `status.txt` 保存在 `results/run_<UTC时间>/`。每次 `check` 都重新执行，不使用历史成功标记跳过。
+默认执行 `check`：GPU 信息采集、单元/集成测试、32-token HF 贪心对齐、Prefill 与 Decode 结束两类前缀恢复对齐。性能测试需显式选择 `bench`、`tail`、`long` 或 `capacity`；正式 A/B 对照将 `[benchmark].repeats` 设置为至少 5。各阶段失败即停止，配置、原始 JSON、日志与 `status.txt` 保存在 `results/run_<UTC时间>/`。每次 `check` 都重新执行，不使用历史成功标记跳过。
 
 单元测试和集成测试分别运行，实时显示每个用例，首次失败立即停止并打印简短堆栈，输出同时写入 `unit-tests.log` 和 `integration-tests.log`。`[correctness]` 的 `max_jobs`、`nvcc_threads` 默认均为 1，控制所有阶段的 FlashInfer JIT 编译并发；它们不限制测试请求并发数，也不保证内存峰值低于某个上限。
 
 分阶段执行；单独 bench/tail 不会自动重新进行正确性检查：
 
 ```bash
-bash benchmarks/run_tests.sh configs/tests.toml check
+python -m benchmarks.run_tests --config configs/tests.toml --stage check
 ```
 
 ```bash
-bash benchmarks/run_tests.sh configs/tests.toml bench
+python -m benchmarks.run_tests --config configs/tests.toml --stage bench
 ```
 
 ```bash
-bash benchmarks/run_tests.sh configs/tests.toml tail
+python -m benchmarks.run_tests --config configs/tests.toml --stage tail
 ```
 
 ```bash
-bash benchmarks/run_tests.sh configs/tests.toml long
+python -m benchmarks.run_tests --config configs/tests.toml --stage long
 ```
 
 ```bash
-bash benchmarks/run_tests.sh configs/tests.toml capacity
+python -m benchmarks.run_tests --config configs/tests.toml --stage capacity
 ```
 
 依赖已安装后，也可以直接使用同一个系统 Python：
@@ -55,7 +55,7 @@ bash benchmarks/run_tests.sh configs/tests.toml capacity
 ```
 
 ```bash
-bash benchmarks/run_tests.sh --help
+python -m benchmarks.run_tests --help
 ```
 
 模型路径、KV Cache 精度与 Scale、GPU、Benchmark 重复次数及各阶段参数统一在 TOML 中修改。路径支持 `~` 和环境变量，相对路径以项目根目录为基准。
@@ -85,7 +85,7 @@ python -m scripts.profile_decode "$NANOVLLM_MODEL"
 | 真实权重贪心对齐 | `verify_qwen3_5.py` | 给定输入上的 HF 与本实现输出 token 一致 | 所有输入和配置都一致 |
 | 联合前缀恢复 | `verify_prefix_resume.py`（独立入口） | 本实现关闭联合前缀复用的基线路径与恢复联合前缀的路径生成一致 | 所有输入和设备执行路径都一致 |
 | 单图 + Decode Graph | `verify_qwen3_5_multimodal.py` | 视觉展开、mRoPE、Chunk 回填、贪心 token 与 HF 一致，并在启用 Graph 时检查实际 Replay 计数 | 多图/视频或其他 batch size 都正确 |
-| 逐层诊断 | `diagnose_qwen3_5.py` | 定位所测输入中最早超过误差阈值的 decoder 层 | 自动确定层内哪一个算子有错 |
+| 逐层诊断 | `trace_qwen3_5.py` | 逐 Token 比较 HF/Nano 的层输出和 GDN 状态 | 自动确定异常算子 |
 | 基准与 profile | `bench_experiments.py`、`profile_decode.py` | 给定设备和负载下的性能、热点 | 模型数值正确、所有负载都同样快 |
 
 仓库不再提交历史测试结果。每次改动应重新验证真实模型的 HF 对齐、GDN 状态恢复、三轴 mRoPE、Decode Graph 和性能；命令存在、测试覆盖存在、实测通过是三件不同的事。
@@ -127,7 +127,7 @@ MoE 计算后端。HF `eager` 用于独立数值对照，和 FlashInfer 的舍�
 因此必须记录实际 HF 专家后端。稠密 Qwen3.5 不启用专家后端。
 MoE 仅支持 FlashInfer CUTLASS 覆盖的 GPU 架构；不支持 SM75。
 
-token 对齐成功输出 `PASS: greedy token sequences match exactly`，logits 对齐成功输出 `PASS: logits relative RMS`。token 不一致报告首个不同索引，logits 超阈值报告首个异常步骤、相对 RMS 和最大绝对误差；阈值是浮点误差验收标准，并不要求逐元素完全相等。需要定位逐层 Hidden States 误差时，单独运行 `python -m scripts.diagnose_qwen3_5`。该脚本直接使用所给 prompt，不会自动套聊天模板。
+token 对齐成功输出 `PASS: greedy token sequences match exactly`，logits 对齐成功输出 `PASS: logits relative RMS`。token 不一致报告首个不同索引，logits 超阈值报告首个异常步骤、相对 RMS 和最大绝对误差；阈值是浮点误差验收标准，并不要求逐元素完全相等。需要定位逐层 Hidden States 误差时，单独运行 `python -m scripts.trace_qwen3_5`。脚本使用原始 prompt 的 teacher-forced 序列，不自动套聊天模板。
 
 默认只比较 16 个新 token。正式记录应覆盖多个中文/英文提示、不同输入长度和更长的 continuation，并保留检查点版本和完整输出。不能用一次短提示通过替代全部验证。
 
@@ -144,19 +144,19 @@ python -m scripts.verify_qwen3_5_multimodal "$NANOVLLM_MODEL" /path/to/image.jpg
 ## 不一致时做逐层诊断
 
 ```bash
-python -m scripts.diagnose_qwen3_5 "$NANOVLLM_MODEL" \
+python -m scripts.trace_qwen3_5 "$NANOVLLM_MODEL" \
   --prompt "请解释自回归推理为什么需要 KV cache。" \
-  --max-probe-tokens 64 \
-  --relative-rms-threshold 0.02
+  --max-new-tokens 8 \
+  --relative-rmse-threshold 0.02 --verbose-layers
 ```
 
-诊断脚本捕获两侧 decoder 层的 hidden states，输出最大绝对误差、平均绝对误差、RMS 误差和相对 RMS：
+Trace 逐 Token 比较两侧层输出与 logits，输出最大绝对误差与相对 RMSE：
 
 ```text
 relative_rms = RMS(nano - HF) / max(RMS(HF), 1e-12)
 ```
 
-默认阈值为 `0.02`，是排查起点，不是所有输入通用的精度标准。空捕获、缺层及 NaN/Inf 都不能通过；两侧形状不同也判为异常。这里诊断的是截断到 `--max-probe-tokens` 的 prompt 前向；如果偏差只在多步 decode 或快照恢复后出现，还需要针对对应路径增加检查。
+默认阈值为 `0.05`，示例使用 `0.02`；这只是诊断阈值。Trace 通过 teacher-forced Prefill/Decode 检查逐步误差；前缀恢复仍需要独立验收。
 
 | 最早异常附近 | 优先检查 |
 | --- | --- |
@@ -180,17 +180,17 @@ python -m scripts.verify_prefix_resume "$NANOVLLM_MODEL" \
 
 前缀探针按如下流程执行：
 
-1. 构造 A/B 两个输入，共享至少 64 Token 且对齐 KV 页的 token 前缀，后缀不同。
+1. 构造 A/B 两个输入，共享至少一个完整 KV Page 的 token 前缀，并按当前页大小对齐，后缀不同。
 2. 关闭前缀缓存运行 B，得到基线 token。
 3. 在启用缓存的实例中运行 A，使共享边界的 KV/GDN 状态发布到缓存。
 4. 运行 B，复用共享 KV 并恢复保持原始状态精度的 GDN 快照。
 5. 比较 B 的两条生成序列，并输出快照边界和大小。
 
-第二阶段比较的是“不开启联合前缀复用”与“恢复联合前缀快照”，**两者都使用正常 Paged KV 和持久 GDN State Slot**，并不是已移除的无持久缓存 Warmup。此项不能单独当作 HF 对齐证明。若没有产生缓存条目，探针会失败。该探针在 KV Block Size 为 16/32/64 时仍构造至少 64 Token 的共享前缀，以匹配固定 GDN Checkpoint 网格。验证脚本通过包装 `GDNRestoreStaging.restore()` 观察实际恢复调用，并检查 `restore_boundary` 与共享 KV Block，避免仅凭缓存条目推断真实命中。
+第二阶段比较的是“不开启联合前缀复用”与“恢复联合前缀快照”，**两者都使用正常 Paged KV 和持久 GDN State Slot**，并不是已移除的无持久缓存 Warmup。此项不能单独当作 HF 对齐证明。若没有产生缓存条目，探针会失败。该探针采用共享前缀后追加一个 Sentinel Token 的 Prompt Warmup，使回答前 Checkpoint 正好位于期望的完整 KV Block 边界；Decode 来源则在最终已处理 Token 到达目标边界时捕获。验证脚本通过包装 `GDNRestoreStaging.restore()` 观察实际恢复调用，并检查 `restore_boundary` 与共享 KV Block，避免仅凭缓存条目推断真实命中。
 
 将误差指标记录在独立的本地实验结果中。当前 snapshot 不再主动降精度；恢复验证仍用于发现状态边界、复制或其他执行路径问题。
 
-Prefix Cache 的 GPU KV 静态容量会按每请求最多两个选中 Checkpoint 的跨层驻留/捕获栈，以及单层 FlashInfer 中间 Checkpoint 的上界预留工作区；真实峰值仍应以 GPU Profile 验证。Prefix Cache 可同时限制条目数（`max_prefix_cache_entries`）和 CPU GDN 快照总大小（`max_prefix_cache_snapshot_bytes`，单位字节）。字节限制默认为 `None`，即不额外限制；设置为 `0` 时跳过快照发布。初始化时会估算一份 GDN 状态快照的大小；即使预算大于零，只要不足以容纳一份快照，也不执行为该缓存条目额外分片或 GPU→CPU 拷贝。发布时按固定 `snapshot_nbytes` 计账，不重新扫描快照张量；多个快照超过总预算时优先裁剪当前路径的中间 Checkpoint，否则按全局 FIFO 淘汰并释放关联 KV Block 引用。Benchmark 的 `snapshot_bytes_before_target` / `snapshot_bytes_after_target` 直接读取缓存统计。
+Prefix Cache 在 GPU KV 静态容量中预留 GDN 状态批量捕获的临时堆叠缓冲，不再预留 FlashInfer 64-token 中间 Checkpoint。Prompt 在最后一个 Token 前的最近完整 KV Page 边界捕获固定状态，Decode 在完整 Page 边界更新一个 Completion 暂存（包括结束步）；请求结束才统一发布两种独立候选。全局条目和 `max_prefix_cache_snapshot_bytes` 限制已发布的 Resident Snapshot；活跃请求的两份暂存额外由 `2 × max_num_seqs × snapshot_nbytes` 硬性槽位上限约束，分别提供 `staging_snapshot_bytes`、`peak_staging_snapshot_bytes` 和 `peak_total_snapshot_bytes` 统计。CPU 快照保持卷积原始 dtype 与循环状态 FP32，临时 D2H 堆叠不在这些逻辑持久驻留指标内。
 
 ## 测量端到端性能
 
@@ -349,7 +349,7 @@ REPEATS=5 bash benchmarks/run.sh long
 | --- | --- | --- |
 | Decode | 固定 B 下关闭或开启相同 B 的 Graph Bucket | 每步 wall-clock、吞吐、Replay 次数与覆盖率 |
 | Prefill 干扰 | Mixed 与 Decode-first Step 互斥；full 分别扫描总 Budget 和 mixed-prefill cap，同一 Budget 下复用一次 Exclusive 基线并验证输出哈希一致性 | 长请求 TTFT、短请求 Token Gap |
-| Joint Prefix | 缓存关闭与缓存开启，目标请求共享相同前缀 | TTFT、命中比例、恢复 Token、计划与实际发布/淘汰/保留 Checkpoint、峰值 Snapshot 字节数 |
+| Joint Prefix | 缓存关闭与缓存开启，目标请求共享相同前缀 | TTFT、命中比例、恢复 Token、实际发布/淘汰/保留的联合 Snapshot、峰值 Snapshot 字节数 |
 | 动态吞吐 | Eager 与 Graph Bucket | Output tok/s、TPOT、峰值显存、Graph Coverage、Eager Fallback 原因；默认覆盖率下限 95% |
 
 ### Tail ITL 与完整 Decode 并发边界

@@ -19,7 +19,7 @@ jobs:
       - name: Check formatting
         run: ruff format --check nanovllm scripts tests benchmarks || { ruff format --diff nanovllm scripts tests benchmarks; exit 1; }
       - name: Validate benchmark runner shell syntax
-        run: bash -n benchmarks/run.sh benchmarks/run_tests.sh
+        run: bash -n benchmarks/run.sh
       - name: Compile source and tests
         run: python -m compileall -q nanovllm scripts benchmarks tests
       - name: Check Markdown relative links

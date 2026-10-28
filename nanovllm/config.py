@@ -110,7 +110,6 @@ class Config:
     max_mixed_prefill_tokens: int | None = 128
     kv_cache_block_size: int = 16
     max_prefix_cache_entries: int = 0
-    max_gdn_checkpoints: int = 4
     max_prefix_cache_snapshot_bytes: int | None = None
     max_visual_tokens_per_request: int | None = 0
     kv_cache_dtype: str = "auto"
@@ -130,8 +129,7 @@ class Config:
             raise ValueError(f"model path does not exist: {self.model}")
         for name in ("max_num_batched_tokens", "max_num_seqs", "max_model_len"):
             _require_int(name, getattr(self, name), 1)
-        for name in ("kv_cache_block_size", "max_gdn_checkpoints"):
-            _require_int(name, getattr(self, name), 1)
+        _require_int("kv_cache_block_size", self.kv_cache_block_size, 1)
         _require_int("max_prefix_cache_entries", self.max_prefix_cache_entries)
         _require_int(
             "max_prefix_cache_snapshot_bytes",

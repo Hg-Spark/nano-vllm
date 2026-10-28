@@ -3,94 +3,76 @@ import unittest
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
 from nanovllm.sampling_params import SamplingParams
-from tests.scheduler_helpers import (
-    make_scheduler,
-    scheduled_sequences,
-)
+from tests.scheduler_helpers import make_scheduler
 
 
 class SchedulerPrefixCacheTest(unittest.TestCase):
-    def test_joint_prefix_hit_restores_kv_and_gdn_boundary_together(self):
+    def test_completed_aligned_prompt_publishes_prior_joint_state_before_release(self):
         scheduler = make_scheduler(
-            max_num_batched_tokens=64, max_num_seqs=2, num_blocks=64, block_size=4
+            max_num_batched_tokens=128, max_num_seqs=2, num_blocks=32, block_size=16
         )
-        original = Sequence(list(range(65)), SamplingParams(max_tokens=1))
+        original = Sequence(list(range(64)), SamplingParams(max_tokens=1))
         scheduler.add(original)
-
         first = scheduler.schedule()
-        self.assertEqual(first.prefill_tokens, 64)
-        self.assertEqual(first.prefill_chunks[0].checkpoint_positions, (64,))
-        cached_block = original.block_table[0]
-        snapshot = GDNStateSnapshot(num_tokens=64, layers=())
-        scheduler.postprocess(first.prefill_chunks, [None], True, {original.seq_id: (snapshot,)})
-        self.assertEqual(len(scheduler.cache_manager.prefix_cache), 1)
-        self.assertEqual(scheduler.cache_manager.block_manager.block_refcounts[cached_block], 2)
+        self.assertEqual((first.prefill_chunks[0].start, first.prefill_chunks[0].end), (0, 48))
+        snapshot = GDNStateSnapshot(48, ())
+        block = original.block_table[0]
+        scheduler.postprocess(first.prefill_chunks, [None], True)
 
         final = scheduler.schedule()
+        self.assertEqual((final.prefill_chunks[0].start, final.prefill_chunks[0].end), (48, 64))
+        scheduler.cache_manager.publish_batch([(original, snapshot)])
         scheduler.postprocess(final.prefill_chunks, [99], True)
         self.assertTrue(original.is_finished)
-        self.assertEqual(scheduler.cache_manager.block_manager.block_refcounts[cached_block], 1)
+        self.assertEqual(scheduler.cache_manager.block_manager.block_refcounts[block], 1)
 
-        newcomer = Sequence(list(range(64)) + [80], SamplingParams(max_tokens=1))
-        scheduler.add(newcomer)
+        next_turn = Sequence(list(range(64)) + [80], SamplingParams(max_tokens=1))
+        scheduler.add(next_turn)
         resumed = scheduler.schedule()
-        self.assertEqual(scheduled_sequences(resumed.prefill_chunks), [newcomer])
-        self.assertEqual(newcomer.committed_tokens, 64)
-        self.assertIs(newcomer.pending_state_snapshot, snapshot)
-        self.assertEqual(newcomer.block_table[0], cached_block)
-        self.assertEqual(resumed.prefill_chunks[0].num_tokens, 1)
-        self.assertEqual(scheduler.cache_manager.block_manager.block_refcounts[cached_block], 2)
+        self.assertEqual(resumed.prefill_chunks[0].start, 48)
+        self.assertIs(next_turn.pending_state_snapshot, snapshot)
+        self.assertEqual(next_turn.block_table[0], block)
 
-    def test_aligned_prompt_restores_reusable_partial_prefix(self):
-        scheduler = make_scheduler(
-            max_num_batched_tokens=129, max_num_seqs=2, num_blocks=100, block_size=4
-        )
-        tokens = list(range(128))
-        original = Sequence(tokens, SamplingParams(max_tokens=1))
-        scheduler.add(original)
-
+    def test_completed_decode_snapshot_reuses_generated_history(self):
+        scheduler = make_scheduler(num_blocks=32, block_size=16, max_num_batched_tokens=128)
+        seq = Sequence(list(range(30)), SamplingParams(max_tokens=4))
+        scheduler.add(seq)
         first = scheduler.schedule()
-        self.assertEqual(first.prefill_chunks[0].checkpoint_positions, (64, 128))
-        snapshots = (GDNStateSnapshot(64, ()), GDNStateSnapshot(128, ()))
-        scheduler.postprocess(first.prefill_chunks, [99], True, {original.seq_id: snapshots})
+        scheduler.postprocess(first.prefill_chunks, [None], True)
+        self.assertEqual(len(scheduler.cache_manager.prefix_cache), 0)
 
-        newcomer = Sequence(tokens + [129], SamplingParams(max_tokens=1))
-        scheduler.add(newcomer)
-        scheduler.schedule()
-        self.assertEqual(newcomer.committed_tokens, 128)
-        self.assertIs(newcomer.pending_state_snapshot, snapshots[1])
+        second = scheduler.schedule()
+        scheduler.postprocess(second.prefill_chunks, [30], True)
+        for token in (31, 32):
+            step = scheduler.schedule()
+            scheduler.postprocess(step.decode_chunks, [token], False)
+        snapshot = GDNStateSnapshot(32, ())
+        final = scheduler.schedule()
+        scheduler.cache_manager.publish_batch([(seq, snapshot)])
+        scheduler.postprocess(final.decode_chunks, [33], False)
+        self.assertTrue(seq.is_finished)
 
-    def test_identical_prefills_capture_only_one_snapshot(self):
+        continuation = Sequence(list(range(34)) + [99], SamplingParams(max_tokens=1))
+        scheduler.add(continuation)
+        resumed = scheduler.schedule()
+        self.assertEqual(resumed.prefill_chunks[0].start, 32)
+        self.assertIs(continuation.pending_state_snapshot, snapshot)
+
+    def test_unaligned_prompt_splits_at_last_full_page(self):
         scheduler = make_scheduler(
-            max_num_batched_tokens=130, max_num_seqs=2, num_blocks=64, block_size=4
-        )
-        for _ in range(2):
-            scheduler.add(Sequence(list(range(65)), SamplingParams(max_tokens=1)))
-        chunks = scheduler.schedule().prefill_chunks
-        self.assertEqual(
-            [(chunk.end, chunk.checkpoint_positions) for chunk in chunks],
-            [(65, (64,)), (65, ())],
-        )
-
-    def test_unaligned_prefill_does_not_force_tiny_checkpoint_chunk(self):
-        scheduler = make_scheduler(
-            max_num_batched_tokens=4096,
-            max_num_seqs=1,
-            num_blocks=300,
-            block_size=16,
+            max_num_batched_tokens=4096, max_num_seqs=1, num_blocks=300, block_size=16
         )
         seq = Sequence(list(range(4097)), SamplingParams(max_tokens=1))
         scheduler.cache_manager.block_manager.ensure_capacity(seq, 1100)
         scheduler.cache_manager.state_manager.allocate(seq)
         seq.committed_tokens = 1100
         scheduler.prefilling.append(seq)
-
-        first = scheduler.schedule().prefill_chunks
-        self.assertEqual(
-            (first[0].start, first[0].end, first[0].checkpoint_positions),
-            (1100, 4097, ()),
-        )
-        self.assertEqual(first[0].checkpoint_interval, 0)
+        chunk = scheduler.schedule().prefill_chunks[0]
+        self.assertEqual((chunk.start, chunk.end), (1100, 4096))
+        with self.assertRaisesRegex(RuntimeError, "invalid GDN snapshot"):
+            scheduler.cache_manager.publish_batch([(seq, GDNStateSnapshot(4097, ()))])
+        scheduler.cache_manager.publish_batch([(seq, GDNStateSnapshot(4096, ()))])
+        self.assertEqual(scheduler.cache_manager.prefix_cache._resident_lengths, [4096])
 
 
 if __name__ == "__main__":

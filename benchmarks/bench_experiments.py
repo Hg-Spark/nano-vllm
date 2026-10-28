@@ -15,7 +15,6 @@ from pathlib import Path
 from random import Random
 from time import perf_counter
 
-from nanovllm.engine.schedule import GDN_CHECKPOINT_INTERVAL
 from scripts._common import (
     add_kv_cache_arguments,
     add_model_argument,
@@ -96,7 +95,7 @@ def arguments(argv=None):
     p.add_argument(
         "--expect-evictions",
         action="store_true",
-        help="prefix: fail if the target workload does not evict any joint checkpoint",
+        help="prefix: fail if the target workload does not evict any joint snapshot",
     )
     p.add_argument("--warmup-steps", type=int, default=8, help="fixed decode warmup steps")
     p.add_argument("--measure-steps", type=int, default=128, help="fixed decode measured steps")
@@ -133,12 +132,8 @@ def arguments(argv=None):
     if a.scenario == "prefix":
         if a.target_requests < 1:
             p.error("target-requests must be positive")
-        if (
-            a.shared_prefix_len < 0
-            or a.shared_prefix_len % GDN_CHECKPOINT_INTERVAL
-            or a.suffix_len < 1
-        ):
-            p.error("shared-prefix-len must be zero or a multiple of 64; suffix-len >= 1")
+        if a.shared_prefix_len < 0 or a.shared_prefix_len % 16 or a.suffix_len < 1:
+            p.error("shared-prefix-len must be zero or a multiple of 16; suffix-len >= 1")
         if a.shared_prefix_len + a.suffix_len + a.output_len - 1 > a.max_model_len:
             p.error("prefix-len + suffix-len + output-len exceeds max-model-len")
     if a.scenario == "decode":
@@ -175,24 +170,6 @@ def make_requests(engine, prompts, max_tokens):
 
     params = SamplingParams(temperature=0.0, ignore_eos=True, max_tokens=max_tokens)
     return [engine._prepare_request(prompt, params) for prompt in prompts]
-
-
-def checkpoint_schedule_stats(chunks, block_size: int) -> dict[str, int]:
-    """Count scheduled (not necessarily retained) joint GDN/KV checkpoints."""
-    from math import lcm
-
-    joint_step = lcm(GDN_CHECKPOINT_INTERVAL, block_size)
-    offgrid = [chunk for chunk in chunks if chunk.start % joint_step]
-    return {
-        "prefill_chunks": len(chunks),
-        "checkpoint_chunks": sum(bool(chunk.checkpoint_positions) for chunk in chunks),
-        "checkpoint_positions": sum(len(chunk.checkpoint_positions) for chunk in chunks),
-        "offgrid_prefill_chunks": len(offgrid),
-        "offgrid_realignments": sum(
-            chunk.end % joint_step == 0 and chunk.end in chunk.checkpoint_positions
-            for chunk in offgrid
-        ),
-    }
 
 
 def graph_counters(runner):
@@ -323,8 +300,9 @@ def run(a):
         if vocab < 2:
             raise RuntimeError("vocabulary is unexpectedly small")
         rng = Random(a.seed)
-        # Use a sub-block setup prompt to avoid publishing an unrelated prefix.
-        warmup = make_requests(engine, [[1] * 15], 2)
+        # Warm both Prefill and one Decode Forward without reaching a KV-page
+        # boundary or contaminating the prefix-cache measurement.
+        warmup = make_requests(engine, [[1] * 14], 2)
         run_benchmark(engine, warmup)
 
         if a.schedule_mode == "exclusive_decode_first":
@@ -333,13 +311,6 @@ def run(a):
         track_schedule = a.scenario == "prefix" or a.cache_entries > 0
         first_prefill_start = {}
         sched_prefill_tokens = 0
-        checkpoint_stats = {
-            "prefill_chunks": 0,
-            "checkpoint_chunks": 0,
-            "checkpoint_positions": 0,
-            "offgrid_prefill_chunks": 0,
-            "offgrid_realignments": 0,
-        }
         if track_schedule:
             original_schedule = engine.scheduler.schedule
 
@@ -347,13 +318,6 @@ def run(a):
                 nonlocal sched_prefill_tokens
                 outcome = original_schedule()
                 sched_prefill_tokens += outcome.prefill_tokens
-                if a.cache_entries and outcome.prefill_chunks:
-                    observed = checkpoint_schedule_stats(
-                        outcome.prefill_chunks,
-                        engine.scheduler.cache_manager.block_manager.block_size,
-                    )
-                    for name, count in observed.items():
-                        checkpoint_stats[name] += count
                 if a.scenario == "prefix":
                     for chunk in outcome.prefill_chunks:
                         first_prefill_start.setdefault(chunk.seq.seq_id, chunk.start)
@@ -395,9 +359,13 @@ def run(a):
             for idx, tail in enumerate(target_tails):
                 if tail == warm_tail:
                     tail[-1] = (tail[-1] + idx + 1) % vocab
-            # Stop immediately after the shared block boundary to cache it,
-            # regardless of the target requests' different suffixes.
-            warm = make_requests(engine, [shared + warm_tail[:1]], 1)
+            # Use a one-token sentinel so the immutable prompt checkpoint
+            # lies exactly at the shared-prefix boundary.
+            warm = make_requests(
+                engine,
+                [shared + warm_tail[:1] if shared else warm_tail[:1]],
+                1,
+            )
             run_benchmark(engine, warm)  # Build exactly the same history in both A/B runs.
             graph_before = graph_counters(engine.model_runner)
             cache = engine.scheduler.cache_manager.prefix_cache
@@ -406,7 +374,6 @@ def run(a):
             published_before = cache.published_count
             evicted_before = cache.evicted_count
             target = make_requests(engine, [shared + tail for tail in target_tails], a.output_len)
-            checkpoint_before_target = checkpoint_stats.copy()
             metrics = run_benchmark(engine, target)
             restored = [first_prefill_start.get(seq.seq_id, -1) for seq in target]
             if any(start < 0 for start in restored):
@@ -420,7 +387,7 @@ def run(a):
                     "unexpected prefix restore in cache-disabled or unshared workload"
                 )
             if a.expect_evictions and cache.evicted_count == evicted_before:
-                raise RuntimeError("eviction workload did not evict a joint checkpoint")
+                raise RuntimeError("eviction workload did not evict a joint snapshot")
             details = {
                 "warm_prompt_tokens": warm[0].num_prompt_tokens,
                 "target_requests": len(target),
@@ -429,9 +396,12 @@ def run(a):
                 "snapshot_bytes_before_target": bytes_before,
                 "snapshot_bytes_after_target": cache.snapshot_bytes,
                 "peak_snapshot_bytes_including_setup": cache.peak_snapshot_bytes,
-                "published_checkpoints_during_target": cache.published_count - published_before,
-                "evicted_checkpoints_during_target": cache.evicted_count - evicted_before,
-                "retained_checkpoints_after_target": len(cache),
+                "peak_staging_snapshot_bytes_including_setup": cache.peak_staging_snapshot_bytes,
+                "peak_total_snapshot_bytes_including_setup": cache.peak_total_snapshot_bytes,
+                "staging_snapshot_bytes_after_target": cache.staging_snapshot_bytes,
+                "published_snapshots_during_target": cache.published_count - published_before,
+                "evicted_snapshots_during_target": cache.evicted_count - evicted_before,
+                "retained_snapshots_after_target": len(cache),
                 "restored_tokens_per_target": restored,
                 "prefix_hit_rate": sum(start > 0 for start in restored) / len(restored),
                 "total_restored_prefix_tokens": sum(max(start, 0) for start in restored),
@@ -441,10 +411,6 @@ def run(a):
                 / sum(seq.num_prompt_tokens for seq in target),
                 "shared_prefix_fraction": a.shared_prefix_len
                 / (a.shared_prefix_len + a.suffix_len),
-                "target_scheduled_checkpoint_stats": {
-                    name: count - checkpoint_before_target[name]
-                    for name, count in checkpoint_stats.items()
-                },
                 "token_hash": tokens_hash(target),
             }
 
@@ -467,7 +433,6 @@ def run(a):
                 )
         if track_schedule:
             details["scheduled_prefill_tokens_including_setup"] = sched_prefill_tokens
-            details["scheduled_checkpoint_stats_including_setup"] = checkpoint_stats
         result = {
             "source": "nano-vllm qwen3.5 engine, no HTTP",
             "gpu": gpu,

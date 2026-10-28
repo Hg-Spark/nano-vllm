@@ -4,7 +4,6 @@ from nanovllm.config import Config
 from nanovllm.engine.hybrid_cache_manager import HybridCacheManager
 from nanovllm.engine.schedule import ScheduledChunk, SchedulerOutput
 from nanovllm.engine.sequence import Sequence
-from nanovllm.engine.state_manager import GDNStateSnapshot
 
 
 class Scheduler:
@@ -42,7 +41,6 @@ class Scheduler:
         active = (*self.running, *self.prefilling)
         occupied_blocks, reserved_blocks = self.cache_manager.reservation_usage(active)
         active_count = len(self.running) + len(self.prefilling)
-        planned_prefixes: set[bytes] = set()
 
         # Resume admitted prefills round-robin; admit waiting requests in FIFO order.
         for admitted, queue in ((True, self.prefilling), (False, self.waiting)):
@@ -72,21 +70,13 @@ class Scheduler:
                     len(seq) - seq.committed_tokens,
                     token_limit - num_batched_tokens,
                 )
-                scheduled = self.cache_manager.fit_prefill(seq, requested)
-
                 start = seq.committed_tokens
-                end = start + scheduled
-                end, positions, checkpoint_interval = self.cache_manager.plan_prefill_checkpoints(
-                    seq, start, end, planned_prefixes
-                )
-                self.cache_manager.reserve_prefill(seq, end)
+                end = self.cache_manager.prepare_prefill(seq, start, requested)
                 prefill_chunks.append(
                     ScheduledChunk(
                         seq,
                         start,
                         end,
-                        checkpoint_positions=positions,
-                        checkpoint_interval=checkpoint_interval,
                     )
                 )
                 num_batched_tokens += end - start
@@ -132,9 +122,7 @@ class Scheduler:
         chunks: tuple[ScheduledChunk, ...],
         token_ids: list[int | None],
         is_prefill: bool,
-        prefix_snapshots: dict[int, tuple[GDNStateSnapshot, ...]] | None = None,
     ) -> None:
-        prefix_snapshots = prefix_snapshots or {}
         if len(chunks) != len(token_ids):
             raise RuntimeError("model result count does not match scheduled sequence count")
 
@@ -145,8 +133,6 @@ class Scheduler:
                 raise RuntimeError("partial prefill produced an unexpected sample")
             if not partial_prefill and token_id is None:
                 raise RuntimeError("completed model step did not produce a token")
-
-            self.cache_manager.publish_prefixes(seq, prefix_snapshots.get(seq.seq_id, ()))
 
             seq.committed_tokens = chunk.end
             if seq.image_state is not None and chunk.end >= seq.image_state.image_end:

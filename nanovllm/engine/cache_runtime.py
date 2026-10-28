@@ -4,7 +4,6 @@ import warnings
 import torch
 
 from nanovllm.config import Config
-from nanovllm.engine.schedule import GDN_CHECKPOINT_INTERVAL
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
 
@@ -65,34 +64,14 @@ def allocate_runtime_caches(
     state_cache_bytes = sum(
         module.state_cache_nbytes(config.max_num_seqs) for module in state_modules
     )
-    # Each request captures at most two selected checkpoints. Those states remain
-    # live across layers and are stacked once for D2H. FlashInfer's unselected
-    # intermediate recurrent states are temporary to a single GDN layer.
-    checkpoint_workspace_bytes = 0
+    # At most max_num_seqs final-state snapshots are stacked before D2H.
+    snapshot_staging_bytes = 0
     snapshot_size = sum(module.state_cache_nbytes(1) for module in state_modules)
     if config.max_prefix_cache_entries > 0 and (
         config.max_prefix_cache_snapshot_bytes is None
         or config.max_prefix_cache_snapshot_bytes >= snapshot_size
     ):
-        selected_per_seq = min(2, config.max_prefix_cache_entries, config.max_gdn_checkpoints)
-        if config.max_prefix_cache_snapshot_bytes is not None and snapshot_size:
-            selected_per_seq = min(
-                selected_per_seq,
-                config.max_prefix_cache_snapshot_bytes // snapshot_size,
-            )
-        selected_slots = min(
-            selected_per_seq * config.max_num_seqs,
-            config.max_num_seqs + config.max_num_batched_tokens // GDN_CHECKPOINT_INTERVAL,
-        )
-        captured_bytes = 2 * selected_slots * snapshot_size
-        intermediate_bytes = (config.max_num_batched_tokens // GDN_CHECKPOINT_INTERVAL) * max(
-            module.num_v_heads
-            * module.head_k_dim
-            * module.head_v_dim
-            * module.recurrent_state.element_size()
-            for module in state_modules
-        )
-        checkpoint_workspace_bytes = captured_bytes + intermediate_bytes
+        snapshot_staging_bytes = 2 * config.max_num_seqs * snapshot_size
     model_param = model.model.embed_tokens.weight
     cache_dtype = _resolve_kv_cache_dtype(
         config,
@@ -118,7 +97,7 @@ def allocate_runtime_caches(
         total * config.gpu_memory_utilization
         - used
         - state_cache_bytes
-        - checkpoint_workspace_bytes
+        - snapshot_staging_bytes
         - visual_feature_cache_bytes
         - graph_reserve_bytes
         - config.activation_reserve_bytes
@@ -126,13 +105,13 @@ def allocate_runtime_caches(
     num_kv_cache_blocks = cache_budget // block_bytes
     logger.info(
         "Static KV capacity: KV_budget=%d MiB, KV_blocks=%d, "
-        "GDN_reserve=%d MiB, checkpoint_reserve=%d MiB, "
+        "GDN_reserve=%d MiB, snapshot_staging_reserve=%d MiB, "
         "vision_reserve=%d MiB, graph_reserve=%d MiB, "
         "activation_reserve=%d MiB",
         cache_budget // (1024**2),
         num_kv_cache_blocks,
         state_cache_bytes // (1024**2),
-        checkpoint_workspace_bytes // (1024**2),
+        snapshot_staging_bytes // (1024**2),
         visual_feature_cache_bytes // (1024**2),
         graph_reserve_bytes // (1024**2),
         config.activation_reserve_bytes // (1024**2),
