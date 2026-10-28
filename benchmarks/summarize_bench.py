@@ -19,6 +19,8 @@ def workload_key(result, *, ignore_mixed_prefill_limit=False):
         "model",
         "dtype",
         "kv_cache_dtype",
+        "kv_cache_k_scale",
+        "kv_cache_v_scale",
         "scenario",
         "seed",
         "budget",
