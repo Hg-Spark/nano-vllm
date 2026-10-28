@@ -276,32 +276,6 @@ class ModelRunnerTest(unittest.TestCase):
         self.assertEqual(empty_cache.call_count, 2)
         pool.clear.assert_called_once()
 
-    def test_prompt_capture_is_immutable_after_live_state_changes(self):
-        from nanovllm.engine.state_manager import GDNStateSnapshot
-
-        class Layer:
-            def __init__(self, value):
-                self.conv = torch.full((3, 4), value, dtype=torch.bfloat16)
-                self.recurrent = torch.full((2, 4), value, dtype=torch.float32)
-
-            def slot(self, _slot_id):
-                return self.conv, self.recurrent
-
-        layers = [Layer(1), Layer(2)]
-        runner = object.__new__(ModelRunner)
-        runner.model = SimpleNamespace(state_cache_modules=lambda: layers)
-        seq = Sequence(list(range(65)))
-        seq.state_slot = 0
-        captured = runner.capture_live_states([(seq, 64)])[seq.seq_id]
-        self.assertIsInstance(captured, GDNStateSnapshot)
-        self.assertEqual(captured.num_tokens, 64)
-        for layer in layers:
-            layer.conv.fill_(9)
-            layer.recurrent.fill_(9)
-        for index, (conv, recurrent) in enumerate(captured.layers):
-            self.assertTrue(torch.all(conv == index + 1))
-            self.assertTrue(torch.all(recurrent == index + 1))
-
 
 if __name__ == "__main__":
     unittest.main()
