@@ -14,11 +14,13 @@ def make_scheduler(
     max_prefix_cache_snapshot_bytes=None,
     snapshot_nbytes=0,
     max_gdn_checkpoints=4,
+    max_mixed_prefill_tokens=None,
     eos_token_ids=(99, 100),
 ):
     config = SimpleNamespace(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
+        max_mixed_prefill_tokens=max_mixed_prefill_tokens,
         eos_token_ids=eos_token_ids,
         kv_cache_block_size=block_size,
         max_prefix_cache_entries=max_prefix_cache_entries,

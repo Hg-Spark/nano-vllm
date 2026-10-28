@@ -26,6 +26,9 @@ class FlashInferGDNTest(unittest.TestCase):
             rms_norm_eps=1e-6,
         )
         self.layer = GatedDeltaNet(config).cuda().to(torch.bfloat16)
+        # Preserve production FP32 parameters that DLPack exports on first decode.
+        self.layer.A_log = torch.nn.Parameter(self.layer.A_log.detach().float())
+        self.layer.dt_bias = torch.nn.Parameter(self.layer.dt_bias.detach().float())
         with torch.no_grad():
             self.layer.A_log.fill_(0)
         self.layer.state_pool.allocate_state_cache(2)
@@ -34,58 +37,55 @@ class FlashInferGDNTest(unittest.TestCase):
     def test_prefill_delta_rule_matches_independent_recurrence(self):
         from flashinfer.gdn_prefill import chunk_gated_delta_rule
 
-        for dtype in (torch.float16, torch.bfloat16):
-            with self.subTest(dtype=dtype):
-                length, heads, dim = 9, 2, 128
-                q = torch.randn(length, 1, dim, device="cuda", dtype=dtype)
-                k = torch.randn_like(q)
-                v = torch.randn(length, heads, dim, device="cuda", dtype=dtype)
-                q = (
-                    (q.float() * torch.rsqrt(q.float().square().sum(-1, keepdim=True) + 1e-6))
-                    .to(dtype)
-                    .contiguous()
-                )
-                k = (
-                    (k.float() * torch.rsqrt(k.float().square().sum(-1, keepdim=True) + 1e-6))
-                    .to(dtype)
-                    .contiguous()
-                )
-                alpha = (-torch.rand(length, heads, device="cuda") * 0.2).exp()
-                beta = torch.rand(length, heads, device="cuda")
-                pool = torch.randn(3, heads, dim, dim, device="cuda") * 0.01
-                reference_state = pool[2].clone()
-                reference_outputs = []
-                for index in range(length):
-                    key = k[index].float().expand(heads, -1)
-                    query = q[index].float().expand(heads, -1)
-                    reference_state = reference_state * alpha[index, :, None, None]
-                    predicted = (reference_state * key[:, None, :]).sum(-1)
-                    delta = (v[index].float() - predicted) * beta[index, :, None]
-                    reference_state = reference_state + delta[:, :, None] * key[:, None, :]
-                    reference_outputs.append(
-                        (reference_state * query[:, None, :]).sum(-1) * dim**-0.5
-                    )
+        dtype = torch.bfloat16
+        length, heads, dim = 9, 2, 128
+        q = torch.randn(length, 1, dim, device="cuda", dtype=dtype)
+        k = torch.randn_like(q)
+        v = torch.randn(length, heads, dim, device="cuda", dtype=dtype)
+        q = (
+            (q.float() * torch.rsqrt(q.float().square().sum(-1, keepdim=True) + 1e-6))
+            .to(dtype)
+            .contiguous()
+        )
+        k = (
+            (k.float() * torch.rsqrt(k.float().square().sum(-1, keepdim=True) + 1e-6))
+            .to(dtype)
+            .contiguous()
+        )
+        alpha = (-torch.rand(length, heads, device="cuda") * 0.2).exp()
+        beta = torch.rand(length, heads, device="cuda")
+        pool = torch.randn(3, heads, dim, dim, device="cuda") * 0.01
+        reference_state = pool[2].clone()
+        reference_outputs = []
+        for index in range(length):
+            key = k[index].float().expand(heads, -1)
+            query = q[index].float().expand(heads, -1)
+            reference_state = reference_state * alpha[index, :, None, None]
+            predicted = (reference_state * key[:, None, :]).sum(-1)
+            delta = (v[index].float() - predicted) * beta[index, :, None]
+            reference_state = reference_state + delta[:, :, None] * key[:, None, :]
+            reference_outputs.append((reference_state * query[:, None, :]).sum(-1) * dim**-0.5)
 
-                output, _ = chunk_gated_delta_rule(
-                    q,
-                    k,
-                    v,
-                    g=alpha,
-                    beta=beta,
-                    scale=dim**-0.5,
-                    initial_state=pool,
-                    output_state=pool,
-                    output_final_state=True,
-                    cu_seqlens=torch.tensor([0, length], device="cuda", dtype=torch.int32),
-                    state_indices=torch.tensor([2], device="cuda", dtype=torch.int32),
-                    use_qk_l2norm_in_kernel=False,
-                    use_cp=False,
-                    backend="flashinfer",
-                )
-                torch.testing.assert_close(
-                    output.float(), torch.stack(reference_outputs), atol=1e-2, rtol=5e-2
-                )
-                torch.testing.assert_close(pool[2], reference_state, atol=2e-2, rtol=5e-2)
+        output, _ = chunk_gated_delta_rule(
+            q,
+            k,
+            v,
+            g=alpha,
+            beta=beta,
+            scale=dim**-0.5,
+            initial_state=pool,
+            output_state=pool,
+            output_final_state=True,
+            cu_seqlens=torch.tensor([0, length], device="cuda", dtype=torch.int32),
+            state_indices=torch.tensor([2], device="cuda", dtype=torch.int32),
+            use_qk_l2norm_in_kernel=False,
+            use_cp=False,
+            backend="flashinfer",
+        )
+        torch.testing.assert_close(
+            output.float(), torch.stack(reference_outputs), atol=1e-2, rtol=5e-2
+        )
+        torch.testing.assert_close(pool[2], reference_state, atol=2e-2, rtol=5e-2)
 
     @torch.no_grad()
     def test_packed_prefill_matches_per_slot_results(self):
@@ -180,10 +180,9 @@ class FlashInferGDNTest(unittest.TestCase):
         torch.testing.assert_close(full_output, torch.cat(outputs), atol=5e-2, rtol=5e-2)
 
     @torch.no_grad()
-    def test_fp16_decode_matches_bf16_operand_reference_and_state(self):
+    def test_decode_matches_bf16_operand_reference_and_state(self):
         from causal_conv1d import causal_conv1d_update
 
-        self.layer.to(torch.float16)
         self.layer.state_pool.allocate_state_cache(2)
         pool = self.layer.state_pool
         pool.conv_state.copy_(torch.randn_like(pool.conv_state) * 0.01)
@@ -191,7 +190,7 @@ class FlashInferGDNTest(unittest.TestCase):
         initial_conv = pool.conv_state.clone()
         initial_recurrent = pool.recurrent_state.clone()
         expected_recurrent = initial_recurrent.clone()
-        inputs = torch.randn(2, 256, device="cuda", dtype=torch.float16) * 0.5
+        inputs = torch.randn(2, 256, device="cuda", dtype=torch.bfloat16) * 0.5
         slots = torch.tensor([1, 0], device="cuda", dtype=torch.int32)
 
         mixed, z, b, a = self.layer._project_inputs(inputs)
@@ -207,7 +206,7 @@ class FlashInferGDNTest(unittest.TestCase):
         q, k, v = self.layer._split_qkv(mixed)
         # Independent FP32 recurrence using the BF16 operands consumed by the
         # FlashInfer 0.7.0 decode kernel (not FlashInfer's own output as oracle).
-        q, k, v = (item.to(torch.bfloat16).float() for item in (q, k, v))
+        q, k, v = (item.float() for item in (q, k, v))
         repeats = self.layer.num_v_heads // self.layer.num_k_heads
         q = q.repeat_interleave(repeats, dim=1)
         k = k.repeat_interleave(repeats, dim=1)
@@ -236,7 +235,7 @@ class FlashInferGDNTest(unittest.TestCase):
         pool.recurrent_state.copy_(initial_recurrent)
         actual = self.layer._forward_decode_batch(inputs, slots)
 
-        self.assertEqual(actual.dtype, torch.float16)
+        self.assertEqual(actual.dtype, torch.bfloat16)
         torch.testing.assert_close(actual, expected, atol=2e-2, rtol=5e-2)
         torch.testing.assert_close(pool.conv_state, expected_conv)
         torch.testing.assert_close(pool.recurrent_state, expected_recurrent, atol=5e-3, rtol=5e-2)
