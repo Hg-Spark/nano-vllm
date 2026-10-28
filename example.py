@@ -9,15 +9,11 @@ def main():
     model = os.environ.get("NANOVLLM_MODEL")
     if not model:
         raise SystemExit("Set NANOVLLM_MODEL to a Qwen3.5 Dense or MoE checkpoint directory")
-    dtype = os.environ.get("NANOVLLM_DTYPE")
-    if dtype != "bfloat16":
-        raise SystemExit("Set NANOVLLM_DTYPE to bfloat16")
     path = os.path.expanduser(model)
     tokenizer = AutoTokenizer.from_pretrained(path)
 
     llm = LLM(
         path,
-        dtype=dtype,
         max_num_batched_tokens=256,
         max_num_seqs=2,
     )

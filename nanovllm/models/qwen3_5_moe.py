@@ -111,7 +111,6 @@ class Qwen3_5MoeTopKRouter(nn.Module):
 class Qwen3_5SparseMoeBlock(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
-        self.hidden_size = config.hidden_size
         self.gate = Qwen3_5MoeTopKRouter(config)
         self.experts = Qwen3_5MoeExperts(config)
         self.shared_expert = Qwen3_5MLP(

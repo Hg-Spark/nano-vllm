@@ -1,13 +1,23 @@
 import unittest
 from hashlib import sha256
+from struct import pack
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from nanovllm.engine.block_manager import BlockManager
-from nanovllm.engine.prefix_cache import _block_hashes
 from nanovllm.engine.schedule import GDN_CHECKPOINT_INTERVAL
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
+
+
+def _block_hashes(tokens: list[int] | tuple[int, ...], block_size: int, stop: int):
+    """Independent chained SHA-256 oracle; production uses incremental Sequence hashes."""
+    parent = bytes(32)
+    for start in range(0, min(stop, len(tokens)) - block_size + 1, block_size):
+        parent = sha256(
+            parent + pack(f"<{block_size}I", *tokens[start : start + block_size])
+        ).digest()
+        yield start + block_size, parent
 
 
 def publish_snapshot(
@@ -54,7 +64,10 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         seq = Sequence(list(range(130)))
         cache = manager.prefix_cache
 
+        # An empty cache must skip hashing entirely.
         cache.find(seq, max_tokens=64)
+        self.assertEqual(seq.prefix_block_hashes, [])
+        cache.candidates(seq, 0, 64)
         first = tuple(seq.prefix_block_hashes)
         self.assertEqual(len(first), 4)
 
@@ -64,7 +77,7 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
 
         for token in range(130, 144):
             seq.append_token(token)
-        cache.find(seq, max_tokens=144)
+        cache.candidates(seq, 128, 144)
         self.assertEqual(len(seq.prefix_block_hashes), 9)
         self.assertEqual(
             seq.prefix_block_hashes,
@@ -78,7 +91,7 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
 
         with patch("nanovllm.engine.prefix_cache.sha256", wraps=sha256) as hash_fn:
             self.assertIsNone(cache.find(seq, max_tokens=128))
-            self.assertEqual(hash_fn.call_count, 8)
+            self.assertEqual(hash_fn.call_count, 0)
 
             candidates, cached = cache.candidates(seq, 64, 160)
             self.assertEqual([position for position, _ in candidates], [128])
@@ -93,6 +106,51 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
             # The incomplete final block is never hashed.
             self.assertIsNone(cache.find(seq, max_tokens=162))
             self.assertEqual(hash_fn.call_count, 10)
+
+    def test_find_uses_resident_lengths_instead_of_scanning_missing_pages(self):
+        manager = BlockManager(num_blocks=64, block_size=16, max_prefix_entries=4)
+        prefix = [index % 100 for index in range(128)]
+        publish_prefix(manager, prefix + [900], 64)
+        cache = manager.prefix_cache
+        self.assertEqual(cache._resident_lengths, [64])
+
+        class CountingEntries(dict):
+            def __init__(self, entries):
+                super().__init__(entries)
+                self.probes = 0
+
+            def get(self, key, default=None):
+                self.probes += 1
+                return super().get(key, default)
+
+        cache._entries = CountingEntries(cache._entries)
+        long_seq = Sequence(prefix + list(range(128, 4096)))
+        self.assertEqual(cache.find(long_seq, 4095).num_tokens, 64)
+        self.assertEqual(cache._entries.probes, 1)
+        self.assertEqual(len(long_seq.prefix_block_hashes), 4)
+
+        other = Sequence([42] * 4096)
+        self.assertIsNone(cache.find(other, 4095))
+        self.assertEqual(cache._entries.probes, 2)
+
+        self.assertTrue(cache.evict())
+        self.assertEqual(cache._resident_lengths, [])
+        with patch("nanovllm.engine.prefix_cache.sha256", wraps=sha256) as hash_fn:
+            self.assertIsNone(cache.find(Sequence(list(range(4096))), 4095))
+            hash_fn.assert_not_called()
+
+    def test_resident_length_index_keeps_sibling_checkpoints(self):
+        manager = BlockManager(num_blocks=32, block_size=16, max_prefix_entries=4)
+        left, _ = publish_prefix(manager, [1] * 64 + [9], 64)
+        publish_prefix(manager, [2] * 64 + [9], 64)
+        cache = manager.prefix_cache
+        self.assertEqual(cache._resident_lengths, [64])
+        self.assertEqual(cache._resident_length_counts[64], 2)
+        self.assertTrue(cache.evict())
+        self.assertEqual(cache._resident_lengths, [64])
+        self.assertEqual(cache._resident_length_counts[64], 1)
+        self.assertTrue(cache.evict())
+        self.assertEqual(cache._resident_lengths, [])
 
     def test_checkpoint_candidates_align_to_kv_page_and_gdn_grid(self):
         manager = BlockManager(num_blocks=8, block_size=128, max_prefix_entries=4)
@@ -122,6 +180,27 @@ class BlockManagerPrefixCacheTest(unittest.TestCase):
         self.assertEqual([position for position, _ in candidates], [8192])
         self.assertEqual(cached, [])
         self.assertEqual(cache._entries.probes, 1)
+
+    def test_publish_probes_resident_ancestors_not_every_historical_page(self):
+        manager = BlockManager(num_blocks=520, block_size=16, max_prefix_entries=4)
+        seq = Sequence(list(range(8193)))
+        manager.ensure_capacity(seq, 8192)
+        cache = manager.prefix_cache
+        cache.publish_many(seq, (GDNStateSnapshot(64, ()),))
+
+        class CountingEntries(dict):
+            def __init__(self, entries):
+                super().__init__(entries)
+                self.probes = 0
+
+            def __contains__(self, key):
+                self.probes += 1
+                return super().__contains__(key)
+
+        cache._entries = CountingEntries(cache._entries)
+        cache.publish_many(seq, (GDNStateSnapshot(8192, ()),))
+        self.assertEqual(cache.find(seq, 8192).num_tokens, 8192)
+        self.assertLessEqual(cache._entries.probes, 4)
 
     def test_cached_checkpoints_include_ancestors_and_exclude_other_branches(self):
         manager = BlockManager(num_blocks=16, block_size=16, max_prefix_entries=4)
