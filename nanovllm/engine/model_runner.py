@@ -5,6 +5,7 @@ from torch.profiler import record_function
 
 from nanovllm.config import Config
 from nanovllm.engine.batch_common import (
+    DecodeBatchLayout,
     DecodePageTableCache,
     PinnedMetadataPool,
     build_decode_batch_layout,
@@ -12,6 +13,7 @@ from nanovllm.engine.batch_common import (
     prepare_prefill,
 )
 from nanovllm.engine.cache_runtime import (
+    GDNCompletionBuffer,
     GDNRestoreStaging,
     allocate_runtime_caches,
     restore_pending_states,
@@ -37,6 +39,7 @@ class ModelRunner:
         self.config = config
         self.block_size = config.kv_cache_block_size
         self._closed = False
+        self._cleanup_complete = False
         self.model = None
         self.sampler = None
         self.kv_cache = None
@@ -44,6 +47,7 @@ class ModelRunner:
         self.metadata_pool = PinnedMetadataPool()
         self.decode_page_table_cache = DecodePageTableCache()
         self.gdn_restore_staging = GDNRestoreStaging()
+        self.gdn_completion_buffer = None
         self.prefill_wrapper = None
         self.decode_wrapper = None
         self.decode_graph_buckets: dict[int, DecodeGraphBucket] = {}
@@ -93,6 +97,11 @@ class ModelRunner:
             self.snapshot_nbytes = sum(
                 module.state_cache_nbytes(1) for module in self.model.state_cache_modules()
             )
+            if config.max_prefix_cache_entries > 0 and (
+                config.max_prefix_cache_snapshot_bytes is None
+                or config.max_prefix_cache_snapshot_bytes >= self.snapshot_nbytes
+            ):
+                self.gdn_completion_buffer = GDNCompletionBuffer(self.model.state_cache_modules())
             self.attention_spec = flashinfer_attention_spec(
                 config.text_config,
                 self.model.model.embed_tokens.weight.dtype,
@@ -127,31 +136,66 @@ class ModelRunner:
             torch.set_default_dtype(default_dtype)
 
     def _release_cuda_resources(self) -> None:
-        for bucket in self.decode_graph_buckets.values():
-            bucket.release()
-        self.decode_graph_buckets.clear()
-        self.metadata_pool.clear()
-        self.metadata_pool = None
-        if hasattr(self, "decode_page_table_cache"):
-            self.decode_page_table_cache.clear()
-        if hasattr(self, "gdn_restore_staging"):
-            self.gdn_restore_staging.clear()
+        # Tear down independent owners even if an earlier release fails. Keep
+        # failed owners reachable so exit() can retry their cleanup.
+        failures = []
+        for batch_size, bucket in tuple(self.decode_graph_buckets.items()):
+            try:
+                bucket.release()
+            except BaseException as exc:
+                failures.append(exc)
+            else:
+                del self.decode_graph_buckets[batch_size]
+
+        for name in (
+            "metadata_pool",
+            "decode_page_table_cache",
+            "gdn_restore_staging",
+            "gdn_completion_buffer",
+        ):
+            owner = getattr(self, name, None)
+            if owner is None:
+                continue
+            try:
+                owner.clear()
+            except BaseException as exc:
+                failures.append(exc)
+            else:
+                setattr(self, name, None)
+
         self.kv_cache = None
         self.prefill_wrapper = None
         self.decode_wrapper = None
         self.attention_workspace = None
         self.model = None
         self.sampler = None
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except BaseException as exc:
+            failures.append(exc)
+        if failures:
+            raise failures[0]
 
     def exit(self) -> None:
-        if self._closed:
+        if getattr(self, "_cleanup_complete", False):
             return
+        # Closed prevents further execution, but it is not a cleanup-success flag.
         self._closed = True
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        self._release_cuda_resources()
+        failure = None
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+        except BaseException as exc:
+            failure = exc
+        try:
+            self._release_cuda_resources()
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
+        if failure is not None:
+            raise failure
+        self._cleanup_complete = True
 
     def _ensure_visual_features(self, seq: Sequence) -> torch.Tensor:
         state = seq.image_state
@@ -202,16 +246,14 @@ class ModelRunner:
         self,
         chunks: tuple[ScheduledChunk, ...],
         seqs: list[Sequence],
-        layout=None,
+        layout: DecodeBatchLayout | None,
     ) -> BatchResult | None:
         bucket = self.decode_graph_buckets.get(len(chunks))
         if bucket is None:
             self.decode_graph_fallbacks["missing_bucket"] += 1
             return None
         if layout is None:
-            layout = build_decode_batch_layout(
-                chunks, self.block_size, getattr(self, "decode_page_table_cache", None)
-            )
+            raise RuntimeError("a configured Decode Graph bucket requires a prepared layout")
         if not bucket.can_run(layout):
             self.decode_graph_fallbacks["layout_exceeded"] += 1
             return None
@@ -303,43 +345,40 @@ class ModelRunner:
 
         return BatchResult(results)
 
+    def stage_completion_states(self, candidates: list[tuple[Sequence, int]]) -> None:
+        if candidates and self.gdn_completion_buffer is not None:
+            self.gdn_completion_buffer.update(self.model.state_cache_modules(), candidates)
+
+    def take_completion_states(self, finished: list[Sequence]) -> dict[int, GDNStateSnapshot]:
+        if self.gdn_completion_buffer is None:
+            return {}
+        return self.gdn_completion_buffer.take(finished)
+
     @torch.inference_mode()
     def capture_live_states(
         self, candidates: list[tuple[Sequence, int]]
     ) -> dict[int, GDNStateSnapshot]:
-        """Capture one live GDN state per request before its slot is released."""
-        modules = self.model.state_cache_modules()
+        """Capture immutable prompt checkpoints at their exact KV-page boundary."""
         if not candidates:
             return {}
-        states = [
-            (seq.seq_id, position, tuple(module.slot(seq.state_slot) for module in modules))
-            for seq, position in candidates
-        ]
-        # One D2H copy per tensor family, avoiding per-layer synchronizations.
-        conv_cpu = torch.stack([conv for _, _, layers in states for conv, _ in layers]).cpu()
-        recurrent_cpu = torch.stack(
-            [recurrent for _, _, layers in states for _, recurrent in layers]
+        modules = self.model.state_cache_modules()
+        conv_cpu = torch.stack(
+            [module.slot(seq.state_slot)[0] for seq, _ in candidates for module in modules]
         ).cpu()
-        layer_count = len(modules)
-        snapshots = {}
-        for index, (seq_id, position, _) in enumerate(states):
-            offset = index * layer_count
-            seq = candidates[index][0]
-            prompt_boundary = ((seq.num_prompt_tokens - 1) // self.block_size) * self.block_size
-            previous = (
-                seq.prompt_snapshot if position == prompt_boundary else seq.completion_snapshot
+        recurrent_cpu = torch.stack(
+            [module.slot(seq.state_slot)[1] for seq, _ in candidates for module in modules]
+        ).cpu()
+        num_layers = len(modules)
+        return {
+            seq.seq_id: GDNStateSnapshot(
+                position,
+                tuple(
+                    (
+                        conv_cpu[index * num_layers + layer].clone(),
+                        recurrent_cpu[index * num_layers + layer].clone(),
+                    )
+                    for layer in range(num_layers)
+                ),
             )
-            if previous is not None and len(previous.layers) == layer_count:
-                # Roll completion state in its private CPU tensors. Never
-                # mutate the immutable prompt state or a published entry.
-                for j, (conv, recurrent) in enumerate(previous.layers):
-                    conv.copy_(conv_cpu[offset + j])
-                    recurrent.copy_(recurrent_cpu[offset + j])
-                layers = previous.layers
-            else:
-                layers = tuple(
-                    (conv_cpu[offset + j].clone(), recurrent_cpu[offset + j].clone())
-                    for j in range(layer_count)
-                )
-            snapshots[seq_id] = GDNStateSnapshot(position, layers)
-        return snapshots
+            for index, (seq, position) in enumerate(candidates)
+        }

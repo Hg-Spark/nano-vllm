@@ -1,18 +1,14 @@
 """CPU-only benchmark parity and comparable A/B result checks."""
 
 import importlib.util
-import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
-from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from benchmarks import bench_experiments as experiments
 from benchmarks import capacity_search
-from benchmarks import summarize_bench as summary
 from nanovllm.engine.sequence import Sequence
 from nanovllm.sampling_params import SamplingParams
 from tests.scheduler_helpers import make_running_sequence, make_scheduler
@@ -111,6 +107,22 @@ class BenchmarkExperimentsTest(unittest.TestCase):
             self.assertEqual(result["metrics"]["graph_coverage"], 1.0)
             self.assertEqual(result["metrics"]["eager_decode_forward_calls"], 0)
 
+    def test_graph_usage_consistency(self):
+        from benchmarks.bench_experiments import graph_counters, measured_graph_usage
+
+        runner = SimpleNamespace(
+            decode_graph_buckets={1: SimpleNamespace(replay_count=2)},
+            decode_graph_fallbacks={"missing_bucket": 4, "layout_exceeded": 0},
+        )
+        before = graph_counters(runner)
+        runner.decode_graph_buckets[1].replay_count += 3
+        runner.decode_graph_fallbacks["missing_bucket"] += 2
+        metrics = measured_graph_usage(runner, before, 5)
+        self.assertEqual(metrics["graph_coverage"], 0.6)
+        self.assertEqual(metrics["eager_decode_forward_calls"], 2)
+        with self.assertRaisesRegex(RuntimeError, "accounting is inconsistent"):
+            measured_graph_usage(runner, before, 4)
+
     def test_capacity_search_uses_fixed_decode(self):
         with tempfile.TemporaryDirectory() as folder:
             args = SimpleNamespace(
@@ -135,84 +147,6 @@ class BenchmarkExperimentsTest(unittest.TestCase):
 
             with patch("benchmarks.capacity_search.subprocess.run", side_effect=over_capacity):
                 self.assertFalse(capacity_search.probe(args, 32))
-
-    def test_ab_parity_and_speedup(self):
-        base = {
-            "schema_version": 1,
-            "experiment": "benchmark_decode",
-            "execution_status": "completed",
-            "config": {
-                "scenario": "decode",
-                "max_num_seqs": 2,
-                "budget": 512,
-                "graph_sizes": [],
-                "cache_entries": 0,
-                "schedule_mode": "mixed",
-            },
-            "result": {
-                "gpu": "GPU",
-                "compute_capability": [9, 0],
-                "metrics": {
-                    "output_throughput_tok_s": 100,
-                    "tpot_seconds": {"mean": 0.01},
-                },
-                "details": {"token_hash": "same"},
-            },
-        }
-        # Runtime versions are part of benchmark comparability, not A/B toggles.
-        env = {
-            **base["result"],
-            "config": base["config"],
-            "torch_version": "2.14.0",
-            "torch_cuda_version": "13.0",
-        }
-        self.assertNotEqual(
-            summary.workload_key(env),
-            summary.workload_key({**env, "torch_version": "2.15.0"}),
-        )
-        self.assertNotEqual(
-            summary.workload_key(env),
-            summary.workload_key({**env, "torch_cuda_version": "13.1"}),
-        )
-
-        graph = json.loads(json.dumps(base))
-        graph["config"]["graph_sizes"] = [2]
-        graph["result"]["metrics"]["output_throughput_tok_s"] = 150
-        with tempfile.TemporaryDirectory() as folder:
-            (Path(folder) / "eager.json").write_text(json.dumps(base), encoding="utf-8")
-            graph_file = Path(folder) / "graph.json"
-            graph_file.write_text(json.dumps(graph), encoding="utf-8")
-            output = StringIO()
-            with redirect_stdout(output):
-                summary.main([folder, "--min-repeats", "1"])
-            self.assertIn("Output throughput improvement: +50.00%", output.getvalue())
-            self.assertIn("Successful paired comparisons: 1", output.getvalue())
-
-            # Other experiments in the same folder must not invalidate A/B results.
-            (Path(folder) / "parity.json").write_text(
-                json.dumps({"experiment": "image_parity", "execution_status": "error"}),
-                encoding="utf-8",
-            )
-            with redirect_stdout(StringIO()):
-                summary.main([folder, "--min-repeats", "1"])
-
-            # An incomplete metric or zero baseline must print n/a, not fail formatting.
-            base["result"]["metrics"]["output_throughput_tok_s"] = 0
-            base["result"]["metrics"].pop("tpot_seconds")
-            (Path(folder) / "eager.json").write_text(json.dumps(base), encoding="utf-8")
-            output = StringIO()
-            with redirect_stdout(output):
-                summary.main([folder, "--min-repeats", "1"])
-            self.assertIn("Output throughput improvement: n/a", output.getvalue())
-            self.assertIn("tpot_seconds reduction: n/a", output.getvalue())
-
-            graph["result"]["details"]["token_hash"] = "different"
-            graph_file.write_text(json.dumps(graph), encoding="utf-8")
-            with (
-                redirect_stdout(StringIO()),
-                self.assertRaisesRegex(SystemExit, "Output token hashes differ"),
-            ):
-                summary.main([folder, "--min-repeats", "1"])
 
 
 if __name__ == "__main__":

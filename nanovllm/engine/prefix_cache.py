@@ -75,7 +75,11 @@ class PrefixCache:
 
     @property
     def enabled(self) -> bool:
-        return self.max_entries > 0
+        return (
+            self.max_entries > 0
+            and self.max_snapshot_bytes != 0
+            and (self.max_snapshot_bytes is None or self.snapshot_nbytes <= self.max_snapshot_bytes)
+        )
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -109,11 +113,7 @@ class PrefixCache:
                 self.staging_snapshot_bytes -= self.snapshot_nbytes
 
     def _can_capture(self) -> bool:
-        return (
-            self.enabled
-            and self.max_snapshot_bytes != 0
-            and (self.max_snapshot_bytes is None or self.snapshot_nbytes <= self.max_snapshot_bytes)
-        )
+        return self.enabled
 
     def _capacity(self) -> int:
         """Effective global capacity across entry count and CPU snapshot bytes."""

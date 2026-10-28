@@ -70,12 +70,13 @@ Scheduler 按全生命周期 KV 页额度及 GDN 槽位准入新请求。已接�
 
 ### 执行成功：推进一个共同边界
 
-`LLMEngine._run_batch()` 在 Forward 后捕获有效的 Prompt 或 Completion 对齐状态，仅在请求完成时统一尝试发布两个候选；之后由 `Scheduler.postprocess()` 校验采样结果、提交进度并追加预测 token：
+`LLMEngine._run_batch()` 在 Forward 后将 Prompt 对齐状态捕获到 CPU，将 Completion 对齐状态滚动保存到 GPU，只有请求完成时才把最后一个 Completion 状态传到 CPU 并统一尝试发布两个候选；之后由 `Scheduler.postprocess()` 校验采样结果、提交进度并追加预测 token：
 
 ```text
 check result count
   → sampling-result validation
-  → capture prompt/rolling completion checkpoint if aligned
+  → capture prompt checkpoint on CPU / update rolling completion on GPU if aligned
+  → copy latest completion checkpoint to CPU only when request finishes
   → publish both candidates only if the request completes
   → committed_tokens = ScheduledChunk.end
   → append sampled token if applicable
@@ -114,7 +115,7 @@ check result count
 
 ### 两个生命周期保存点
 
-启用 Prefix Cache 时，每轮请求保留两种独立候选：**回答前固定 Prompt Checkpoint** 与 **回答期间滚动的 Completion Checkpoint**。Prefill 在 Prompt 最后一个 Token 之前的完整 KV Page 边界截断一次以捕获 Prompt 状态；Decode 每经过完整 KV Page 更新一次私有 Completion 暂存，包括最后一轮有效 Decode。请求结束时将两种候选分别申请全局缓存条目并去重，后续对话仍可命中更早轮次的条目。
+启用 Prefix Cache 时，每轮请求保留两种独立候选：**回答前固定 Prompt Checkpoint** 与 **回答期间滚动的 Completion Checkpoint**。Prefill 在 Prompt 最后一个 Token 之前的完整 KV Page 边界截断一次以捕获 Prompt 状态；Decode 每经过完整 KV Page 只在 GPU 更新一次私有 Completion 滚动缓冲（D2D），包括最后一轮有效 Decode，不执行周期性 D2H。请求结束时将最后一份 Completion 状态拷贝到 CPU，再将两种候选分别申请全局缓存条目并去重，后续对话仍可命中更早轮次的条目。
 
 只有以下条件全部满足才保存：
 
@@ -123,7 +124,7 @@ check result count
 - 请求私有捕获不受当前全局淘汰结果约束；完成时再按全局条目数、CPU Snapshot 预算和重复 Hash 决定是否发布；
 - KV Block 引用计数已建立，Snapshot 的 GDN 状态与相同长度的 KV 一一对应。
 
-生成结束时最后一次采样的 Token **尚未经过 Forward**，因此结束保存点对应的是 `chunk.end`，不是完整 `len(seq.token_ids)`。下一轮请求会重新计算该最后 Token。非对齐结束不会额外执行 Decode Forward；Completion 暂存保留最近一次有效的对齐状态。最后一次 Decode 如果恰好处理到完整 Page 边界，也允许捕获。
+生成结束时最后一次采样的 Token **尚未经过 Forward**，因此结束保存点对应的是 `chunk.end`，不是完整 `len(seq.token_ids)`。下一轮请求会重新计算该最后 Token。非对齐结束不会额外执行 Decode Forward；GPU Completion 缓冲保留最近一次有效的对齐状态。最后一次 Decode 如果恰好处理到完整 Page 边界，也允许捕获。
 
 缓存满时优先淘汰没有其他活跃请求复用的条目。请求结束并发布之前先解除本请求的 reuse 标记，KV 页仍由请求持有，直到 `postprocess()` 释放。无法容纳的候选不会进入全局缓存，私有暂存会在请求释放时清理；捕获与发布预算判断是分离的。
 
@@ -161,7 +162,7 @@ check result count
 
 ## GDN 快照的精度与空间代价
 
-[ModelRunner](../nanovllm/engine/model_runner.py)集中将各 GDN 层的状态传至 CPU，按请求保存为独立 Snapshot，并保持继续计算所需的原始精度：卷积状态保持活动缓冲区 dtype，循环矩阵保持 FP32。恢复时要求快照 dtype 与活动槽一致。
+[ModelRunner](../nanovllm/engine/model_runner.py)仅在 Prompt 保存点和请求结束时将各 GDN 层的状态传至 CPU，Completion 的中间对齐状态留在 GPU 滚动缓冲中，并保持继续计算所需的原始精度：卷积状态保持活动缓冲区 dtype，循环矩阵保持 FP32。恢复时要求快照 dtype 与活动槽一致。
 
 ```text
 运行中：卷积 = 模型 dtype，循环矩阵 = FP32
@@ -169,7 +170,7 @@ check result count
 恢复后：卷积 = 原 dtype，循环矩阵 = FP32
 ```
 
-这样不会因 snapshot 本身引入 BF16 量化误差。代价是循环状态主机占用约为 BF16 方案的两倍；条目上限约束缓存项数，独立的 CPU 快照预算按固定快照大小计账，缓存还会持有 GPU KV 引用并产生设备到主机的快照传输。启动时会为 GDN 状态的批量捕获栈估算 GPU 工作区预算，避免 KV 静态容量挤占全部临时空间；这仍不是完整的 CUDA 峰值 Profile。单份快照大小由启动时的 GDN 状态池计算。全局 `max_prefix_cache_snapshot_bytes` 约束已发布条目，活跃请求另最多保留两份独立的 GDN CPU 暂存（固定 Prompt、滚动 Completion），由 `2 × max_num_seqs` 槽位数约束。分别通过 `snapshot_bytes`、`staging_snapshot_bytes` 和 `peak_total_snapshot_bytes` 衡量持久 CPU 张量逻辑大小；批量 D2H 临时分配不包含在内。
+这样不会因 snapshot 本身引入 BF16 量化误差。代价是循环状态主机占用约为 BF16 方案的两倍；条目上限约束缓存项数，独立的 CPU 快照预算按固定快照大小计账，缓存还会持有 GPU KV 引用并产生设备到主机的快照传输。启动时为每个活跃 Slot 的 GPU Completion 滚动状态和结束时批量 D2H 临时堆叠预留显存，避免 KV 静态容量挤占全部临时空间；这仍不是完整的 CUDA 峰值 Profile。单份快照大小由启动时的 GDN 状态池计算。全局 `max_prefix_cache_snapshot_bytes` 约束已发布条目。活跃请求最多持有固定 Prompt CPU 快照与结束时导出的 Completion CPU 快照，同时每个活跃 GDN Slot 有一份 GPU 滚动状态；CPU 暂存逻辑上限仍是 `2 × max_num_seqs` 份。`snapshot_bytes`、`staging_snapshot_bytes` 和 `peak_total_snapshot_bytes` 只统计 CPU 快照逻辑大小，不包括 GPU 滚动缓冲与 D2H 临时分配。
 
 ## 阅读代码时应检查的约束
 

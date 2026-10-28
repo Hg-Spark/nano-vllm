@@ -65,9 +65,9 @@ def run_chat(llm, sampling, *, system_prompt: str = "") -> None:
                 )
                 output = llm.generate([prompt_ids], sampling, use_tqdm=False)[0]
             except ValueError as exc:
-                # Request validation happens before enqueueing. A failed model
-                # execution can leave active work, in which case exit instead.
-                if not llm.is_finished():
+                # Execution failure closes the engine and clears the queues.
+                # An empty queue is not evidence that another turn can run.
+                if llm._closed:
                     raise
                 print(f"Request rejected: {exc}", flush=True)
                 print("Use /clear to reset history, or enter a shorter message.", flush=True)

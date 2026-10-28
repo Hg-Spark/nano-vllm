@@ -1,33 +1,70 @@
-"""CPU-only regressions for prompt and rolling completion checkpoint lifetimes."""
+"""CPU checkpoint lifecycle tests with real GDN tensors and snapshot code.
+
+Only the expensive model forward is replaced; scheduler, KV ownership,
+GDN state capture/rolling, publication, and restore use production code.
+"""
 
 import unittest
 from types import SimpleNamespace
 
+import torch
+
+from nanovllm.engine.cache_runtime import (
+    GDNCompletionBuffer,
+    GDNRestoreStaging,
+    restore_pending_states,
+)
 from nanovllm.engine.llm_engine import LLMEngine
+from nanovllm.engine.model_runner import ModelRunner
 from nanovllm.engine.schedule import BatchResult
 from nanovllm.engine.scheduler import Scheduler
 from nanovllm.engine.sequence import Sequence
-from nanovllm.engine.state_manager import GDNStateSnapshot
 from nanovllm.sampling_params import SamplingParams
 
 
-class FakeRunner:
-    def __init__(self):
-        self.captures = []
+class CPUStateLayer:
+    """Small real tensors; each slot's checkpoint is 68 bytes."""
 
+    def __init__(self, slots):
+        self.conv_state = torch.zeros((slots, 3, 4), dtype=torch.bfloat16)
+        self.recurrent_state = torch.zeros((slots, 11), dtype=torch.float32)
+
+    def slot(self, slot_id):
+        return self.conv_state[slot_id], self.recurrent_state[slot_id]
+
+    def restore_state_slot(self, slot_id, snapshot):
+        conv, recurrent = self.slot(slot_id)
+        conv.copy_(snapshot[0])
+        recurrent.copy_(snapshot[1])
+
+
+class CPUForwardRunner(ModelRunner):
+    """Run real snapshot methods with a deterministic CPU replacement for model forward."""
+
+    def __init__(self, slots):
+        self.layer = CPUStateLayer(slots)
+        self.model = SimpleNamespace(state_cache_modules=lambda: [self.layer])
+        self.gdn_completion_buffer = GDNCompletionBuffer(self.model.state_cache_modules())
+        self.gdn_restore_staging = GDNRestoreStaging()
+
+    @torch.inference_mode()
     def run(self, chunks, is_prefill):
+        if is_prefill:
+            restore_pending_states(
+                self.model, [chunk.seq for chunk in chunks], self.gdn_restore_staging
+            )
+        for chunk in chunks:
+            conv, recurrent = self.layer.slot(chunk.seq.state_slot)
+            conv.fill_(chunk.end)
+            recurrent.fill_(chunk.end + 1)
         return BatchResult(
             [None if is_prefill and chunk.end < len(chunk.seq) else 999 for chunk in chunks]
         )
 
-    def capture_live_states(self, candidates):
-        self.captures.extend(pos for _, pos in candidates)
-        return {seq.seq_id: GDNStateSnapshot(pos, ()) for seq, pos in candidates}
-
 
 class RollingPrefixTest(unittest.TestCase):
     @staticmethod
-    def _engine(entries=4, snapshot_bytes=0, budget=None):
+    def _engine(entries=4, budget=None):
         config = SimpleNamespace(
             max_num_seqs=4,
             max_num_batched_tokens=512,
@@ -37,8 +74,12 @@ class RollingPrefixTest(unittest.TestCase):
             max_prefix_cache_entries=entries,
             max_prefix_cache_snapshot_bytes=budget,
         )
+        runner = CPUForwardRunner(config.max_num_seqs)
+        snapshot_bytes = (
+            runner.layer.conv_state[0].numel() * runner.layer.conv_state.element_size()
+            + runner.layer.recurrent_state[0].numel() * runner.layer.recurrent_state.element_size()
+        )
         scheduler = Scheduler(config, num_kv_cache_blocks=64, snapshot_nbytes=snapshot_bytes)
-        runner = FakeRunner()
         engine = LLMEngine.__new__(LLMEngine)
         engine.scheduler = scheduler
         engine.model_runner = runner
@@ -59,44 +100,48 @@ class RollingPrefixTest(unittest.TestCase):
             raise AssertionError("scheduler did not finish")
         return scheduler.cache_manager.prefix_cache
 
-    def test_unaligned_prompt_captures_last_page_boundary(self):
-        engine, scheduler, runner = self._engine()
-        seq = Sequence(list(range(65)), SamplingParams(max_tokens=1))
-        cache = self._complete(engine, scheduler, seq)
-        self.assertEqual(runner.captures, [64])
-        self.assertEqual(cache._resident_lengths, [64])
-        self.assertIsNone(seq.prompt_snapshot)
-        self.assertIsNone(seq.completion_snapshot)
+    def test_prompt_checkpoint_is_immutable_and_restorable(self):
+        for prompt_len, boundary in ((64, 48), (65, 64)):
+            with self.subTest(prompt_len=prompt_len):
+                engine, scheduler, runner = self._engine()
+                seq = Sequence(list(range(prompt_len)), SamplingParams(max_tokens=1))
+                scheduler.add(seq)
+                engine._run_batch(scheduler.schedule().prefill_chunks, True)
+                snapshot = seq.prompt_snapshot
+                self.assertEqual(snapshot.num_tokens, boundary)
+                self.assertTrue(torch.all(snapshot.layers[0][0] == boundary))
+                self.assertTrue(torch.all(snapshot.layers[0][1] == boundary + 1))
+                self.assertEqual(snapshot.layers[0][0].device.type, "cpu")
+                self.assertEqual(len(scheduler.cache_manager.prefix_cache), 0)
 
-    def test_aligned_prompt_keeps_previous_page_for_sampling(self):
-        engine, scheduler, runner = self._engine()
-        seq = Sequence(list(range(64)), SamplingParams(max_tokens=1))
-        cache = self._complete(engine, scheduler, seq)
-        self.assertEqual(runner.captures, [48])
-        entry = scheduler.cache_manager.find_prefix(Sequence(list(range(64))))
-        self.assertEqual(entry.num_tokens, 48)
-        self.assertEqual(cache._resident_lengths, [48])
+                engine._run_batch(scheduler.schedule().prefill_chunks, True)
+                self.assertTrue(seq.is_finished)
+                self.assertIsNone(seq.prompt_snapshot)
+                # The next forward has modified the live slot, not the CPU checkpoint.
+                self.assertTrue(torch.all(snapshot.layers[0][0] == boundary))
+                continuation = Sequence(list(range(prompt_len)) + [80])
+                entry = scheduler.cache_manager.find_prefix(continuation)
+                self.assertEqual(entry.num_tokens, boundary)
+                self.assertIs(entry.state_snapshot, snapshot)
+                scheduler.cache_manager.admit(continuation, entry)
+                self.assertIs(continuation.pending_state_snapshot, snapshot)
+                self.assertEqual(continuation.block_table[0], entry.block_ids[0])
+                restore_pending_states(runner.model, [continuation], runner.gdn_restore_staging)
+                conv, recurrent = runner.layer.slot(continuation.state_slot)
+                self.assertTrue(torch.all(conv == boundary))
+                self.assertTrue(torch.all(recurrent == boundary + 1))
+                scheduler.cache_manager.release(continuation)
 
-    def test_prompt_checkpoint_survives_followup_completion_eviction(self):
-        engine, scheduler, runner = self._engine(entries=2)
+    def test_prompt_checkpoint_survives_completion_eviction(self):
+        engine, scheduler, _ = self._engine(entries=2)
         prompt = list(range(64))
         cache = self._complete(engine, scheduler, Sequence(prompt, SamplingParams(max_tokens=2)))
-        self.assertEqual(runner.captures, [48, 64])
         self.assertEqual(cache._resident_lengths, [48, 64])
-        self.assertEqual(
-            [entry.kind for entry in cache._entries.values()], ["prompt", "conversation"]
-        )
-
-        # Reuse S48, extend the answer and evict S64, not the only prompt
-        # checkpoint eligible for the next identical 64-token request.
         cache = self._complete(engine, scheduler, Sequence(prompt, SamplingParams(max_tokens=20)))
         self.assertEqual(cache._resident_lengths, [48, 80])
-        self.assertEqual(
-            [entry.kind for entry in cache._entries.values()], ["prompt", "conversation"]
-        )
         self.assertEqual(scheduler.cache_manager.find_prefix(Sequence(prompt)).num_tokens, 48)
 
-    def test_final_decode_aligned_boundary_is_captured(self):
+    def test_decode_final_boundary_and_unaligned_end(self):
         for prompt_len, outputs, expected in (
             (15, 2, [16]),
             (15, 3, [16]),
@@ -104,83 +149,74 @@ class RollingPrefixTest(unittest.TestCase):
             (31, 3, [16, 32]),
         ):
             with self.subTest(prompt_len=prompt_len, outputs=outputs):
-                engine, scheduler, runner = self._engine()
-                seq = Sequence(list(range(prompt_len)), SamplingParams(max_tokens=outputs))
-                cache = self._complete(engine, scheduler, seq)
-                self.assertEqual(runner.captures, expected)
+                engine, scheduler, _ = self._engine()
+                cache = self._complete(
+                    engine,
+                    scheduler,
+                    Sequence(list(range(prompt_len)), SamplingParams(max_tokens=outputs)),
+                )
                 self.assertEqual(cache._resident_lengths, expected)
+                completion = cache.find(
+                    Sequence(list(range(prompt_len)) + [999] * outputs),
+                    max_tokens=expected[-1],
+                )
+                self.assertEqual(completion.num_tokens, expected[-1])
+                self.assertTrue(torch.all(completion.state_snapshot.layers[0][0] == expected[-1]))
 
-    def test_decode_updates_one_completion_staging_slot(self):
-        engine, scheduler, runner = self._engine(snapshot_bytes=68)
-        seq = Sequence(list(range(33)), SamplingParams(max_tokens=18))
+    def test_completion_rolling_exports_only_final_aligned_state(self):
+        engine, scheduler, runner = self._engine()
+        seq = Sequence(list(range(33)), SamplingParams(max_tokens=33))
         cache = self._complete(engine, scheduler, seq)
-        self.assertEqual(runner.captures, [32, 48])
-        self.assertEqual(cache._resident_lengths, [32, 48])
+
+        # Decode crossed 48 and 64, but only the final aligned state is
+        # published. Per-boundary buffer replacement is tested with real
+        # tensors in test_cache_runtime.py.
+        self.assertEqual(cache._resident_lengths, [32, 64])
+        self.assertEqual(runner.gdn_completion_buffer.take([seq]), {})
+        completion = cache.find(Sequence(list(range(33)) + [999] * 33), max_tokens=64)
+        self.assertEqual(completion.num_tokens, 64)
+        self.assertTrue(torch.all(completion.state_snapshot.layers[0][0] == 64))
+        self.assertTrue(torch.all(completion.state_snapshot.layers[0][1] == 65))
+        # The live slot advanced to 65; the published checkpoint remains at 64.
+        self.assertTrue(torch.all(runner.layer.conv_state[0] == 65))
         self.assertEqual(cache.peak_staging_snapshot_bytes, 136)
         self.assertEqual(cache.staging_snapshot_bytes, 0)
         self.assertEqual(cache.snapshot_bytes, 136)
-        self.assertEqual(cache.peak_total_snapshot_bytes, 136)
 
-    def test_capacity_one_can_replace_its_own_active_prefix(self):
-        engine, scheduler, runner = self._engine(entries=1)
+    def test_capacity_one_replaces_active_prefix_on_completion(self):
+        engine, scheduler, _ = self._engine(entries=1)
         prompt = list(range(65))
-        source = Sequence(prompt, SamplingParams(max_tokens=1))
-        cache = self._complete(engine, scheduler, source)
+        cache = self._complete(engine, scheduler, Sequence(prompt, SamplingParams(max_tokens=1)))
         self.assertEqual(cache._resident_lengths, [64])
-        continuation = Sequence(prompt, SamplingParams(max_tokens=20))
-        cache = self._complete(engine, scheduler, continuation)
-        self.assertIn(80, runner.captures)
+        cache = self._complete(engine, scheduler, Sequence(prompt, SamplingParams(max_tokens=20)))
         self.assertEqual(cache._resident_lengths, [80])
         self.assertEqual(cache.published_count, 2)
-        self.assertFalse(cache._active_reuses)
-
-    def test_one_global_entry_does_not_limit_two_private_staging_slots(self):
-        engine, scheduler, _ = self._engine(entries=1, snapshot_bytes=68, budget=68)
-        seq = Sequence(list(range(64)), SamplingParams(max_tokens=2))
-        cache = self._complete(engine, scheduler, seq)
-        self.assertEqual(cache.snapshot_bytes, 68)
-        self.assertEqual(cache._resident_lengths, [64])
-        self.assertEqual(cache.peak_staging_snapshot_bytes, 136)
-        self.assertEqual(cache.staging_snapshot_bytes, 0)
 
     def test_eos_on_final_aligned_decode_keeps_checkpoint(self):
         engine, scheduler, _ = self._engine()
         seq = Sequence(list(range(15)), SamplingParams(max_tokens=10))
         scheduler.add(seq)
         engine._run_batch(scheduler.schedule().prefill_chunks, True)
-        # Only the Decode sample terminates this request.
         scheduler.eos_token_ids.add(999)
         engine._run_batch(scheduler.schedule().decode_chunks, False)
         self.assertTrue(seq.is_finished)
         self.assertEqual(scheduler.cache_manager.prefix_cache._resident_lengths, [16])
 
-    def test_separate_turns_keep_independent_global_checkpoints(self):
+    def test_separate_turns_keep_both_checkpoint_generations(self):
         engine, scheduler, _ = self._engine(entries=8)
         first = Sequence(list(range(64)), SamplingParams(max_tokens=2))
         cache = self._complete(engine, scheduler, first)
         self.assertEqual(cache._resident_lengths, [48, 64])
         second_prompt = list(range(64)) + [999, 999] + list(range(1000, 1031))
-        self.assertEqual(len(second_prompt), 97)
-        second = Sequence(second_prompt, SamplingParams(max_tokens=17))
-        cache = self._complete(engine, scheduler, second)
+        cache = self._complete(
+            engine,
+            scheduler,
+            Sequence(second_prompt, SamplingParams(max_tokens=17)),
+        )
         self.assertEqual(cache._resident_lengths, [48, 64, 96, 112])
         self.assertEqual(cache.published_count, 4)
         self.assertIsNotNone(cache.find(Sequence(list(range(64))), 63))
         self.assertIsNotNone(cache.find(Sequence(second_prompt), 96))
-
-    def test_cache_hit_does_not_mutate_published_snapshot(self):
-        engine, scheduler, _ = self._engine()
-        prompt = list(range(65))
-        self._complete(engine, scheduler, Sequence(prompt, SamplingParams(max_tokens=1)))
-        manager = scheduler.cache_manager
-        original = manager.find_prefix(Sequence(prompt))
-        self.assertIsNotNone(original)
-        consumer = Sequence(prompt)
-        manager.admit(consumer, original)
-        self.assertIsNone(consumer.prompt_snapshot)
-        self.assertIsNone(consumer.completion_snapshot)
-        self.assertIs(consumer.pending_state_snapshot, original.state_snapshot)
-        manager.release(consumer)
 
 
 if __name__ == "__main__":

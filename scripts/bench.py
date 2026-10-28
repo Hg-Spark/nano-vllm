@@ -80,7 +80,7 @@ def run_benchmark(
         prefill_tokens += stats.prefill_tokens
         decode_seconds += stats.decode_seconds
         prefill_seconds += stats.prefill_seconds
-        snapshot_capture_seconds += getattr(stats, "snapshot_capture_seconds", 0.0)
+        snapshot_capture_seconds += stats.snapshot_capture_seconds
         max_prefill_step_tokens = max(max_prefill_step_tokens, stats.prefill_tokens)
         max_decode_step_tokens = max(max_decode_step_tokens, stats.decode_tokens)
         if stats.decode_tokens:

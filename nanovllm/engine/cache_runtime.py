@@ -64,7 +64,7 @@ def allocate_runtime_caches(
     state_cache_bytes = sum(
         module.state_cache_nbytes(config.max_num_seqs) for module in state_modules
     )
-    # At most max_num_seqs final-state snapshots are stacked before D2H.
+    # Reserve one GPU rolling state per live slot and one temporary D2H batch.
     snapshot_staging_bytes = 0
     snapshot_size = sum(module.state_cache_nbytes(1) for module in state_modules)
     if config.max_prefix_cache_entries > 0 and (
@@ -183,6 +183,67 @@ def _validate_gdn_restore(seq: Sequence, snapshot: GDNStateSnapshot, modules) ->
                     f"snapshot shape/dtype {tuple(source.shape)}/{source.dtype} "
                     f"does not match state cache {tuple(target.shape[1:])}/{target.dtype}"
                 )
+
+
+class GDNCompletionBuffer:
+    """GPU-resident latest aligned completion state, exported only at request end."""
+
+    def __init__(self, modules) -> None:
+        self._conv = [torch.empty_like(module.conv_state) for module in modules]
+        self._recurrent = [torch.empty_like(module.recurrent_state) for module in modules]
+        self._positions: dict[int, tuple[int, int]] = {}
+
+    @torch.inference_mode()
+    def update(self, modules, candidates: list[tuple[Sequence, int]]) -> None:
+        """Replace each slot's rolling checkpoint with a device-to-device copy."""
+        if len(modules) != len(self._conv):
+            raise RuntimeError("GDN completion buffer layer count mismatch")
+        for seq, position in candidates:
+            slot = seq.state_slot
+            if slot < 0 or slot >= self._conv[0].shape[0]:
+                raise RuntimeError("invalid GDN completion state slot")
+            for index, module in enumerate(modules):
+                conv, recurrent = module.slot(slot)
+                self._conv[index][slot].copy_(conv)
+                self._recurrent[index][slot].copy_(recurrent)
+            self._positions[slot] = (seq.seq_id, position)
+
+    @torch.inference_mode()
+    def take(self, seqs: list[Sequence]) -> dict[int, GDNStateSnapshot]:
+        """Copy only finished requests' most recent aligned states to host."""
+        ready: list[tuple[Sequence, int]] = []
+        for seq in seqs:
+            recorded = self._positions.pop(seq.state_slot, None)
+            if recorded is not None and recorded[0] == seq.seq_id:
+                ready.append((seq, recorded[1]))
+        if not ready:
+            return {}
+
+        num_layers = len(self._conv)
+        conv_cpu = torch.stack(
+            [state[seq.state_slot] for seq, _ in ready for state in self._conv]
+        ).cpu()
+        recurrent_cpu = torch.stack(
+            [state[seq.state_slot] for seq, _ in ready for state in self._recurrent]
+        ).cpu()
+        return {
+            seq.seq_id: GDNStateSnapshot(
+                position,
+                tuple(
+                    (
+                        conv_cpu[index * num_layers + layer].clone(),
+                        recurrent_cpu[index * num_layers + layer].clone(),
+                    )
+                    for layer in range(num_layers)
+                ),
+            )
+            for index, (seq, position) in enumerate(ready)
+        }
+
+    def clear(self) -> None:
+        self._positions.clear()
+        self._conv.clear()
+        self._recurrent.clear()
 
 
 class GDNRestoreStaging:
