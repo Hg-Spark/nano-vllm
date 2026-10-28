@@ -36,6 +36,10 @@ def load_model(model: nn.Module, path: str) -> None:
     for name, (target, _, _) in packed_shards.items():
         required_shards.setdefault(target, set()).add(name)
     seen_shards: set[str] = set()
+    seen_unpacked_names: set[str] = set()
+    aliases_by_canonical: dict[str, set[str]] = {}
+    for alias, canonical in aliases.items():
+        aliases_by_canonical.setdefault(canonical, set()).add(alias)
     index_path = os.path.join(path, "model.safetensors.index.json")
     if os.path.isfile(index_path):
         with open(index_path, encoding="utf-8") as index_file:
@@ -81,21 +85,23 @@ def load_model(model: nn.Module, path: str) -> None:
                     if required_shards[canonical_name].issubset(seen_shards):
                         loaded.add(canonical_name)
                 elif canonical_name in loaded:
-                    if weight_name.endswith(".mlp.experts.gate_up_proj"):
-                        split = loaded_weight.size(1) // 2
-                        equal = torch.equal(
-                            param[:, :split], loaded_weight[:, split:].to(param)
-                        ) and torch.equal(param[:, split:], loaded_weight[:, :split].to(param))
-                    else:
-                        equal = torch.equal(param.detach(), loaded_weight.to(param))
-                    if not equal:
+                    if (
+                        weight_name in seen_unpacked_names
+                        or len(aliases_by_canonical.get(canonical_name, ())) <= 1
+                    ):
+                        raise ValueError(
+                            f"duplicate non-shared checkpoint weight: {checkpoint_name!r}"
+                        )
+                    if not torch.equal(param.detach(), loaded_weight.to(param)):
                         raise ValueError(
                             "conflicting checkpoint weights for shared parameter: "
                             f"{checkpoint_name!r} -> {canonical_name!r}"
                         )
+                    seen_unpacked_names.add(weight_name)
                 else:
                     model.copy_checkpoint_weight(weight_name, param.data, loaded_weight)
                     loaded.add(canonical_name)
+                    seen_unpacked_names.add(weight_name)
 
     missing = sorted(set(expected) - loaded)
     if missing:

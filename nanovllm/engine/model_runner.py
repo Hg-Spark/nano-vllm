@@ -1,5 +1,4 @@
 import logging
-from dataclasses import replace
 
 import torch
 from torch.profiler import record_function
@@ -8,7 +7,6 @@ from nanovllm.config import Config
 from nanovllm.engine.batch_common import (
     DecodePageTableCache,
     PinnedMetadataPool,
-    PreparedBatch,
     build_decode_batch_layout,
     prepare_decode,
     prepare_prefill,
@@ -22,11 +20,11 @@ from nanovllm.engine.decode_graph import FLASHINFER_GRAPH_WORKSPACE_BYTES, Decod
 from nanovllm.engine.schedule import BatchResult, ScheduledChunk
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.state_manager import GDNStateSnapshot
-from nanovllm.layers.attention import flashinfer_attention_spec
+from nanovllm.layers.attention import flashinfer_attention_spec, plan_flashinfer_attention
 from nanovllm.layers.sampler import Sampler
 from nanovllm.models.qwen3_5 import Qwen3_5ForCausalLM
 from nanovllm.models.qwen3_5_moe import initialize_moe_runtime
-from nanovllm.utils.context import Context, use_context
+from nanovllm.utils.context import use_context
 from nanovllm.utils.loader import load_model
 
 logger = logging.getLogger(__name__)
@@ -56,7 +54,12 @@ class ModelRunner:
         try:
             if torch.cuda.get_device_capability()[0] not in (9, 10, 12):
                 raise RuntimeError("FlashInfer GDN requires SM90/SM100/SM120")
-            with torch.device("cuda"):
+            from transformers.initialization import no_init_weights
+
+            # Every registered parameter is replaced by load_model(), which
+            # rejects missing weights. Avoid initializing large GPU parameter
+            # tensors only to overwrite them immediately from the checkpoint.
+            with no_init_weights(), torch.device("cuda"):
                 self.model = Qwen3_5ForCausalLM(
                     config.root_config,
                     load_vision=config.max_visual_tokens_per_request != 0,
@@ -150,53 +153,6 @@ class ModelRunner:
             torch.cuda.synchronize()
         self._release_cuda_resources()
 
-    def _plan_attention(self, batch: PreparedBatch) -> Context:
-        context = batch.context
-        layout = batch.layout
-        suffix = "prefill" if context.is_prefill else "decode"
-        kv_indptr = self.metadata_pool.host_view(f"{suffix}_kv_indptr", len(layout.paged_kv_indptr))
-        last_page_len = self.metadata_pool.host_view(
-            f"{suffix}_page_len", len(layout.paged_kv_last_page_len)
-        )
-        num_qo_heads, num_kv_heads, head_dim, common = self.attention_spec
-        if context.is_prefill:
-            self.prefill_wrapper.plan(
-                self.metadata_pool.host_view("prefill_q_offsets", len(layout.q_offsets)),
-                kv_indptr,
-                context.paged_kv_indices,
-                last_page_len,
-                num_qo_heads,
-                num_kv_heads,
-                head_dim,
-                self.block_size,
-                causal=True,
-                **common,
-            )
-            wrapper = self.prefill_wrapper
-        else:
-            self.decode_wrapper.plan(
-                kv_indptr,
-                context.paged_kv_indices,
-                last_page_len,
-                num_qo_heads,
-                num_kv_heads,
-                head_dim,
-                self.block_size,
-                **common,
-            )
-            wrapper = self.decode_wrapper
-        self.metadata_pool.record_plan_transfer()
-        # Eager FlashInfer 0.7.0 owns the device copies of this metadata.
-        # Share those buffers with KV append and GDN instead of uploading a
-        # duplicate Context copy before plan(). Graph buckets are separate.
-        return replace(
-            context,
-            attention_wrapper=wrapper,
-            qo_indptr=wrapper._qo_indptr_buf if context.is_prefill else None,
-            paged_kv_indptr=wrapper._paged_kv_indptr_buf,
-            paged_kv_last_page_len=wrapper._paged_kv_last_page_len_buf,
-        )
-
     def _ensure_visual_features(self, seq: Sequence) -> torch.Tensor:
         state = seq.image_state
         if state is None:
@@ -211,6 +167,7 @@ class ModelRunner:
                 dtype=self.model.model.embed_tokens.weight.dtype
             )
             state.pixel_values = None
+            state.image_grid_thw = None
         return state.visual_features
 
     def _sample_logits(
@@ -226,12 +183,16 @@ class ModelRunner:
             token_ids = logits.argmax(dim=-1).tolist()
         else:
             values = [seqs[idx].temperature for idx in sample_indices]
-            temperatures = self.metadata_pool.to_cuda("sample_temperatures", values, "float32")
             positions = [index for index, value in enumerate(values) if value > 1e-10]
+            with self.metadata_pool.batch() as upload:
+                temperatures = upload("sample_temperatures", values, "float32")
+                sampled_indices = (
+                    upload("sample_positions", positions, "int64")
+                    if len(positions) < len(values)
+                    else None
+                )
             token_ids = self.sampler(
-                logits,
-                temperatures,
-                sample_positions=positions if len(positions) < len(values) else None,
+                logits, temperatures, sample_positions=sampled_indices
             ).tolist()
         for idx, token_id in zip(sample_indices, token_ids):
             results[idx] = token_id
@@ -241,20 +202,22 @@ class ModelRunner:
         self,
         chunks: tuple[ScheduledChunk, ...],
         seqs: list[Sequence],
+        layout=None,
     ) -> BatchResult | None:
         bucket = self.decode_graph_buckets.get(len(chunks))
         if bucket is None:
             self.decode_graph_fallbacks["missing_bucket"] += 1
             return None
-        layout = build_decode_batch_layout(
-            chunks, self.block_size, getattr(self, "decode_page_table_cache", None)
-        )
+        if layout is None:
+            layout = build_decode_batch_layout(
+                chunks, self.block_size, getattr(self, "decode_page_table_cache", None)
+            )
         if not bucket.can_run(layout):
             self.decode_graph_fallbacks["layout_exceeded"] += 1
             return None
         bucket.prepare(layout)
         logits = bucket.replay()
-        return BatchResult(self._sample_logits(logits, seqs, list(range(len(chunks)))), {})
+        return BatchResult(self._sample_logits(logits, seqs, list(range(len(chunks)))))
 
     @torch.inference_mode()
     def run(
@@ -265,21 +228,40 @@ class ModelRunner:
         seqs = [chunk.seq for chunk in chunks]
         if not is_prefill and any(seq.pending_state_snapshot is not None for seq in seqs):
             raise RuntimeError("pending GDN prefix restore is valid only for prefill")
-        restore_pending_states(self.model, seqs, self.gdn_restore_staging)
-
-        if not is_prefill:
-            graph_result = self._run_decode_graph(chunks, seqs)
+        decode_layout = None
+        if is_prefill:
+            restore_pending_states(self.model, seqs, self.gdn_restore_staging)
+        elif self.decode_graph_buckets:
+            if len(chunks) in self.decode_graph_buckets:
+                decode_layout = build_decode_batch_layout(
+                    chunks, self.block_size, self.decode_page_table_cache
+                )
+            graph_result = self._run_decode_graph(chunks, seqs, decode_layout)
             if graph_result is not None:
                 return graph_result
+        else:
+            # Preserve benchmark accounting for deliberately disabled CUDA Graph.
+            self.decode_graph_fallbacks["missing_bucket"] += 1
 
         batch = (
             prepare_prefill(chunks, self.block_size, self.metadata_pool)
             if is_prefill
             else prepare_decode(
-                chunks, self.block_size, self.metadata_pool, self.decode_page_table_cache
+                chunks,
+                self.block_size,
+                self.metadata_pool,
+                self.decode_page_table_cache,
+                layout=decode_layout,
             )
         )
-        context = self._plan_attention(batch)
+        context = plan_flashinfer_attention(
+            batch,
+            self.metadata_pool,
+            self.prefill_wrapper,
+            self.decode_wrapper,
+            self.attention_spec,
+            self.block_size,
+        )
         profile_range = "nanovllm::prefill_model" if is_prefill else "nanovllm::decode_model"
 
         with use_context(context):
@@ -303,48 +285,61 @@ class ModelRunner:
                 else list(range(len(chunks)))
             )
             if sample_indices:
-                logits = self.model.compute_logits(
-                    hidden_states, None if len(sample_indices) == len(chunks) else sample_indices
-                )
+                if is_prefill:
+                    # Reuse the pinned metadata pool instead of creating a
+                    # fresh CUDA tensor from a Python list on each prefill.
+                    last_indices = [
+                        batch.layout.q_offsets[index + 1] - 1 for index in sample_indices
+                    ]
+                    indices = self.metadata_pool.to_cuda(
+                        "logit_token_indices", last_indices, "int64"
+                    )
+                    logits = self.model.compute_logits(hidden_states, token_indices=indices)
+                else:
+                    logits = self.model.compute_logits(hidden_states)
                 results = self._sample_logits(logits, seqs, sample_indices)
             else:
                 results = [None for _ in seqs]
 
-        prefix_snapshots: dict[int, tuple[GDNStateSnapshot, ...]] = {}
-        if is_prefill:
-            state_modules = self.model.state_cache_modules()
-            captured = [
-                (
-                    chunk.seq.seq_id,
-                    position,
-                    tuple(
-                        module.slot(chunk.seq.state_slot)
-                        if position == chunk.end
-                        else module.checkpoint_state_slot(chunk.seq.state_slot, position)
-                        for module in state_modules
-                    ),
+        return BatchResult(results)
+
+    @torch.inference_mode()
+    def capture_live_states(
+        self, candidates: list[tuple[Sequence, int]]
+    ) -> dict[int, GDNStateSnapshot]:
+        """Capture one live GDN state per request before its slot is released."""
+        modules = self.model.state_cache_modules()
+        if not candidates:
+            return {}
+        states = [
+            (seq.seq_id, position, tuple(module.slot(seq.state_slot) for module in modules))
+            for seq, position in candidates
+        ]
+        # One D2H copy per tensor family, avoiding per-layer synchronizations.
+        conv_cpu = torch.stack([conv for _, _, layers in states for conv, _ in layers]).cpu()
+        recurrent_cpu = torch.stack(
+            [recurrent for _, _, layers in states for _, recurrent in layers]
+        ).cpu()
+        layer_count = len(modules)
+        snapshots = {}
+        for index, (seq_id, position, _) in enumerate(states):
+            offset = index * layer_count
+            seq = candidates[index][0]
+            prompt_boundary = ((seq.num_prompt_tokens - 1) // self.block_size) * self.block_size
+            previous = (
+                seq.prompt_snapshot if position == prompt_boundary else seq.completion_snapshot
+            )
+            if previous is not None and len(previous.layers) == layer_count:
+                # Roll completion state in its private CPU tensors. Never
+                # mutate the immutable prompt state or a published entry.
+                for j, (conv, recurrent) in enumerate(previous.layers):
+                    conv.copy_(conv_cpu[offset + j])
+                    recurrent.copy_(recurrent_cpu[offset + j])
+                layers = previous.layers
+            else:
+                layers = tuple(
+                    (conv_cpu[offset + j].clone(), recurrent_cpu[offset + j].clone())
+                    for j in range(layer_count)
                 )
-                for chunk in chunks
-                for position in chunk.checkpoint_positions
-            ]
-            if captured:
-                # Collect all layers and boundaries in two contiguous D2H transfers.
-                conv_cpu = torch.stack(
-                    [conv for _, _, layers in captured for conv, _ in layers]
-                ).cpu()
-                recurrent_cpu = torch.stack(
-                    [state for _, _, layers in captured for _, state in layers]
-                ).cpu()
-                num_layers = len(state_modules)
-                collected: dict[int, list[GDNStateSnapshot]] = {}
-                for index, (seq_id, position, _) in enumerate(captured):
-                    offset = index * num_layers
-                    layers = tuple(
-                        (conv_cpu[offset + i].clone(), recurrent_cpu[offset + i].clone())
-                        for i in range(num_layers)
-                    )
-                    collected.setdefault(seq_id, []).append(GDNStateSnapshot(position, layers))
-                prefix_snapshots = {
-                    seq_id: tuple(snapshots) for seq_id, snapshots in collected.items()
-                }
-        return BatchResult(results, prefix_snapshots)
+            snapshots[seq_id] = GDNStateSnapshot(position, layers)
+        return snapshots

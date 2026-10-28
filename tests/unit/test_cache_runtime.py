@@ -42,6 +42,11 @@ class CacheRuntimeTest(unittest.TestCase):
         layer = SimpleNamespace(k_cache=None, v_cache=None)
         state = SimpleNamespace(
             state_cache_nbytes=lambda slots: 128,
+            # 64B recurrent + 64B convolution history per live slot.
+            num_v_heads=1,
+            head_k_dim=4,
+            head_v_dim=4,
+            recurrent_state=torch.empty(0, dtype=torch.float32),
             allocate_state_cache=Mock(),
         )
         model = SimpleNamespace(
@@ -84,7 +89,7 @@ class CacheRuntimeTest(unittest.TestCase):
         allocation.assert_called_once_with(2, 1, 3, 16, 1, 8, device="cuda", dtype=torch.float16)
         state.allocate_state_cache.assert_called_once_with(2)
 
-        # Checkpoint captures reserve both live and intermediate GDN snapshots.
+        # Final-state snapshot stacking reserves temporary GPU memory only.
         config.max_prefix_cache_entries = 2
         config.max_num_batched_tokens = 64
         with (
@@ -98,8 +103,8 @@ class CacheRuntimeTest(unittest.TestCase):
             ) as allocation,
         ):
             _, num_blocks = allocate_runtime_caches(model, config)
-        self.assertEqual(num_blocks, 3)
-        self.assertEqual(allocation.call_args.args[2], 3)
+        self.assertEqual(num_blocks, 4)
+        self.assertEqual(allocation.call_args.args[2], 4)
 
         # Graph memory is deducted from KV capacity before graph capture.
         config.max_prefix_cache_entries = 0

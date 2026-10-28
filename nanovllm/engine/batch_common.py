@@ -71,15 +71,18 @@ class DecodePageTableCache:
         self._indices = ()
 
     def get(self, seqs: list[Sequence], kv_lens: list[int], block_size: int):
-        key = (block_size, tuple(
-            (
-                seq.seq_id,
-                seq.block_table_version,
-                len(seq.block_table),
-                (kv_len + block_size - 1) // block_size,
-            )
-            for seq, kv_len in zip(seqs, kv_lens)
-        ))
+        key = (
+            block_size,
+            tuple(
+                (
+                    seq.seq_id,
+                    seq.block_table_version,
+                    len(seq.block_table),
+                    (kv_len + block_size - 1) // block_size,
+                )
+                for seq, kv_len in zip(seqs, kv_lens)
+            ),
+        )
         if key != self._key:
             indptr, indices, _ = _paged_kv_metadata(seqs, kv_lens, block_size)
             self._key = key
@@ -217,6 +220,8 @@ class PinnedMetadataPool:
         # FlashInfer's plan may enqueue additional copies from pinned host metadata.
         import torch
 
+        if self._transfer_done is None:
+            self._transfer_done = torch.cuda.Event()
         self._transfer_done.record(torch.cuda.current_stream())
         self._pending = True
 
@@ -312,8 +317,8 @@ def build_decode_batch_layout(
         )
         page_table_key = None
     else:
-        paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len, page_table_key = (
-            page_cache.get(seqs, kv_lens, block_size)
+        paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len, page_table_key = page_cache.get(
+            seqs, kv_lens, block_size
         )
     return DecodeBatchLayout(
         input_ids=tuple(seq[-1] for seq in seqs),
@@ -335,26 +340,11 @@ def prepare_prefill(
 ) -> PreparedBatch:
     layout = build_prefill_batch_layout(chunks, block_size)
     with host_pool.batch() as upload:
-        checkpoint_interval = next(
-            (chunk.checkpoint_interval for chunk in chunks if chunk.checkpoint_interval), 0
-        )
-        checkpoint_offsets = [0]
-        for chunk in chunks:
-            count = chunk.num_tokens // checkpoint_interval if checkpoint_interval else 0
-            checkpoint_offsets.append(checkpoint_offsets[-1] + count)
         host_pool.stage_host("prefill_q_offsets", layout.q_offsets, "int32")
         host_pool.stage_host("prefill_kv_indptr", layout.paged_kv_indptr, "int32")
         host_pool.stage_host("prefill_page_len", layout.paged_kv_last_page_len, "int32")
         context = Context(
             is_prefill=True,
-            prefill_checkpoint_interval=checkpoint_interval,
-            prefill_checkpoint_positions=tuple(chunk.checkpoint_positions for chunk in chunks),
-            prefill_checkpoint_offsets=tuple(checkpoint_offsets),
-            checkpoint_cu_starts=(
-                upload("gdn_checkpoint_offsets", checkpoint_offsets, "int64")
-                if checkpoint_interval
-                else None
-            ),
             kv_batch_indices=upload("prefill_kv_batch_indices", layout.kv_batch_indices, "int32"),
             kv_positions=upload("prefill_kv_positions", layout.kv_positions, "int32"),
             # FlashInfer.plan owns the GPU copies of offsets/indptr/page len.
@@ -378,8 +368,10 @@ def prepare_decode(
     block_size: int,
     host_pool: PinnedMetadataPool,
     page_cache: DecodePageTableCache | None = None,
+    layout: DecodeBatchLayout | None = None,
 ) -> PreparedBatch:
-    layout = build_decode_batch_layout(chunks, block_size, page_cache)
+    if layout is None:
+        layout = build_decode_batch_layout(chunks, block_size, page_cache)
     with host_pool.batch() as upload:
         host_pool.stage_host("decode_kv_indptr", layout.paged_kv_indptr, "int32")
         host_pool.stage_host("decode_page_len", layout.paged_kv_last_page_len, "int32")

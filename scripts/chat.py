@@ -6,6 +6,7 @@ from scripts._common import (
     add_model_argument,
     normalize_paths,
     validate_finite,
+    validate_gpu_utilization,
     validate_positive,
 )
 
@@ -23,9 +24,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--decode-graph", action="store_true")
     args = parser.parse_args(argv)
-    validate_positive(parser, args, "max_new_tokens")
+    validate_positive(parser, args, "max_new_tokens", "max_model_len", "max_num_batched_tokens")
+    validate_gpu_utilization(parser, args)
     validate_finite(parser, args.temperature, "temperature")
-    if args.max_new_tokens >= args.max_model_len:
+    if args.max_new_tokens > args.max_model_len:
         parser.error("--max-new-tokens must leave room for the chat prompt")
     if not args.model:
         parser.error("model path required: pass model or set NANOVLLM_MODEL")

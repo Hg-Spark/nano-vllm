@@ -14,9 +14,11 @@ import argparse
 from scripts._common import (
     ValidationFailure,
     add_hf_experts_backend_argument,
+    add_kv_cache_arguments,
     add_model_argument,
     add_result_argument,
     execute,
+    kv_cache_kwargs,
     normalize_paths,
     run_hf_reference,
     validate_finite,
@@ -72,6 +74,7 @@ class _LayerCapture:
         self.current = {}
         self.handles = []
         self.nano = nano
+        self._fused_norm_restore = None
 
         def embed_hook(_module, _inputs, output):
             self.current = {"embedding": _snapshot_last(output)}
@@ -96,14 +99,36 @@ class _LayerCapture:
         self.handles.append(text_model.embed_tokens.register_forward_hook(embed_hook))
         for index, layer in enumerate(text_model.layers):
             self.handles.append(layer.register_forward_hook(layer_hook(index)))
-        self.handles.append(text_model.norm.register_forward_hook(final_hook))
+        if nano:
+            # The runtime calls forward_with_residual() directly, bypassing
+            # nn.Module.__call__ and ordinary forward hooks.
+            norm = text_model.norm
+            had_override = "forward_with_residual" in vars(norm)
+            original = norm.forward_with_residual
+
+            def capture_fused_norm(hidden_states, residual):
+                output = original(hidden_states, residual)
+                self.current["norm"] = _snapshot_last(output)
+                return output
+
+            norm.forward_with_residual = capture_fused_norm
+            self._fused_norm_restore = (norm, original if had_override else None)
+        else:
+            self.handles.append(text_model.norm.register_forward_hook(final_hook))
 
     def close(self):
+        if self._fused_norm_restore is not None:
+            norm, original = self._fused_norm_restore
+            if original is None:
+                del norm.forward_with_residual
+            else:
+                norm.forward_with_residual = original
+            self._fused_norm_restore = None
         for handle in self.handles:
             handle.remove()
 
     def snapshot(self):
-        expected = len(self.handles)
+        expected = len(self.handles) + int(self.nano)
         if len(self.current) != expected:
             raise RuntimeError(
                 f"layer trace incomplete: captured {len(self.current)} of {expected} sites"
@@ -118,13 +143,19 @@ def _hf_states(cache, text_model):
     for index, layer in enumerate(text_model.layers):
         if getattr(layer, "block_type", None) != "linear_attention":
             continue
-        conv = cache.get_conv_state(index, state_idx=0)
-        recurrent = cache.get_recurrent_state(index, state_idx=0)
+        # Transformers 5.19 keeps GDN states in the per-layer cache.
+        cache_layer = cache.layers[index]
+        conv = cache_layer.conv_states[0]
+        recurrent = cache_layer.recurrent_states[0]
         if conv is None or recurrent is None:
             raise RuntimeError(f"HF GDN state missing at layer {index}")
-        # HF: [batch, channels, history] and [batch, heads, K, V].
-        # Nano: [channels, history] and [heads, V, K].
-        states[f"gdn.{index}.conv"] = conv[0].detach().float().cpu().clone()
+        # HF holds K convolution positions while Nano stores K-1 history
+        # positions and receives the current input separately.
+        history = layer.linear_attn.conv_kernel_size - 1
+        if conv.shape[-1] < history:
+            raise RuntimeError(f"HF GDN convolution history too short at layer {index}")
+        states[f"gdn.{index}.conv"] = conv[0, :, -history:].detach().float().cpu().clone()
+        # HF recurrent [H,K,V] maps to Nano [H,V,K].
         states[f"gdn.{index}.recurrent"] = (
             recurrent[0].transpose(-1, -2).detach().float().cpu().clone()
         )
@@ -177,7 +208,7 @@ def trace_hf(model_path, prompt_ids, steps, experts_backend, trace_states):
     return run_hf_reference(AutoModelForCausalLM, model_path, experts_backend, evaluate)
 
 
-def trace_nano(model_path, prompt_ids, forced_tokens, max_model_len, trace_states):
+def trace_nano(model_path, prompt_ids, forced_tokens, max_model_len, trace_states, kv_options):
     from nanovllm import LLM, SamplingParams
 
     # A single full prompt prefill, no prefix reuse, and eager decode ensure
@@ -185,6 +216,7 @@ def trace_nano(model_path, prompt_ids, forced_tokens, max_model_len, trace_state
     llm = LLM(
         model_path,
         max_model_len=max_model_len,
+        **kv_options,
         max_num_seqs=1,
         max_num_batched_tokens=max(len(prompt_ids), 16),
         max_prefix_cache_entries=0,
@@ -292,6 +324,7 @@ def compare_traces(hf_tokens, hf_traces, nano_traces, threshold, top_k):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     add_model_argument(parser, required=True)
+    add_kv_cache_arguments(parser)
     add_hf_experts_backend_argument(parser)
     parser.add_argument(
         "--prompt", default="Explain why KV cache is useful in autoregressive inference."
@@ -342,9 +375,9 @@ def run(args):
         args.model,
         prompt_ids,
         hf_tokens,
-        args.dtype,
         args.max_model_len,
         args.trace_gdn_states,
+        kv_cache_kwargs(args),
     )
     result = compare_traces(hf_tokens, hf, nano, args.relative_rmse_threshold, args.top_k)
     result.update(

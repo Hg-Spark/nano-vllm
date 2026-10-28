@@ -63,18 +63,17 @@ python -c 'import torch, flashinfer, transformers; print("PyTorch:", torch.__ver
 
 ```bash
 export NANOVLLM_MODEL=/absolute/path/to/Qwen3.5-MoE
-export NANOVLLM_DTYPE=bfloat16
 python example.py
 ```
 
-[example.py](../example.py)读取两个环境变量 `NANOVLLM_MODEL`、`NANOVLLM_DTYPE` 并应用聊天模板。`Config` 会对模型路径调用 `expanduser()`，因此可以使用 `~` 表示用户主目录。
+[example.py](../example.py)仅读取环境变量 `NANOVLLM_MODEL` 并应用聊天模板。`Config` 会对模型路径调用 `expanduser()`，因此可以使用 `~` 表示用户主目录。
 
 ## 用中文对话提示运行
 
 单卡 WSL 示例（BF16、Eager）：
 
 ```bash
-python -m scripts.chat "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
+python -m scripts.chat "$NANOVLLM_MODEL" \
   --max-model-len 512 --max-num-batched-tokens 128 \
   --gpu-memory-utilization 0.9 --max-new-tokens 64 --temperature 0
 ```
@@ -84,7 +83,7 @@ python -m scripts.chat "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
 交互式多轮对话：
 
 ```bash
-python -m scripts.chat "$NANOVLLM_MODEL" --dtype "$NANOVLLM_DTYPE" \
+python -m scripts.chat "$NANOVLLM_MODEL" \
   --system "你是一个简洁、准确的中文助手。" \
   --max-new-tokens 256 --temperature 0.7
 ```
@@ -113,7 +112,6 @@ prompt = tokenizer.apply_chat_template(
 
 llm = LLM(
     model_path,
-    dtype=os.environ["NANOVLLM_DTYPE"],
     max_model_len=4096,
     max_num_seqs=2,
     max_num_batched_tokens=256,
@@ -136,7 +134,7 @@ finally:
 
 `exit()` 当前负责同步 CUDA，并让引擎的退出处理只执行一次；它不承诺立即释放所有仍被 Python 对象引用的模型张量。
 
-模型的 `dtype` 是**必填参数**，仅允许 `"bfloat16"`。不从检查点推断，不支持模型 dtype 为 `"auto"`。这与 KV 存储参数 `kv_cache_dtype="auto"` 不同：后者表示 KV 采用当前模型计算精度。
+模型计算精度内部固定为 BF16，无需传入 `dtype`；`kv_cache_dtype="auto"` 表示 KV 使用 BF16，`"fp8_e4m3"` 则将 Full Attention 的 KV Cache 存储为 FP8 E4M3。
 
 ## 参数怎样影响执行
 
@@ -150,9 +148,9 @@ finally:
 | `max_model_len` | `4096` | 单请求实际前向处理的 Token 上限（输入 + 最多生成 Token 数 - 1），还会被模型位置上限截断 |
 | `gpu_memory_utilization` | `0.8` | KV 容量估算使用的显存预算比例，范围 `(0,1]`；不是权重加载的硬上限 |
 | `activation_reserve_bytes` | `268435456` | 在静态 KV 定容前额外预留 256 MiB 临时激活余量；可按 GPU 峰值 Profile 调整 |
-| `kv_cache_block_size` | `16` | FlashInfer page size；当前允许 `16/32/64/128`，基线使用 16 |
+| `kv_cache_block_size` | `16` | FlashInfer page size；当前允许 `16/32/64`，基线使用 16；128-token KV 页不再支持 |
 | `max_prefix_cache_entries` | `0` | 联合前缀缓存默认关闭；设为正数后限制缓存条目数，不影响请求自身的 KV/GDN 状态 |
-| `max_prefix_cache_snapshot_bytes` | `None` | CPU GDN 快照字节上限；`0` 禁止发布快照 |
+| `max_prefix_cache_snapshot_bytes` | `None` | 全局已发布 CPU GDN Snapshot 字节上限；活跃请求另最多持有两份独立暂存，`0` 禁止捕获/发布 |
 | `max_visual_tokens_per_request` | `0` | 显式限制单请求图像视觉 Token 数；准入时检查，并按上限预留特征缓存。`None` 使用 `max_model_len`，`0` 禁用图像请求 |
 | `kv_cache_dtype` | `"auto"` | `auto` 跟随模型 dtype；`fp8_e4m3` 使用 FP8 KV 存储 |
 | `kv_cache_k_scale` | `1.0` | FP8 K 的全局标量缩放系数，必须有限且大于零 |
