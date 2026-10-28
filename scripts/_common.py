@@ -22,15 +22,6 @@ def add_model_argument(parser: argparse.ArgumentParser, *, required: bool = Fals
         )
 
 
-def add_dtype_argument(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--dtype",
-        choices=("float16", "bfloat16"),
-        required=True,
-        help="model compute dtype (must be selected explicitly)",
-    )
-
-
 def add_hf_experts_backend_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--hf-experts-backend",
@@ -54,7 +45,7 @@ def release_hf_memory() -> None:
     torch.cuda.empty_cache()
 
 
-def run_hf_reference(model_cls, model_path, dtype, experts_backend, evaluate):
+def run_hf_reference(model_cls, model_path, experts_backend, evaluate):
     """Run a reference probe and release HF GPU allocations before the next engine."""
     import torch
 
@@ -62,7 +53,7 @@ def run_hf_reference(model_cls, model_path, dtype, experts_backend, evaluate):
     try:
         model = (
             model_cls.from_pretrained(
-                model_path, dtype=getattr(torch, dtype), **hf_model_options(experts_backend)
+                model_path, dtype=torch.bfloat16, **hf_model_options(experts_backend)
             )
             .cuda()
             .eval()
