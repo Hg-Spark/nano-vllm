@@ -1,32 +1,51 @@
 import os
-from nanovllm import LLM, SamplingParams
+
 from transformers import AutoTokenizer
+
+from nanovllm import LLM, SamplingParams
 
 
 def main():
-    path = os.path.expanduser("~/huggingface/Qwen3-0.6B/")
+    model = os.environ.get("NANOVLLM_MODEL")
+    if not model:
+        raise SystemExit("Set NANOVLLM_MODEL to a Qwen3.5 Dense or MoE checkpoint directory")
+    dtype = os.environ.get("NANOVLLM_DTYPE")
+    if dtype not in ("float16", "bfloat16"):
+        raise SystemExit("Set NANOVLLM_DTYPE to float16 or bfloat16")
+    path = os.path.expanduser(model)
     tokenizer = AutoTokenizer.from_pretrained(path)
-    llm = LLM(path, enforce_eager=True, tensor_parallel_size=1)
 
-    sampling_params = SamplingParams(temperature=0.6, max_tokens=256)
+    llm = LLM(
+        path,
+        dtype=dtype,
+        max_num_batched_tokens=256,
+        max_num_seqs=2,
+    )
     prompts = [
-        "introduce yourself",
-        "list all prime numbers within 100",
+        "Explain why KV cache helps autoregressive inference.",
+        "What makes a sparse MoE layer different from a dense FFN?",
     ]
     prompts = [
         tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
-            tokenize=False,
+            tokenize=True,
             add_generation_prompt=True,
+            return_dict=False,
         )
         for prompt in prompts
     ]
-    outputs = llm.generate(prompts, sampling_params)
 
-    for prompt, output in zip(prompts, outputs):
-        print("\n")
-        print(f"Prompt: {prompt!r}")
-        print(f"Completion: {output['text']!r}")
+    outputs = llm.generate(
+        prompts,
+        SamplingParams(
+            temperature=0.0,
+            max_tokens=64,
+        ),
+    )
+    for output in outputs:
+        print(output["text"])
+
+    llm.exit()
 
 
 if __name__ == "__main__":
